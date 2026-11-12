@@ -359,6 +359,23 @@ class TestSpawn(SpawnBase):
         self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
         self.assertEqual(len(self.argv_of("agent", "send-keys")), 1)
 
+    def test_spawn_waits_for_the_first_turn_to_start(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        self.fake(spawn_ok())
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
+        prompt = self.argv_of("agent", "prompt")[0]
+        self.assertEqual(prompt[4:], ["--wait", "--until", "working", "--until", "blocked", "--timeout", "20000"])
+
+    def test_spawn_survives_a_stalled_first_prompt(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        s = spawn_ok()
+        s["agent prompt"] = [E("agent_prompt_stalled")]
+        self.fake(s)
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
+        self.assertIn("fix-a-w1", self.children())
+
     def test_spawn_refuses_trust_dialog_outside_known_repo(self):
         self.job("fix-a", "working")
         other = self.git_repo("stranger")

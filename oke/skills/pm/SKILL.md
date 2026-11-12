@@ -99,7 +99,7 @@ When a wait finishes, act on its first line:
 | `idle_no_report`, `bad_report` | Once: prompt the child to re-read its assignment and write a proper report. Second time: report `failed` |
 | `gone` | Report `failed` with the agent name |
 
-To send a child a new instruction: edit its assignment (`이번 지시`, `seq` + 1), then `herdr agent prompt <child> "Assignment updated (seq <n>). Re-read it."`, then wait with the new seq.
+To send a child a new instruction: edit its assignment (`이번 지시`, `seq` + 1), then `herdr agent prompt <child> "Assignment updated (seq <n>). Re-read it." --wait --until working --until blocked --timeout 20000`, then wait with the new seq.
 
 **Review.** Write `~/.oke/jobs/<job>/<job>-rv/assignment.md` (role `reviewer`, same `cwd` as the worker, 이번 지시 = the diff range `<base branch>..oke/<job>`, or "uncommitted changes" without a worktree). `$OKE spawn <file> --split-from <worker pane>`. Wait for it.
 

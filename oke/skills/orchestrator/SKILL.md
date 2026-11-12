@@ -66,7 +66,7 @@ kind: plan | execute | merge | answer
 <details: for plan, the path of intake.md; for answer, the user's answer>
 ```
 
-- PM alive in `status.repos` (`pm: alive`): `herdr agent prompt <agent> "Assignment updated (seq <n>). Re-read it."`
+- PM alive in `status.repos` (`pm: alive`): `herdr agent prompt <agent> "Assignment updated (seq <n>). Re-read it." --wait --until working --until blocked --timeout 20000`
 - PM dead: find a pane for it. `herdr pane list`: if a pane has `cwd` equal to the repository root, use `--split-from <that pane>`. Otherwise `herdr workspace create --cwd <repo> --label <repo name> --no-focus` and use `--pane <.result.root_pane.pane_id>`. Then `$OKE spawn <pm_dir>/assignment.md --split-from <pane>` (or `--pane <pane>`).
 - If `spawn` exits 1, show its message to the user. If it reports a dialog, show the screen text.
 

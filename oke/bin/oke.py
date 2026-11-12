@@ -371,7 +371,14 @@ def cmd_spawn(args):
         herdr("agent", "send-keys", agent, "down", "enter")
         herdr("agent", "wait", agent, "--until", "idle", "--timeout", "30000")
 
-    herdr("agent", "prompt", agent, FIRST_PROMPT.format(role=role, path=path))
+    # Wait until the first turn starts: for a few seconds after a prompt herdr still
+    # says idle, and `oke wait` would read that as "idle with no report".
+    try:
+        herdr("agent", "prompt", agent, FIRST_PROMPT.format(role=role, path=path),
+              "--wait", "--until", "working", "--until", "blocked", "--timeout", "20000")
+    except HerdrError as e:
+        if e.code not in ("agent_prompt_stalled", "timeout"):
+            raise
     info = herdr("agent", "get", agent).get("agent", {})
     record = {"agent": agent, "pane": info.get("pane_id", pane), "session": session_of(info),
               "seq": header["seq"], "role": role, "job": header.get("job")}
