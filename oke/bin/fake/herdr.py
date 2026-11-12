@@ -38,8 +38,8 @@ def main():
         f.write(json.dumps(counters))
     responses = scenario[best]
     r = responses[min(n, len(responses) - 1)]
-    sys.stdout.write(r.get("stdout", ""))
-    sys.stderr.write(r.get("stderr", ""))
+    sys.stdout.buffer.write(r.get("stdout", "").encode("utf-8"))
+    sys.stderr.buffer.write(r.get("stderr", "").encode("utf-8"))
     return r.get("exit", 0)
 
 

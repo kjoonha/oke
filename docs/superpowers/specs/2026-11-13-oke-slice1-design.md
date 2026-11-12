@@ -74,7 +74,7 @@ docs/work-checklist.md      # 회사에서 확인할 목록
 - orchestrator: 사용자가 연 pane. `/oke:start` 로 시작.
 - PM: 대상 저장소의 master workspace 에 pane 1개. workspace 가 없으면 만든다.
 - worker / reviewer: `herdr worktree create` 가 만든 worktree workspace 에 pane 2개. 가벼운 작업은 master workspace 에 pane 을 나눠 쓴다.
-- agent 이름: PM 은 `pm-<저장소>`, worker 는 `<job>-w1`, reviewer 는 `<job>-rv`. job slug 는 24자로 자른다 (herdr 이름 제한 32자).
+- agent 이름: PM 은 `pm-<저장소>`, worker 는 `<job>-w1`, reviewer 는 `<job>-rv`. job slug 는 24자로 자른다 (herdr 이름 제한 32자). `<저장소>` 는 폴더 이름 (18자) 에 저장소 키의 해시 6자를 붙인 것이다. 이름이 같은 두 저장소, 한글 이름 저장소가 겹치지 않게 한다. `repos/`, `wiki/` 아래 폴더 이름도 같다.
 
 ## 실행 폴더
 
@@ -145,6 +145,7 @@ on: <waiting 일 때 기다리는 대상>
 ```
 
 - 완료 조건은 `seq` 가 보낸 지시의 `seq` 와 같은 것이다. 파일 수정 시각을 쓰지 않는다.
+- worker 는 배정 머리말이 `commit: yes` 일 때만 commit 한다 (worktree 가 있고 자율 수준이 `conservative` 가 아닐 때). 아니면 commit 하지 않고, reviewer 는 commit 안 된 변경을 리뷰하며, PM 이 merge 승인 뒤에 commit 한다. worktree 없이 한 commit 은 승인 전에 이미 main 에 들어가기 때문이다.
 - `waiting` 은 "정상적으로 쉬는 중" 을 뜻한다. 하위를 기다리는 PM, 백그라운드로 긴 명령 (sim) 을 돌려 놓은 worker 가 턴을 끝내기 전에 쓴다. `oke wait` 는 `waiting` 을 보면 끝내지 않고 계속 기다린다.
 - reviewer 의 `done` 은 본문 첫 줄에 `verdict: pass | changes` 를 둔다.
 
@@ -217,7 +218,7 @@ on: <waiting 일 때 기다리는 대상>
 
 - 이어 하기: `oke spawn`. 세션 id 가 있으면 `--resume`, 실패하면 새 세션. 옛 pane 은 닫고 새 pane 에서 띄운다 (강제 종료된 pane 은 터미널 상태가 깨져 다시 쓸 수 없다). 어느 쪽이든 배정 파일을 읽고 계속한다.
 - 보관: `archive/` 로 옮기고 `state.json` 에서 뺀다. worktree 와 branch 는 남기고 경로와 바뀐 파일 수를 알린다.
-- `state.json` 을 못 읽으면 `state.json.bad` 로 바꾸고 `jobs/` 목록으로 같은 질문을 한다.
+- `state.json` 을 못 읽으면 `state.json.bad` 로 바꾸고 `jobs/` 목록으로 같은 질문을 한다. 이름을 바꾸는 것은 `oke status` 뿐이다. 다른 명령은 오류로 끝난다.
 - `state.json` 의 orchestrator pane 에 다른 orchestrator 가 살아 있으면 시작을 거부하고 그 pane 을 알린다.
 
 ## 권한
@@ -243,7 +244,7 @@ on: <waiting 일 때 기다리는 대상>
 | main 으로 merge | 사용자 승인 | 사용자 승인 | 자율. 충돌만 올림 |
 | 권한 창 | 사용자 | 사용자 (드묾) | PM 이 job 범위 안이면 승인 |
 
-`blocked` 를 올리는 경로: PM 이 하위 agent 이름과 화면 글을 담아 `blocked` 를 보고하고 하위 대기를 다시 건다. orchestrator 가 팝업 (한 번 승인 / 거부 / 그 pane 으로 이동) 으로 묻고, 답에 맞는 키를 그 하위에 직접 보낸다.
+`blocked` 를 올리는 경로: PM 이 하위 agent 이름과 화면 글을 담아 `blocked` 를 보고하고 턴을 끝낸다 (대기를 다시 걸지 않는다. 창이 그대로라 대기가 바로 끝나 같은 보고가 반복된다). orchestrator 가 팝업 (한 번 승인 / 거부 / 그 pane 으로 이동) 으로 묻고, 답에 맞는 키를 그 하위에 직접 보낸 뒤 PM 에게 알린다. PM 은 보고를 `waiting` 으로 고쳐 쓰고 `oke wait --after-blocked` 로 다시 기다린다. 이 옵션은 상태가 한 번 바뀌기 전까지 `blocked` 를 다시 알리지 않는다.
 
 ## 오류 처리
 
@@ -263,7 +264,7 @@ on: <waiting 일 때 기다리는 대상>
 |---|---|
 | herdr 밖에서 시작 | 거부 |
 | 필요한 herdr 명령이 없음 | 없는 명령을 알리고 거부 |
-| 신뢰 창 | 화면 글이 알려진 문구와 맞고 폴더가 `state.json` 의 저장소나 그 worktree 일 때만 수락 |
+| 신뢰 창 | 화면 글이 알려진 문구와 맞고, 폴더가 `state.json` 의 저장소나 그 worktree 이고, pane 의 실제 폴더도 그 저장소일 때만 수락 |
 | 모르는 창이 시작을 막음 | `oke spawn` 실패, 화면 글과 함께 사용자 |
 | `done` 인데 검증 출력 없음 | PM 이 돌려보냄 |
 | 리뷰 왕복 3회 초과 | 지적 목록과 함께 사용자 |

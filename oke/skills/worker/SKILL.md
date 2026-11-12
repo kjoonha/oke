@@ -12,7 +12,7 @@ You write the code for one job. A PM agent started you; no person is watching th
 1. Read your assignment file (path in your first prompt). Header: `job`, `cwd`, `wiki`, `seq`. Your folder is the folder of that file. When a prompt says "Assignment updated", read it again: `이번 지시` and `seq` changed.
 2. Read `<wiki>/index.md` if it exists, and the pages that matter for this job.
 3. Do the work in `cwd`. Stay inside the assignment's 범위. Do not write outside `cwd`, except your own folder.
-4. Commit your work in `cwd` on the current branch, unless `autonomy` in `~/.oke/config.json` is `conservative` (then leave it uncommitted and say so in the report).
+4. If your assignment header says `commit: yes`, commit your work in `cwd` on the current branch. Otherwise leave it uncommitted and say so in the report; the PM commits it after the user approves.
 5. Run the assignment's 검증 명령 for real. Paste the command and the end of its output into the report.
 6. Write your report and end your turn.
 

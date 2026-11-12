@@ -105,7 +105,9 @@ class TestState(Base):
 
     def test_broken_state_is_set_aside(self):
         self.write("home/state.json", "{broken")
-        self.assertTrue(oke.load_state()["_recovered"])
+        with self.assertRaises(oke.StateError):
+            oke.load_state()
+        self.assertTrue(oke.load_state(recover=True)["_recovered"])
         self.assertTrue(os.path.exists(os.path.join(self.home, "state.json.bad")))
 
     def test_save_state_drops_recovered_flag(self):
@@ -151,8 +153,9 @@ class TestState(Base):
         info = json.loads(self.out)
         self.assertEqual(info["repo"], oke.repo_key(repo))
         self.assertTrue(info["job_dir"].endswith("/jobs/fix-a"))
-        self.assertTrue(info["pm_dir"].endswith("/repos/r/pm"))
-        self.assertEqual(info["pm_agent"], "pm-r")
+        self.assertRegex(info["pm_dir"], r"/repos/r-[0-9a-f]{6}/pm$")
+        self.assertRegex(info["pm_agent"], r"^pm-r-[0-9a-f]{6}$")
+        self.assertRegex(info["wiki"], r"/wiki/r-[0-9a-f]{6}$")
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 1)
         self.assertEqual(self.cli("job", "phase", "fix-a", "nonsense"), 1)
         self.assertEqual(self.cli("job", "phase", "nope", "planning"), 1)
@@ -270,8 +273,7 @@ class SpawnBase(Base):
         return self.write("asg/%s.md" % agent, "\n".join(lines) + "\n---\n## 목표\n")
 
     def children(self):
-        p = os.path.join(self.home, "repos", "toy", "pm", "children.json")
-        with io.open(p, encoding="utf-8") as f:
+        with io.open(oke.children_path(oke.repo_key(self.repo)), encoding="utf-8") as f:
             return json.load(f)
 
     def argv_of(self, *prefix):
@@ -341,6 +343,7 @@ class TestSpawn(SpawnBase):
         s["agent read"] = [{"stdout": " ❯ No, exit\n   Yes, I trust this folder\n", "exit": 0}]
         s["agent send-keys"] = [J({"type": "ok"})]
         s["agent wait"] = [AGENT()]
+        s["pane get"] = [PANE(self.repo)]
         self.fake(s)
         self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
         self.assertEqual(self.argv_of("agent", "send-keys"), [["agent", "send-keys", "fix-a-w1", "down", "enter"]])
@@ -355,6 +358,7 @@ class TestSpawn(SpawnBase):
                            {"stdout": "   Yes, I trust this folder\n", "exit": 0}]
         s["agent send-keys"] = [J({"type": "ok"})]
         s["agent wait"] = [AGENT()]
+        s["pane get"] = [PANE(self.repo)]
         self.fake(s)
         self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
         self.assertEqual(len(self.argv_of("agent", "send-keys")), 1)
@@ -574,7 +578,8 @@ class TestStatus(SpawnBase):
     def test_pm_found_by_name_after_pane_move(self):
         self.set_pm()
         st = self.status([AG(name="pm-toy", pane="w9:p1", session="other", cwd=self.repo)])
-        self.assertEqual(st["repos"][self.key], {"pm": "alive", "agent": "pm-toy", "pane": "w9:p1"})
+        repo = st["repos"][self.key]
+        self.assertEqual((repo["pm"], repo["agent"], repo["pane"]), ("alive", "pm-toy", "w9:p1"))
         self.assertEqual(self.pm_record()["pane"], "w9:p1")
 
     def test_status_fills_in_missing_session(self):
@@ -697,6 +702,152 @@ class TestCompactHook(SpawnBase):
         self.assertEqual(self.cli("compact-hook"), 0)
         self.assertEqual(self.out, "")
         self.assertTrue(os.path.exists(os.path.join(self.home, "state.json")))
+
+
+def PANE(cwd, pane="w1:p9"):
+    return J({"pane": {"pane_id": pane, "cwd": cwd}, "type": "pane_info"})
+
+
+def trust_scenario(pane_cwd):
+    s = spawn_ok()
+    s["agent start"] = [E("agent_not_ready")]
+    s["agent read"] = [{"stdout": "   Yes, I trust this folder\n", "exit": 0}]
+    s["agent send-keys"] = [J({"type": "ok"})]
+    s["agent wait"] = [AGENT()]
+    s["pane get"] = [PANE(pane_cwd)]
+    return s
+
+
+class TestReviewFixes(SpawnBase):
+    """One test per Important finding of the final review."""
+
+    # 1. trust dialog accepts too widely
+    def test_trust_refused_when_pane_is_not_in_the_repo(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        self.fake(trust_scenario(self.home))
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 1)
+        self.assertEqual(self.argv_of("agent", "send-keys"), [])
+
+    def test_pm_trust_refused_for_repo_without_a_job(self):
+        a = self.assignment("pm-toy", "pm")
+        self.fake(trust_scenario(self.repo))
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 1)
+        self.assertEqual(self.argv_of("agent", "send-keys"), [])
+
+    def test_pm_trust_accepted_for_repo_with_a_job(self):
+        self.job("fix-a", "planning")
+        a = self.assignment("pm-toy", "pm")
+        self.fake(trust_scenario(self.repo))
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
+        self.assertEqual(len(self.argv_of("agent", "send-keys")), 1)
+
+    # 2. only `status` may set a broken state.json aside
+    def test_other_commands_do_not_rename_broken_state(self):
+        self.write("home/state.json", "{broken")
+        self.assertEqual(self.cli("job", "phase", "x", "planning"), 1)
+        self.assertIn("state.json", self.err)
+        self.assertTrue(os.path.exists(os.path.join(self.home, "state.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.home, "state.json.bad")))
+
+    # 3. blocked loop
+    def test_after_blocked_ignores_the_dialog_until_status_changes(self):
+        self.fake({"agent get": [AGENT("blocked"), AGENT("blocked"), AGENT("working"), AGENT("blocked")],
+                   "agent read": [{"stdout": "Do you want to proceed?\n", "exit": 0}]})
+        out = oke.wait_loop("a", self.path("none.md"), 2, poll=0, max_polls=4, after_blocked=True)
+        self.assertEqual(out.splitlines()[0], "blocked")
+        self.assertEqual(len(self.argv_of("agent", "get")), 4)
+
+    def test_after_blocked_cli_flag(self):
+        self.write("report.md", "type: done\nseq: 2\n---\n")
+        self.fake({})
+        self.assertEqual(self.cli("wait", "a", "--report", self.path("report.md"), "--seq", "2", "--after-blocked"), 0)
+
+    # 4. folder and name collisions
+    def test_same_basename_repos_get_different_pm_folders(self):
+        one = self.git_repo("a/proj")
+        two = self.git_repo("b/proj")
+        k1, k2 = oke.repo_key(one), oke.repo_key(two)
+        self.assertNotEqual(oke.pm_dir(k1), oke.pm_dir(k2))
+        self.assertNotEqual(oke.repo_name(k1), oke.repo_name(k2))
+        self.assertTrue(oke.repo_name(k1).startswith("proj-"))
+
+    def test_non_ascii_repo_names_do_not_collide(self):
+        k1, k2 = oke.repo_key(self.git_repo("한글")), oke.repo_key(self.git_repo("회사"))
+        self.assertNotEqual(oke.repo_name(k1), oke.repo_name(k2))
+        self.assertTrue(oke.AGENT_NAME.match("pm-" + oke.repo_name(k1)))
+
+    def test_long_repo_name_still_gives_a_valid_agent_name(self):
+        k = oke.repo_key(self.git_repo("My.Very_Long.Repository_Name-With.Many.Parts"))
+        self.assertTrue(oke.AGENT_NAME.match("pm-" + oke.repo_name(k)))
+
+    # 5. stale report beside a new assignment
+    def test_spawn_removes_a_stale_report(self):
+        a = self.assignment("pm-toy", "pm")
+        stale = self.write("asg/report.md", "type: done\nseq: 1\n---\n")
+        self.fake(spawn_ok())
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
+        self.assertFalse(os.path.exists(stale))
+
+    # 6. stdout encoding
+    def test_cli_prints_non_ascii_screen_text_under_a_legacy_locale(self):
+        self.fake({"agent get": [AGENT("blocked")],
+                   "agent read": [{"stdout": u" ❯ 1. Yes 한글\n", "exit": 0}]})
+        env = dict(os.environ, PYTHONUTF8="0", PYTHONIOENCODING="ascii")
+        p = subprocess.Popen([sys.executable, os.path.join(HERE, "oke.py"), "wait", "a", "--report",
+                              self.path("none.md"), "--seq", "2", "--poll", "0"],
+                             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err = p.communicate()
+        self.assertEqual(p.returncode, 0, err)
+        self.assertIn(u"❯ 1. Yes 한글", out.decode("utf-8"))
+
+    # 7. orphan job directories
+    def test_archive_moves_an_orphan_job_dir(self):
+        os.makedirs(os.path.join(self.home, "jobs", "old-job"))
+        self.assertEqual(self.cli("job", "archive", "old-job"), 0)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "old-job")))
+        self.assertEqual(len(os.listdir(os.path.join(self.home, "archive"))), 1)
+
+    def test_archive_unknown_job_still_fails(self):
+        self.assertEqual(self.cli("job", "archive", "nope"), 1)
+
+    # 8. spawn leftovers
+    def test_failed_first_prompt_leaves_a_record_and_names_the_pane(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        s = spawn_ok()
+        s["agent prompt"] = [E("agent_blocked")]
+        self.fake(s)
+        self.assertEqual(self.cli("spawn", a, "--split-from", "w1:p1"), 1)
+        self.assertIn("w1:p9", self.err)
+        self.assertEqual(self.children()["fix-a-w1"]["pane"], "w1:p9")
+
+    def test_failed_start_names_the_split_pane(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        s = spawn_ok()
+        s["agent start"] = [E("timeout")]
+        self.fake(s)
+        self.assertEqual(self.cli("spawn", a, "--split-from", "w1:p1"), 1)
+        self.assertIn("w1:p9", self.err)
+
+    # 9. status gives the orchestrator what its skill needs
+    def test_status_prints_pm_dir_session_and_assignment_seq(self):
+        key = oke.repo_key(self.repo)
+        s = oke.load_state()
+        s["repos"][key] = {"pm": {"agent": "pm-toy", "pane": "w1:p3", "session": "s-pm", "seq": 1}}
+        oke.save_state(s)
+        os.makedirs(oke.pm_dir(key))
+        with io.open(os.path.join(oke.pm_dir(key), "assignment.md"), "w", encoding="utf-8") as f:
+            f.write(u"agent: pm-toy\nseq: 5\n---\n")
+        os.environ["HERDR_ENV"] = "1"
+        sc = help_ok()
+        sc["agent list"] = [J({"agents": []})]
+        self.fake(sc)
+        self.assertEqual(self.cli("status"), 0)
+        repo = json.loads(self.out)["repos"][key]
+        self.assertEqual((repo["session"], repo["seq"]), ("s-pm", 5))
+        self.assertEqual(repo["pm_dir"], oke.pm_dir(key).replace("\\", "/"))
 
 
 if __name__ == "__main__":

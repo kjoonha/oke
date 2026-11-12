@@ -78,6 +78,7 @@ parent: <you>
 cwd: <worktree path, or the repository>
 wiki: <wiki>
 job: <job>
+commit: yes | no
 seq: 1
 ---
 ## 목표
@@ -86,6 +87,7 @@ seq: 1
 ## 이번 지시
 ```
 
+   `commit: yes` only with a worktree and autonomy `balanced` or `full`. Without a worktree the worker must not commit: a commit there is already on the main branch, before the user was asked about the merge.
 3. `$OKE spawn <that file> --pane <worktree pane>`. Without a worktree: `--split-from $HERDR_PANE_ID`.
 4. Write your report as `waiting` (`on: <job>-w1`), start `$OKE wait <job>-w1 --report <its folder>/report.md --seq <its seq>` in the background, end your turn.
 
@@ -95,20 +97,21 @@ When a wait finishes, act on its first line:
 |---|---|
 | worker `report done` | If 검증 출력 is missing or does not show the command passing, send it back. Otherwise start the review |
 | worker `report question` | Answer from the plan, the code or the wiki if you can (autonomy `balanced` or `full`). If it is about what the user wants, or autonomy is `conservative`, report `question` upward and wait for `kind: answer` |
-| `blocked`, `report blocked` | Report `type: blocked` upward: name the child agent and paste the screen text. Start the child wait again |
+| `blocked`, `report blocked` | Report `type: blocked` upward: name the child agent and paste the screen text. End your turn without starting a wait. When you are prompted "Dialog answered for <child>", rewrite your report as `waiting` and start the child wait again with `--after-blocked` added |
 | `idle_no_report`, `bad_report` | Once: prompt the child to re-read its assignment and write a proper report. Second time: report `failed` |
 | `gone` | Report `failed` with the agent name |
+| exit code 1 or 2 | herdr failed or is unreachable. Report `failed` with the stderr text. Do not treat the child as gone |
 
 To send a child a new instruction: edit its assignment (`이번 지시`, `seq` + 1), then `herdr agent prompt <child> "Assignment updated (seq <n>). Re-read it." --wait --until working --until blocked --timeout 20000`, then wait with the new seq.
 
-**Review.** Write `~/.oke/jobs/<job>/<job>-rv/assignment.md` (role `reviewer`, same `cwd` as the worker, 이번 지시 = the diff range `<base branch>..oke/<job>`, or "uncommitted changes" without a worktree). `$OKE spawn <file> --split-from <worker pane>`. Wait for it.
+**Review.** Write `~/.oke/jobs/<job>/<job>-rv/assignment.md` (role `reviewer`, same `cwd` as the worker, 이번 지시 = the diff range `<base branch>..oke/<job>` when the worker committed, otherwise "uncommitted changes: `git diff HEAD`, and new files listed by `git status --short`"). `$OKE spawn <file> --split-from <worker pane>`. Wait for it.
 
 - `verdict: changes`: pass the findings to the worker as a new instruction, wait, then give the reviewer a new instruction to review again. At most 3 rounds; after that report `question` with the open findings.
-- `verdict: pass`: run `git -C <cwd> status --short`; with a worktree it must be clean (the reviewer must not have changed anything). Report `done`: summary, branch, number of changed files (`git diff --stat <base>..oke/<job>`), and the workers' 배운 것.
+- `verdict: pass`: run `git -C <cwd> status --short` and compare it with the worker's report: the reviewer must not have changed anything (with `commit: yes` it must be clean). Report `done`: summary, branch, number of changed files (`git diff --stat <base>..oke/<job>`, or `git diff --stat HEAD` when uncommitted), the worktree path, and the workers' 배운 것.
 
 ### kind: merge
 
-1. In the main checkout: `git merge --no-ff oke/<job>`. Without a worktree there is nothing to merge; check the commit exists.
+1. If the work is uncommitted (`commit: no`): commit it now in the worker's `cwd` (`git add -A`, `git commit`). Then, with a worktree, in the main checkout: `git merge --no-ff oke/<job>`. Without a worktree that commit is the result.
 2. Conflict: `git merge --abort`, report `failed` with the conflicting files. Do not resolve conflicts yourself.
 3. Update the wiki from the reports' 배운 것 (see below).
 4. Remove the worktree only when it is merged and `git status --short` there is empty: `herdr worktree remove --workspace <its workspace id>`. Otherwise leave it and say so.

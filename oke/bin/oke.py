@@ -4,6 +4,7 @@
 Python 3.6 compatible, standard library only.
 """
 import argparse
+import hashlib
 import io
 import json
 import os
@@ -104,7 +105,14 @@ def write_json_atomic(path, obj):
     with io.open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True))
         f.write(u"\n")
-    os.replace(tmp, path)
+    for attempt in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except OSError:  # Windows: another process has the file open for a moment
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
 
 
 def read_json(path, default):
@@ -119,17 +127,29 @@ def state_path():
     return os.path.join(oke_home(), "state.json")
 
 
-def load_state():
+class StateError(Exception):
+    pass
+
+
+def load_state(recover=False):
+    """Only `oke status` (run by the orchestrator, the single writer) passes
+    recover=True and may set a broken state.json aside."""
     path = state_path()
     state = json.loads(json.dumps(EMPTY_STATE))
     if not os.path.exists(path):
         return state
     try:
         with io.open(path, encoding="utf-8") as f:
-            loaded = json.load(f)
+            text = f.read()
+    except (IOError, OSError) as e:
+        raise StateError("cannot read state.json right now: %s" % e)
+    try:
+        loaded = json.loads(text)
         if not isinstance(loaded, dict):
-            raise ValueError("state.json is not an object")
-    except (IOError, OSError, ValueError):
+            raise ValueError("not an object")
+    except ValueError:
+        if not recover:
+            raise StateError("state.json is unreadable: run `oke status` in the orchestrator")
         os.replace(path, path + ".bad")
         state["_recovered"] = True
         return state
@@ -288,12 +308,14 @@ def launch_args(role, config, home, plugin_dir, resume=None):
 
 
 def repo_name(key):
+    """Folder and agent-name part for a repository: readable name plus a hash of
+    the key, so two repositories called `proj` (or two non-ASCII names) differ."""
     name = os.path.basename(key)
     if name == ".git":
         name = os.path.basename(os.path.dirname(key))
     if name.endswith(".git"):
         name = name[:-4]
-    return slug(name)
+    return "%s-%s" % (slug(name, 18), hashlib.sha1(key.encode("utf-8")).hexdigest()[:6])
 
 
 def pm_dir(key):
@@ -328,12 +350,12 @@ def cmd_spawn(args):
         return fail("bad role %r" % role)
 
     state = load_state()
+    known_keys = set(state["repos"]) | set(j.get("repo") for j in state["jobs"].values())
     if role == "pm":
         try:
             key = repo_key(cwd)
         except ValueError as e:
             return fail(str(e))
-        known = True
     else:
         job = state["jobs"].get(header.get("job"))
         if job is None:
@@ -341,55 +363,84 @@ def cmd_spawn(args):
         if job["phase"] not in ("working", "reviewing"):
             return fail("plan not approved: job %s is in phase %s" % (header["job"], job["phase"]))
         key = job["repo"]
-        try:
-            known = repo_key(cwd) == key
-        except ValueError:
-            known = False
 
     if any(a.get("name") == agent for a in list_agents()):
         return fail("agent name in use: %s" % agent)
+
+    # A report left by an earlier run would satisfy the first `oke wait` at once.
+    stale = os.path.join(os.path.dirname(path), "report.md")
+    if os.path.exists(stale):
+        os.remove(stale)
 
     pane = args.pane
     if not pane:
         pane = herdr("pane", "split", "--pane", args.split_from, "--direction", "right",
                      "--cwd", cwd, "--no-focus")["pane"]["pane_id"]
 
+    record = {"agent": agent, "pane": pane, "session": None,
+              "seq": header["seq"], "role": role, "job": header.get("job")}
+
+    def save_record():
+        if role == "pm":
+            current = load_state()
+            current["repos"].setdefault(key, {})["pm"] = record
+            save_state(current)
+        else:
+            children = read_json(children_path(key), {})
+            children[agent] = record
+            write_json_atomic(children_path(key), children)
+
+    def trusted_folder():
+        """The trust dialog is answered only for a repository OKe already works on,
+        and only when the pane really sits in it."""
+        if key not in known_keys:
+            return False
+        try:
+            if repo_key(cwd) != key:
+                return False
+            if args.pane:
+                where = herdr("pane", "get", pane).get("pane", {}).get("cwd") or ""
+                return repo_key(where) == key
+        except (ValueError, HerdrError):
+            return False
+        return True
+
     claude_args = launch_args(role, load_config(), oke_home(), plugin_root(), args.resume)
     try:
-        herdr("agent", "start", agent, "--kind", "claude", "--pane", pane, "--", *claude_args)
-    except HerdrError as e:
-        if e.code != "agent_not_ready":
-            return fail("agent start failed: %s" % e)
-        # The dialog can still be drawing when herdr reports the agent blocked.
-        for _ in range(DIALOG_TRIES):
-            screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
-            if TRUST_MARKER in screen.lower():
-                break
-            time.sleep(DIALOG_POLL)
-        if TRUST_MARKER not in screen.lower() or not known:
-            return fail("agent %s is stopped at a dialog in pane %s:\n%s" % (agent, pane, screen))
-        herdr("agent", "send-keys", agent, "down", "enter")
-        herdr("agent", "wait", agent, "--until", "idle", "--timeout", "30000")
+        try:
+            herdr("agent", "start", agent, "--kind", "claude", "--pane", pane, "--", *claude_args)
+        except HerdrError as e:
+            if e.code != "agent_not_ready":
+                raise
+            save_record()  # herdr keeps the name even though the agent is not ready
+            # The dialog can still be drawing when herdr reports the agent blocked.
+            for _ in range(DIALOG_TRIES):
+                screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
+                if TRUST_MARKER in screen.lower():
+                    break
+                time.sleep(DIALOG_POLL)
+            if TRUST_MARKER not in screen.lower() or not trusted_folder():
+                return fail("agent %s is stopped at a dialog in pane %s:\n%s" % (agent, pane, screen))
+            herdr("agent", "send-keys", agent, "down", "enter")
+            herdr("agent", "wait", agent, "--until", "idle", "--timeout", "30000")
+        save_record()
 
-    # Wait until the first turn starts: for a few seconds after a prompt herdr still
-    # says idle, and `oke wait` would read that as "idle with no report".
-    try:
-        herdr("agent", "prompt", agent, FIRST_PROMPT.format(role=role, path=path),
-              "--wait", "--until", "working", "--until", "blocked", "--timeout", "20000")
+        # Wait until the first turn starts: for a few seconds after a prompt herdr still
+        # says idle, and `oke wait` would read that as "idle with no report".
+        try:
+            herdr("agent", "prompt", agent, FIRST_PROMPT.format(role=role, path=path),
+                  "--wait", "--until", "working", "--until", "blocked", "--timeout", "20000")
+        except HerdrError as e:
+            if e.code not in ("agent_prompt_stalled", "timeout"):
+                raise
+        info = herdr("agent", "get", agent).get("agent", {})
     except HerdrError as e:
-        if e.code not in ("agent_prompt_stalled", "timeout"):
+        if e.code == "herdr_unavailable":
             raise
-    info = herdr("agent", "get", agent).get("agent", {})
-    record = {"agent": agent, "pane": info.get("pane_id", pane), "session": session_of(info),
-              "seq": header["seq"], "role": role, "job": header.get("job")}
-    if role == "pm":
-        state = load_state()
-        state["repos"].setdefault(key, {})["pm"] = record
-        save_state(state)
-    else:
-        children = read_json(children_path(key), {})
-        children[agent] = record
-        write_json_atomic(children_path(key), children)
+        return fail("spawn of %s failed in pane %s: %s" % (agent, pane, e))
+    record["pane"] = info.get("pane_id", pane)
+    record["session"] = session_of(info)
+    save_record()
     print(json.dumps({"agent": agent, "pane": record["pane"], "session": record["session"]}))
     return 0
 
@@ -433,15 +484,23 @@ def check_once(agent, report, seq):
     return "?idle_no_report"
 
 
-def wait_loop(agent, report, seq, poll=2, max_polls=None):
+def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
     """No time limit: a five hour simulation is a normal wait. A herdr state read
     right after input can be stale and a report can be mid-write, so an idle
     verdict needs IDLE_CONFIRMATIONS consecutive polls."""
     idle = 0
     polls = 0
+    # after_blocked: the caller already reported this dialog and someone is answering
+    # it. Do not report it again until the agent has been seen in another state.
+    armed = not after_blocked
     while max_polls is None or polls < max_polls:
         polls += 1
         result = check_once(agent, report, seq)
+        if result is not None and result.startswith("blocked"):
+            if not armed:
+                result = None
+        else:
+            armed = True
         if result is None:
             idle = 0
         elif result.startswith("?"):
@@ -456,7 +515,8 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None):
 
 
 def cmd_wait(args):
-    print(wait_loop(args.agent, native_path(args.report), args.seq, poll=args.poll))
+    print(wait_loop(args.agent, native_path(args.report), args.seq, poll=args.poll,
+                    after_blocked=args.after_blocked))
     return 0
 
 
@@ -483,7 +543,7 @@ def find_agent(record, agents, key):
 
 
 def cmd_status(args):
-    state = load_state()
+    state = load_state(recover=True)
     home = oke_home()
     result = {"herdr": {"inside": os.environ.get("HERDR_ENV") == "1", "missing": []},
               "state_recovered": bool(state.get("_recovered")),
@@ -512,8 +572,12 @@ def cmd_status(args):
             if session_of(found) and session_of(found) != record.get("session"):
                 record["session"] = session_of(found)
                 changed = True
+        assignment = read_header(os.path.join(pm_dir(key), "assignment.md")) or {}
         result["repos"][key] = {"pm": "alive" if found else "dead",
-                                "agent": record.get("agent"), "pane": record.get("pane")}
+                                "agent": record.get("agent"), "pane": record.get("pane"),
+                                "session": record.get("session"),
+                                "pm_dir": pm_dir(key).replace("\\", "/"),
+                                "seq": assignment.get("seq")}
 
     for name, job in state["jobs"].items():
         key = job.get("repo")
@@ -595,6 +659,11 @@ def cmd_compact_hook(args):
 def cmd_job(args):
     state = load_state()
     home = oke_home()
+    if args.action == "archive" and args.slug not in state["jobs"]:
+        # a directory left behind with no state entry (after a recovered state.json)
+        if args.slug != slug(args.slug) or not os.path.isdir(os.path.join(home, "jobs", args.slug)):
+            return fail("unknown job: %s" % args.slug)
+        state["jobs"][args.slug] = {}
     if args.action == "new":
         if args.slug != slug(args.slug):
             return fail("bad job name %r: use %r" % (args.slug, slug(args.slug)))
@@ -610,7 +679,9 @@ def cmd_job(args):
         save_state(state)
         print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key,
                           "pm_dir": pm_dir(key).replace("\\", "/"),
-                          "pm_agent": slug("pm-" + repo_name(key), 32)}, ensure_ascii=False))
+                          "pm_agent": "pm-" + repo_name(key),
+                          "wiki": os.path.join(load_config()["wiki_path"], repo_name(key)).replace("\\", "/")},
+                         ensure_ascii=False))
         return 0
     if args.slug not in state["jobs"]:
         return fail("unknown job: %s" % args.slug)
@@ -667,6 +738,7 @@ def build_parser():
     wait.add_argument("--report", required=True)
     wait.add_argument("--seq", type=int, required=True)
     wait.add_argument("--poll", type=float, default=2)
+    wait.add_argument("--after-blocked", action="store_true")
     wait.set_defaults(func=cmd_wait)
 
     status = sub.add_parser("status")
@@ -685,6 +757,8 @@ def main(argv=None):
         return 1 if e.code else 0
     try:
         return args.func(args)
+    except StateError as e:
+        return fail(str(e))
     except HerdrError as e:
         if e.code != "herdr_unavailable":
             return fail("herdr error: %s" % e)
@@ -694,4 +768,10 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Screen text contains characters a legacy locale (cp949, C) cannot encode.
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    sys.exit(code)
