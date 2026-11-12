@@ -62,7 +62,9 @@ orchestrator 에게 지시: `~/oke-toy 저장소에 sub(a, b) 함수와 unittest
 
 - [ ] 5장을 다시 시작해 worker 가 도는 중에 PM pane 을 닫는다. orchestrator 에서 `/oke:start` 를 다시 실행한다.
   - 기대: 그 job 에 대해 "이어 하기 / 보관 / 그대로 둠" 팝업. "이어 하기" 를 고르면 PM 이 새 pane 에 다시 뜬다.
-  - 개인 PC 에서는 팝업과 "보관" 까지만 확인했다. "이어 하기" 는 여기서 처음 확인한다.
+  - 개인 PC 에서는 PM 프로세스를 강제 종료한 뒤 "이어 하기" 로 PM 이 같은 세션으로 새 pane 에 돌아오는 것까지 확인했다.
+  - PM pane 이 worktree 묶음의 뿌리면 herdr 가 닫기를 거부한다. 그 경우 pane 안의 claude 를 종료시켜 시험한다.
+  - `conservative` 모드는 개인 PC 에서 팝업 경로까지 확인했다. 동작은 하지만 agent 가 명령을 `&&` 나 `|` 로 엮을 때마다 팝업이 떠서 느리다.
 
 ## 7. 정리
 
