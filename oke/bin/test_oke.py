@@ -577,6 +577,11 @@ class TestStatus(SpawnBase):
         self.assertEqual(st["repos"][self.key], {"pm": "alive", "agent": "pm-toy", "pane": "w9:p1"})
         self.assertEqual(self.pm_record()["pane"], "w9:p1")
 
+    def test_status_fills_in_missing_session(self):
+        self.set_pm(session=None)
+        self.status([AG(name="pm-toy", pane="w1:p3", session="s-late", cwd=self.repo)])
+        self.assertEqual(self.pm_record()["session"], "s-late")
+
     def test_pm_found_by_pane_after_rename(self):
         self.set_pm()
         st = self.status([AG(name="renamed", pane="w1:p3", session="other", cwd=self.repo)])

@@ -508,6 +508,10 @@ def cmd_status(args):
             if (name, pane) != (record.get("agent"), record.get("pane")):
                 record["agent"], record["pane"] = name, pane
                 changed = True
+            # the session id does not exist yet when spawn records a fresh agent
+            if session_of(found) and session_of(found) != record.get("session"):
+                record["session"] = session_of(found)
+                changed = True
         result["repos"][key] = {"pm": "alive" if found else "dead",
                                 "agent": record.get("agent"), "pane": record.get("pane")}
 
