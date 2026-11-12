@@ -373,6 +373,72 @@ def cmd_spawn(args):
     return 0
 
 
+# ---------------------------------------------------------------- wait
+
+FINAL_TYPES = ("done", "question", "blocked", "failed")
+REPORT_TYPES = FINAL_TYPES + ("waiting",)
+IDLE_CONFIRMATIONS = 3
+
+
+def check_once(agent, report, seq):
+    """One look at a child. Returns a result line, None to keep waiting, or a
+    '?'-prefixed provisional verdict that only counts once the agent stays idle."""
+    header = read_header(report)
+    current = header is not None and header.get("seq") == seq
+    if current and header.get("type") in FINAL_TYPES:
+        return "report %s" % header["type"]
+    try:
+        info = herdr("agent", "get", agent).get("agent", {})
+    except HerdrError as e:
+        if e.code in ("agent_not_found", "pane_not_found"):
+            return "gone"
+        raise
+    status = info.get("agent_status")
+    if status == "blocked":
+        return "blocked\n" + herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
+    if status not in ("idle", "done"):
+        return None
+    if current and header.get("type") == "waiting":
+        return None
+    if os.path.exists(report):
+        if header is None:
+            return "?bad_report no header (expected key: value lines, then ---)"
+        if "type" not in header or "seq" not in header:
+            return "?bad_report header needs type and seq"
+        if header["type"] not in REPORT_TYPES:
+            return "?bad_report unknown type %r" % header["type"]
+        if not isinstance(header["seq"], int):
+            return "?bad_report seq is not a number"
+    return "?idle_no_report"
+
+
+def wait_loop(agent, report, seq, poll=2, max_polls=None):
+    """No time limit: a five hour simulation is a normal wait. A herdr state read
+    right after input can be stale and a report can be mid-write, so an idle
+    verdict needs IDLE_CONFIRMATIONS consecutive polls."""
+    idle = 0
+    polls = 0
+    while max_polls is None or polls < max_polls:
+        polls += 1
+        result = check_once(agent, report, seq)
+        if result is None:
+            idle = 0
+        elif result.startswith("?"):
+            idle += 1
+            if idle >= IDLE_CONFIRMATIONS:
+                return result[1:]
+        else:
+            return result
+        if poll:
+            time.sleep(poll)
+    return None
+
+
+def cmd_wait(args):
+    print(wait_loop(args.agent, native_path(args.report), args.seq, poll=args.poll))
+    return 0
+
+
 # ---------------------------------------------------------------- job
 
 def cmd_job(args):
@@ -442,6 +508,13 @@ def build_parser():
     where.add_argument("--split-from")
     spawn.add_argument("--resume")
     spawn.set_defaults(func=cmd_spawn)
+
+    wait = sub.add_parser("wait")
+    wait.add_argument("agent")
+    wait.add_argument("--report", required=True)
+    wait.add_argument("--seq", type=int, required=True)
+    wait.add_argument("--poll", type=float, default=2)
+    wait.set_defaults(func=cmd_wait)
     return parser
 
 

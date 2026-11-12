@@ -396,5 +396,89 @@ class TestSpawn(SpawnBase):
         self.assertEqual(split[split.index("--cwd") + 1], repo)
 
 
+class TestWait(Base):
+    def report(self, text):
+        return self.write("report.md", text)
+
+    def test_report_done(self):
+        r = self.report("type: done\nseq: 2\n---\n")
+        self.fake({})
+        self.assertEqual(oke.check_once("a", r, 2), "report done")
+        self.assertEqual(self.calls(), [])
+
+    def test_old_seq_while_working_continues(self):
+        r = self.report("type: done\nseq: 1\n---\n")
+        self.fake({"agent get": [AGENT("working")]})
+        self.assertIsNone(oke.check_once("a", r, 2))
+
+    def test_half_written_while_working_is_not_bad(self):
+        r = self.report("type: do")
+        self.fake({"agent get": [AGENT("working")]})
+        self.assertIsNone(oke.wait_loop("a", r, 2, poll=0, max_polls=5))
+
+    def test_unknown_status_continues(self):
+        self.fake({"agent get": [AGENT("unknown")]})
+        self.assertIsNone(oke.wait_loop("a", self.path("none.md"), 2, poll=0, max_polls=5))
+
+    def test_waiting_keeps_waiting(self):
+        r = self.report("type: waiting\nseq: 2\non: fix-a-w1\n---\n")
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertIsNone(oke.wait_loop("a", r, 2, poll=0, max_polls=5))
+
+    def test_waiting_with_old_seq_is_no_report(self):
+        r = self.report("type: waiting\nseq: 1\n---\n")
+        self.fake({"agent get": [AGENT("done")]})
+        self.assertEqual(oke.wait_loop("a", r, 2, poll=0, max_polls=3), "idle_no_report")
+
+    def test_idle_no_report_needs_three_polls(self):
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertIsNone(oke.wait_loop("a", self.path("none.md"), 2, poll=0, max_polls=2))
+        self.assertEqual(oke.wait_loop("a", self.path("none.md"), 2, poll=0, max_polls=3), "idle_no_report")
+
+    def test_idle_then_working_resets_count(self):
+        self.fake({"agent get": [AGENT("idle"), AGENT("idle"), AGENT("working"), AGENT("idle"), AGENT("idle")]})
+        self.assertIsNone(oke.wait_loop("a", self.path("none.md"), 2, poll=0, max_polls=5))
+
+    def test_bad_report_when_idle(self):
+        r = self.report("typo: x\nseq: 2\n---\n")
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertTrue(oke.wait_loop("a", r, 2, poll=0, max_polls=3).startswith("bad_report"))
+
+    def test_bad_type_when_idle(self):
+        r = self.report("type: finished\nseq: 2\n---\n")
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertTrue(oke.wait_loop("a", r, 2, poll=0, max_polls=3).startswith("bad_report"))
+
+    def test_report_arrives_after_idle_polls(self):
+        r = self.path("report.md")
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertIsNone(oke.wait_loop("a", r, 2, poll=0, max_polls=2))
+        self.report("type: question\nseq: 2\n---\n")
+        self.assertEqual(oke.wait_loop("a", r, 2, poll=0, max_polls=1), "report question")
+
+    def test_blocked_includes_screen(self):
+        self.fake({"agent get": [AGENT("blocked")],
+                   "agent read": [{"stdout": "Do you want to create r.md?\n", "exit": 0}]})
+        out = oke.check_once("a", self.path("none.md"), 2)
+        self.assertEqual(out.splitlines()[0], "blocked")
+        self.assertIn("Do you want to create r.md?", out)
+
+    def test_gone(self):
+        self.fake({"agent get": [E("agent_not_found")]})
+        self.assertEqual(oke.check_once("a", self.path("none.md"), 2), "gone")
+
+    def test_herdr_down_is_exit_2_not_gone(self):
+        self.fake({"agent get": [{"stdout": "connection refused", "exit": 1}]})
+        code = self.cli("wait", "a", "--report", self.path("none.md"), "--seq", "2", "--poll", "0")
+        self.assertEqual(code, 2)
+        self.assertNotIn("gone", self.out)
+
+    def test_cli_prints_result(self):
+        r = self.report("type: failed\nseq: 7\n---\n")
+        self.fake({})
+        self.assertEqual(self.cli("wait", "a", "--report", r, "--seq", "7"), 0)
+        self.assertEqual(self.out.strip(), "report failed")
+
+
 if __name__ == "__main__":
     unittest.main()
