@@ -301,7 +301,14 @@ def launch_args(role, config, home, plugin_dir, resume=None):
         args += ["--permission-mode", "dontAsk", "--allowedTools"] + REVIEWER_TOOLS
         args += edit_rules(home) + edit_rules(config["wiki_path"])
     elif config.get("autonomy") == "conservative":
-        args += ["--permission-mode", "manual"]
+        # Ask for everything except the agent's own OKe files; without this every
+        # report and board write would be a dialog.
+        args += ["--permission-mode", "manual", "--allowedTools", "Skill"]
+        args += edit_rules(home) + edit_rules(config["wiki_path"])
+        if role == "pm":
+            # shortcut: the PM's coordination commands are allowed wholesale (python
+            # included, for oke.py); narrow to exact commands if a PM ever misuses them.
+            args += ["Bash(herdr:*)", "Bash(git:*)", "Bash(python3:*)", "Bash(python:*)"]
     else:
         args += ["--permission-mode", "bypassPermissions"]
     return args

@@ -46,6 +46,14 @@ on: <what you wait for, when type is waiting>
    `waiting` means "I am idle on purpose". Write it whenever you end a turn with a background wait running. Without it the orchestrator thinks you died.
 4. Write decisions into files as you make them.
 
+## If you were restarted
+
+Your folder may already hold `board.md` and `children.json` from before you died. Read both before you act on the assignment.
+
+- For each child in `children.json` whose `job` is the current job, check `herdr agent list`. A child that is still alive keeps its work: do not spawn it again and do not create another worktree. Write your report as `waiting` and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If the child is at a dialog the wait says `blocked`; handle it as in the table below.
+- If `git -C <repo> worktree list` already shows `oke/<job>`, use that worktree. Never create `oke/<job>-2` for a job that already has one.
+- Only a child that is gone and has no finished report is spawned again.
+
 ## Assignment kinds
 
 The `이번 지시` section starts with `kind:`.

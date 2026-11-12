@@ -425,6 +425,18 @@ class TestSpawn(SpawnBase):
         self.assertNotIn("Write", r)
         self.assertNotIn("Bash", r)
 
+    def test_conservative_agents_can_still_write_their_own_files(self):
+        c = dict(oke.load_config(), autonomy="conservative", wiki_path="/w")
+        w = oke.launch_args("worker", c, "/h", "/p")
+        allowed = w[w.index("--allowedTools") + 1:]
+        self.assertIn(oke.edit_rules("/h")[0], allowed)
+        self.assertFalse([t for t in allowed if t.startswith("Bash")])
+        pm = oke.launch_args("pm", c, "/h", "/p")
+        allowed = pm[pm.index("--allowedTools") + 1:]
+        self.assertIn(oke.edit_rules("/w")[0], allowed)
+        self.assertIn("Bash(herdr:*)", allowed)
+        self.assertIn("Bash(git:*)", allowed)
+
     def test_edit_rules(self):
         self.assertEqual(oke.edit_rules("/home/u/.oke", windows=False), ["Edit(//home/u/.oke/**)"])
         self.assertEqual(oke.edit_rules("C:\\Users\\u\\.oke", windows=True),
