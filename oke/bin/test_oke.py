@@ -595,5 +595,54 @@ class TestStatus(SpawnBase):
         self.assertTrue(self.status([])["state_recovered"])
 
 
+class TestCompactHook(SpawnBase):
+    def setUp(self):
+        SpawnBase.setUp(self)
+        self.key = oke.repo_key(self.repo)
+
+    def test_compact_hook_silent_for_strangers(self):
+        os.environ["HERDR_PANE_ID"] = "w3:p9"
+        self.assertEqual(self.cli("compact-hook"), 0)
+        self.assertEqual(self.out, "")
+
+    def test_compact_hook_silent_without_pane_env(self):
+        self.assertEqual(self.cli("compact-hook"), 0)
+        self.assertEqual(self.out, "")
+
+    def test_compact_hook_for_worker(self):
+        self.job("fix-a", "working")
+        oke.write_json_atomic(oke.children_path(self.key), {
+            "fix-a-w1": {"agent": "fix-a-w1", "job": "fix-a", "pane": "w2:p2", "role": "worker"}})
+        os.environ["HERDR_PANE_ID"] = "w2:p2"
+        self.assertEqual(self.cli("compact-hook"), 0)
+        base = os.path.join(self.home, "jobs", "fix-a", "fix-a-w1").replace("\\", "/")
+        self.assertIn(base + "/assignment.md", self.out)
+        self.assertIn(base + "/board.md", self.out)
+
+    def test_compact_hook_for_pm(self):
+        s = oke.load_state()
+        s["repos"][self.key] = {"pm": {"agent": "pm-toy", "pane": "w1:p3"}}
+        oke.save_state(s)
+        os.environ["HERDR_PANE_ID"] = "w1:p3"
+        self.cli("compact-hook")
+        self.assertIn(oke.pm_dir(self.key).replace("\\", "/") + "/assignment.md", self.out)
+
+    def test_compact_hook_for_orchestrator(self):
+        s = oke.load_state()
+        s["orchestrator"] = {"pane": "w7:p1"}
+        oke.save_state(s)
+        os.environ["HERDR_PANE_ID"] = "w7:p1"
+        self.cli("compact-hook")
+        self.assertIn("state.json", self.out)
+        self.assertIn("status", self.out)
+
+    def test_compact_hook_never_fails(self):
+        self.write("home/state.json", "{broken")
+        os.environ["HERDR_PANE_ID"] = "w7:p1"
+        self.assertEqual(self.cli("compact-hook"), 0)
+        self.assertEqual(self.out, "")
+        self.assertTrue(os.path.exists(os.path.join(self.home, "state.json")))
+
+
 if __name__ == "__main__":
     unittest.main()

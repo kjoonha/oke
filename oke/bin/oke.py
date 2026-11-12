@@ -521,6 +521,50 @@ def cmd_status(args):
     return code
 
 
+# ---------------------------------------------------------------- compact hook
+
+def compact_message():
+    pane = os.environ.get("HERDR_PANE_ID")
+    if not pane:
+        return ""
+    home = oke_home()
+    # Read-only on purpose: a hook must not rename or rewrite state files.
+    state = read_json(state_path(), None)
+    if not isinstance(state, dict):
+        return ""
+    if (state.get("orchestrator") or {}).get("pane") == pane:
+        return ("OKe: context was compacted. Re-read %s and run oke status before continuing."
+                % state_path().replace("\\", "/"))
+    folder = None
+    repos = state.get("repos") or {}
+    keys = set(repos) | set(j.get("repo") for j in (state.get("jobs") or {}).values() if j.get("repo"))
+    for key in sorted(keys):
+        if ((repos.get(key) or {}).get("pm") or {}).get("pane") == pane:
+            folder = pm_dir(key)
+            break
+        for name, rec in read_json(children_path(key), {}).items():
+            if rec.get("pane") == pane and rec.get("job"):
+                folder = os.path.join(home, "jobs", rec["job"], name)
+                break
+        if folder:
+            break
+    if not folder:
+        return ""
+    folder = folder.replace("\\", "/")
+    return ("OKe: context was compacted. Re-read %s/assignment.md and %s/board.md before continuing."
+            % (folder, folder))
+
+
+def cmd_compact_hook(args):
+    try:
+        message = compact_message()
+    except Exception:  # a hook runs in every session; it must never break one
+        message = ""
+    if message:
+        print(message)
+    return 0
+
+
 # ---------------------------------------------------------------- job
 
 def cmd_job(args):
@@ -601,6 +645,9 @@ def build_parser():
     status = sub.add_parser("status")
     status.add_argument("--claim", action="store_true")
     status.set_defaults(func=cmd_status)
+
+    hook = sub.add_parser("compact-hook")
+    hook.set_defaults(func=cmd_compact_hook)
     return parser
 
 
