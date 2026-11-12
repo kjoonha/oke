@@ -45,7 +45,7 @@ Claude Code / codex 세션 5~10개를 병렬로 굴릴 때, 끝난 세션을 하
 | 요소 | 내용 |
 |---|---|
 | 역할 skill 4개 | `orchestrator`, `pm`, `worker`, `reviewer`. 판단 규칙 |
-| `bin/oke.py` | 정해진 절차를 고정하는 스크립트. 명령 4개 |
+| `bin/oke.py` | 정해진 절차를 고정하는 스크립트. 명령 5개 |
 | hook 1개 | compact 직후 배정 파일과 현황판을 다시 읽게 함 |
 
 ```
@@ -64,6 +64,7 @@ docs/work-checklist.md      # 회사에서 확인할 목록
 - `oke spawn <agent>`: pane 준비, agent 시작 (역할별 권한 옵션과 모델), 신뢰 창 처리, 배정 파일을 읽으라는 첫 지시 전달. worker / reviewer 는 해당 job 의 `phase` 가 계획 승인 이후일 때만 띄우고, 아니면 거부한다.
 - `oke wait <agent>`: 하위의 보고를 기다린다. 상위가 백그라운드로 실행한다. 결과 5종 중 하나를 출력하고 끝난다 (오류 처리 절). 시간 제한 없음.
 - `oke status`: `state.json` 과 herdr 실제 상태를 대조해 출력한다. PM 찾기, 끊긴 job 분류를 포함한다.
+- `oke job new|phase|archive`: `state.json` 의 job 을 만들고, `phase` 를 바꾸고, 보관한다. orchestrator 가 `state.json` 을 손으로 고치지 않게 한다.
 - `oke compact-hook`: hook 이 부른다. `$HERDR_PANE_ID` 를 상태 파일에서 찾아 OKe agent 면 "배정 파일과 현황판 (orchestrator 는 `state.json`) 을 다시 읽고 계속" 을 출력하고, 아니면 아무것도 출력하지 않는다.
 
 저장소 경로의 정규화 (Windows 의 `C:/` 와 `/c/`, 대소문자) 는 `oke.py` 안에서만 한다. skill 은 경로를 그대로 넘긴다. worktree 생성, merge, 파일 쓰기는 skill 이 `herdr` / `git` 을 직접 부른다.
