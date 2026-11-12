@@ -480,5 +480,120 @@ class TestWait(Base):
         self.assertEqual(self.out.strip(), "report failed")
 
 
+def help_ok():
+    return dict((c + " --help", [OK]) for c in oke.REQUIRED_COMMANDS)
+
+
+class TestStatus(SpawnBase):
+    def setUp(self):
+        SpawnBase.setUp(self)
+        os.environ["HERDR_ENV"] = "1"
+        os.environ["HERDR_PANE_ID"] = "w7:p1"
+        self.key = oke.repo_key(self.repo)
+
+    def set_pm(self, agent="pm-toy", pane="w1:p3", session="s-pm"):
+        s = oke.load_state()
+        s["repos"][self.key] = {"pm": {"agent": agent, "pane": pane, "session": session, "seq": 1}}
+        oke.save_state(s)
+
+    def status(self, agents=(), *flags):
+        s = help_ok()
+        s["agent list"] = [J({"agents": list(agents)})]
+        self.fake(s)
+        self.code = self.cli("status", *flags)
+        return json.loads(self.out) if self.out.strip() else None
+
+    def pm_record(self):
+        return oke.load_state()["repos"][self.key]["pm"]
+
+    def test_outside_herdr(self):
+        os.environ.pop("HERDR_ENV", None)
+        self.fake({})
+        self.assertEqual(self.cli("status"), 0)
+        self.assertEqual(json.loads(self.out)["herdr"], {"inside": False, "missing": []})
+        self.assertEqual(self.calls(), [])
+
+    def test_missing_commands_reported(self):
+        s = help_ok()
+        s["agent wait --help"] = [{"stdout": "", "exit": 2}]
+        s["agent list"] = [J({"agents": []})]
+        self.fake(s)
+        self.cli("status")
+        self.assertEqual(json.loads(self.out)["herdr"], {"inside": True, "missing": ["agent wait"]})
+
+    def test_pm_found_by_name_after_pane_move(self):
+        self.set_pm()
+        st = self.status([AG(name="pm-toy", pane="w9:p1", session="other", cwd=self.repo)])
+        self.assertEqual(st["repos"][self.key], {"pm": "alive", "agent": "pm-toy", "pane": "w9:p1"})
+        self.assertEqual(self.pm_record()["pane"], "w9:p1")
+
+    def test_pm_found_by_pane_after_rename(self):
+        self.set_pm()
+        st = self.status([AG(name="renamed", pane="w1:p3", session="other", cwd=self.repo)])
+        self.assertEqual(st["repos"][self.key]["pm"], "alive")
+        self.assertEqual(self.pm_record()["agent"], "renamed")
+
+    def test_pm_found_by_session(self):
+        self.set_pm()
+        st = self.status([AG(name="x", pane="w5:p5", session="s-pm", cwd=self.repo)])
+        self.assertEqual(st["repos"][self.key]["pm"], "alive")
+        self.assertEqual((self.pm_record()["agent"], self.pm_record()["pane"]), ("x", "w5:p5"))
+
+    def test_pm_in_other_repo_cwd_is_dead(self):
+        self.set_pm()
+        other = self.git_repo("other")
+        st = self.status([AG(name="pm-toy", pane="w1:p3", session="s-pm", cwd=other)])
+        self.assertEqual(st["repos"][self.key]["pm"], "dead")
+        self.assertEqual(self.pm_record()["pane"], "w1:p3")
+
+    def test_pm_missing_is_dead(self):
+        self.set_pm()
+        self.assertEqual(self.status([])["repos"][self.key]["pm"], "dead")
+
+    def test_job_classes(self):
+        self.set_pm()
+        self.job("j-work", "working")
+        self.job("j-merge", "awaiting_merge")
+        oke.write_json_atomic(oke.children_path(self.key), {
+            "j-work-w1": {"agent": "j-work-w1", "job": "j-work", "pane": "w2:p1"},
+            "j-work-rv": {"agent": "j-work-rv", "job": "j-work", "pane": "w2:p2"}})
+        alive = self.status([AG(name="pm-toy", pane="w1:p3", cwd=self.repo), AG(name="j-work-w1", pane="w2:p1")])
+        self.assertEqual(alive["jobs"]["j-work"],
+                         {"phase": "working", "class": "alive",
+                          "agents": {"j-work-w1": "alive", "j-work-rv": "dead"}})
+        self.assertEqual(alive["jobs"]["j-merge"]["class"], "awaiting_user")
+        dead = self.status([])
+        self.assertEqual(dead["jobs"]["j-work"]["class"], "disconnected")
+        self.assertEqual(dead["jobs"]["j-merge"]["class"], "awaiting_user")
+
+    def test_orphan_job_dir(self):
+        os.makedirs(os.path.join(self.home, "jobs", "old-job"))
+        self.job("fix-a", "working")
+        self.assertEqual(self.status([])["orphan_job_dirs"], ["old-job"])
+
+    def test_orchestrator_conflict(self):
+        s = oke.load_state()
+        s["orchestrator"] = {"pane": "w8:p1"}
+        oke.save_state(s)
+        st = self.status([AG(name=None, pane="w8:p1")])
+        self.assertEqual(st["orchestrator_conflict"], "w8:p1")
+        self.status([AG(name=None, pane="w8:p1")], "--claim")
+        self.assertEqual(self.code, 1)
+        self.assertEqual(oke.load_state()["orchestrator"]["pane"], "w8:p1")
+
+    def test_claim_takes_over_dead_orchestrator(self):
+        s = oke.load_state()
+        s["orchestrator"] = {"pane": "w8:p1"}
+        oke.save_state(s)
+        st = self.status([], "--claim")
+        self.assertEqual(self.code, 0)
+        self.assertIsNone(st["orchestrator_conflict"])
+        self.assertEqual(oke.load_state()["orchestrator"]["pane"], "w7:p1")
+
+    def test_recovered_flag(self):
+        self.write("home/state.json", "{broken")
+        self.assertTrue(self.status([])["state_recovered"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -439,6 +439,88 @@ def cmd_wait(args):
     return 0
 
 
+# ---------------------------------------------------------------- status
+
+def find_agent(record, agents, key):
+    """Find a recorded agent among live ones: by name, then pane, then session.
+    A match whose cwd is not in the repository `key` is someone else's work."""
+    tests = (
+        lambda a: record.get("agent") and a.get("name") == record.get("agent"),
+        lambda a: record.get("pane") and a.get("pane_id") == record.get("pane"),
+        lambda a: record.get("session") and session_of(a) == record.get("session"),
+    )
+    for test in tests:
+        for a in agents:
+            if test(a):
+                try:
+                    if repo_key(a.get("cwd") or "") == key:
+                        return a
+                except ValueError:
+                    pass
+                return None
+    return None
+
+
+def cmd_status(args):
+    state = load_state()
+    home = oke_home()
+    result = {"herdr": {"inside": os.environ.get("HERDR_ENV") == "1", "missing": []},
+              "state_recovered": bool(state.get("_recovered")),
+              "orchestrator_conflict": None, "repos": {}, "jobs": {}, "orphan_job_dirs": []}
+    jobs_dir = os.path.join(home, "jobs")
+    if os.path.isdir(jobs_dir):
+        result["orphan_job_dirs"] = sorted(d for d in os.listdir(jobs_dir) if d not in state["jobs"])
+    if not result["herdr"]["inside"]:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+
+    result["herdr"]["missing"] = missing_commands()
+    agents = list_agents()
+    names = set(a.get("name") for a in agents if a.get("name"))
+    changed = False
+
+    for key, repo in state["repos"].items():
+        record = repo.get("pm") or {}
+        found = find_agent(record, agents, key)
+        if found:
+            name, pane = found.get("name") or record.get("agent"), found.get("pane_id")
+            if (name, pane) != (record.get("agent"), record.get("pane")):
+                record["agent"], record["pane"] = name, pane
+                changed = True
+        result["repos"][key] = {"pm": "alive" if found else "dead",
+                                "agent": record.get("agent"), "pane": record.get("pane")}
+
+    for name, job in state["jobs"].items():
+        key = job.get("repo")
+        children = read_json(children_path(key), {}) if key else {}
+        job_agents = dict((a, "alive" if a in names else "dead")
+                          for a, rec in children.items() if rec.get("job") == name)
+        if job.get("phase") in ("awaiting_approval", "awaiting_merge"):
+            cls = "awaiting_user"
+        elif result["repos"].get(key, {}).get("pm") == "alive":
+            cls = "alive"
+        else:
+            cls = "disconnected"
+        result["jobs"][name] = {"phase": job.get("phase"), "class": cls, "agents": job_agents}
+
+    here = os.environ.get("HERDR_PANE_ID")
+    recorded = state["orchestrator"].get("pane")
+    if recorded and recorded != here and any(a.get("pane_id") == recorded for a in agents):
+        result["orchestrator_conflict"] = recorded
+
+    code = 0
+    if args.claim:
+        if result["orchestrator_conflict"]:
+            code = fail("another orchestrator is alive in pane %s" % recorded)
+        elif here and recorded != here:
+            state["orchestrator"]["pane"] = here
+            changed = True
+    if changed or state.get("_recovered"):
+        save_state(state)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return code
+
+
 # ---------------------------------------------------------------- job
 
 def cmd_job(args):
@@ -515,6 +597,10 @@ def build_parser():
     wait.add_argument("--seq", type=int, required=True)
     wait.add_argument("--poll", type=float, default=2)
     wait.set_defaults(func=cmd_wait)
+
+    status = sub.add_parser("status")
+    status.add_argument("--claim", action="store_true")
+    status.set_defaults(func=cmd_status)
     return parser
 
 
