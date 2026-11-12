@@ -583,7 +583,9 @@ def cmd_job(args):
         os.makedirs(job_dir)
         state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None}
         save_state(state)
-        print(job_dir)
+        print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key,
+                          "pm_dir": pm_dir(key).replace("\\", "/"),
+                          "pm_agent": slug("pm-" + repo_name(key), 32)}, ensure_ascii=False))
         return 0
     if args.slug not in state["jobs"]:
         return fail("unknown job: %s" % args.slug)

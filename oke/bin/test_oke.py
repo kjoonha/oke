@@ -148,6 +148,11 @@ class TestState(Base):
     def test_job_new_phase_archive(self):
         repo = self.git_repo("r")
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 0)
+        info = json.loads(self.out)
+        self.assertEqual(info["repo"], oke.repo_key(repo))
+        self.assertTrue(info["job_dir"].endswith("/jobs/fix-a"))
+        self.assertTrue(info["pm_dir"].endswith("/repos/r/pm"))
+        self.assertEqual(info["pm_agent"], "pm-r")
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 1)
         self.assertEqual(self.cli("job", "phase", "fix-a", "nonsense"), 1)
         self.assertEqual(self.cli("job", "phase", "nope", "planning"), 1)
