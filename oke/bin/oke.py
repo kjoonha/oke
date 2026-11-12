@@ -457,6 +457,7 @@ def cmd_spawn(args):
 FINAL_TYPES = ("done", "question", "blocked", "failed")
 REPORT_TYPES = FINAL_TYPES + ("waiting",)
 IDLE_CONFIRMATIONS = 3
+BLOCKED_GRACE = 10  # seconds
 
 
 def check_once(agent, report, seq):
@@ -497,14 +498,16 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
     verdict needs IDLE_CONFIRMATIONS consecutive polls."""
     idle = 0
     polls = 0
-    # after_blocked: the caller already reported this dialog and someone is answering
-    # it. Do not report it again until the agent has been seen in another state.
+    # after_blocked: a key was just sent to a dialog the caller already reported. Do not
+    # report that dialog again while herdr still shows the old state. Only a short grace:
+    # the agent may already be at its next dialog when this wait starts.
     armed = not after_blocked
+    started = time.time()
     while max_polls is None or polls < max_polls:
         polls += 1
         result = check_once(agent, report, seq)
         if result is not None and result.startswith("blocked"):
-            if not armed:
+            if not armed and time.time() - started < BLOCKED_GRACE:
                 result = None
         else:
             armed = True

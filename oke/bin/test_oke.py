@@ -766,9 +766,19 @@ class TestReviewFixes(SpawnBase):
     def test_after_blocked_ignores_the_dialog_until_status_changes(self):
         self.fake({"agent get": [AGENT("blocked"), AGENT("blocked"), AGENT("working"), AGENT("blocked")],
                    "agent read": [{"stdout": "Do you want to proceed?\n", "exit": 0}]})
+        oke.BLOCKED_GRACE = 100
         out = oke.wait_loop("a", self.path("none.md"), 2, poll=0, max_polls=4, after_blocked=True)
         self.assertEqual(out.splitlines()[0], "blocked")
         self.assertEqual(len(self.argv_of("agent", "get")), 4)
+
+    def test_after_blocked_reports_a_dialog_that_outlives_the_grace_period(self):
+        # a second dialog can already be up when the wait starts: it must not be ignored forever
+        oke.BLOCKED_GRACE = 0.3
+        self.fake({"agent get": [AGENT("blocked")],
+                   "agent read": [{"stdout": "Do you want to proceed?", "exit": 0}]})
+        out = oke.wait_loop("a", self.path("none.md"), 2, poll=0.05, max_polls=200, after_blocked=True)
+        self.assertEqual(out.splitlines()[0], "blocked")
+        self.assertGreater(len(self.argv_of("agent", "get")), 1)
 
     def test_after_blocked_cli_flag(self):
         self.write("report.md", "type: done\nseq: 2\n---\n")
