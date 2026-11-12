@@ -212,5 +212,189 @@ class TestHerdr(Base):
         self.assertEqual(oke.missing_commands(), ["agent wait"])
 
 
+def AG(name="a", status="idle", pane="w1:p9", session="s-1", cwd=None):
+    a = {"agent": "claude", "agent_status": status, "pane_id": pane}
+    if name:
+        a["name"] = name
+    if session:
+        a["agent_session"] = {"value": session}
+    if cwd:
+        a["cwd"] = cwd
+    return a
+
+
+def AGENT(status="idle", **kw):
+    return J({"agent": AG(status=status, **kw), "type": "agent_info"})
+
+
+def spawn_ok(agents=()):
+    return {"agent list": [J({"agents": list(agents)})],
+            "pane split": [J({"pane": {"pane_id": "w1:p9"}})],
+            "agent start": [AGENT()],
+            "agent prompt": [J({"type": "agent_prompted"})],
+            "agent get": [AGENT()]}
+
+
+class SpawnBase(Base):
+    def setUp(self):
+        Base.setUp(self)
+        self.repo = self.git_repo("toy")
+
+    def job(self, name, phase):
+        self.assertEqual(self.cli("job", "new", name, "--repo", self.repo), 0)
+        self.assertEqual(self.cli("job", "phase", name, phase), 0)
+
+    def assignment(self, agent, role, job=None, seq=1, cwd=None):
+        lines = ["agent: " + agent, "role: " + role, "cwd: " + (cwd or self.repo), "seq: %d" % seq]
+        if job:
+            lines.append("job: " + job)
+        return self.write("asg/%s.md" % agent, "\n".join(lines) + "\n---\n## 목표\n")
+
+    def children(self):
+        p = os.path.join(self.home, "repos", "toy", "pm", "children.json")
+        with io.open(p, encoding="utf-8") as f:
+            return json.load(f)
+
+    def argv_of(self, *prefix):
+        return [c for c in self.calls() if c[:len(prefix)] == list(prefix)]
+
+
+class TestSpawn(SpawnBase):
+    def test_spawn_worker_refused_before_approval(self):
+        self.job("fix-a", "awaiting_approval")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        self.fake({})
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p2"), 1)
+        self.assertIn("plan not approved", self.err)
+        self.assertEqual(self.calls(), [])
+
+    def test_spawn_order_and_record(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a", seq=4)
+        self.fake(spawn_ok())
+        self.assertEqual(self.cli("spawn", a, "--split-from", "w1:p1"), 0)
+        self.assertEqual([c[:2] for c in self.calls()],
+                         [["agent", "list"], ["pane", "split"], ["agent", "start"],
+                          ["agent", "prompt"], ["agent", "get"]])
+        rec = self.children()["fix-a-w1"]
+        self.assertEqual((rec["session"], rec["pane"], rec["seq"], rec["job"], rec["role"]),
+                         ("s-1", "w1:p9", 4, "fix-a", "worker"))
+        self.assertEqual(json.loads(self.out), {"agent": "fix-a-w1", "pane": "w1:p9", "session": "s-1"})
+        prompt = self.argv_of("agent", "prompt")[0]
+        self.assertEqual(prompt[2], "fix-a-w1")
+        self.assertIn("oke:worker", prompt[3])
+        self.assertIn(a.replace("\\", "/"), prompt[3])
+
+    def test_spawn_pm_records_in_state(self):
+        a = self.assignment("pm-toy", "pm")
+        self.fake(spawn_ok())
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
+        self.assertEqual(self.argv_of("pane", "split"), [])
+        pm = oke.load_state()["repos"][oke.repo_key(self.repo)]["pm"]
+        self.assertEqual((pm["agent"], pm["pane"], pm["session"]), ("pm-toy", "w1:p9", "s-1"))
+
+    def test_spawn_name_in_use(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        self.fake(spawn_ok(agents=[AG(name="fix-a-w1")]))
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p2"), 1)
+        self.assertIn("in use", self.err)
+        self.assertEqual(self.argv_of("agent", "start"), [])
+
+    def test_spawn_rejects_bad_agent_name(self):
+        self.job("fix-a", "working")
+        a = self.assignment("Fix_A W1", "worker", "fix-a")
+        self.fake(spawn_ok())
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p2"), 1)
+        self.assertEqual(self.calls(), [])
+
+    def test_spawn_missing_header_field(self):
+        a = self.write("asg/x.md", "agent: x\nrole: worker\n---\n")
+        self.fake(spawn_ok())
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p2"), 1)
+        self.assertEqual(self.calls(), [])
+
+    def test_spawn_accepts_trust_dialog_for_known_repo(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        s = spawn_ok()
+        s["agent start"] = [E("agent_not_ready")]
+        s["agent read"] = [{"stdout": " ❯ No, exit\n   Yes, I trust this folder\n", "exit": 0}]
+        s["agent send-keys"] = [J({"type": "ok"})]
+        s["agent wait"] = [AGENT()]
+        self.fake(s)
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
+        self.assertEqual(self.argv_of("agent", "send-keys"), [["agent", "send-keys", "fix-a-w1", "down", "enter"]])
+
+    def test_spawn_refuses_trust_dialog_outside_known_repo(self):
+        self.job("fix-a", "working")
+        other = self.git_repo("stranger")
+        a = self.assignment("fix-a-w1", "worker", "fix-a", cwd=other)
+        s = spawn_ok()
+        s["agent start"] = [E("agent_not_ready")]
+        s["agent read"] = [{"stdout": "Yes, I trust this folder\n", "exit": 0}]
+        self.fake(s)
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 1)
+        self.assertEqual(self.argv_of("agent", "send-keys"), [])
+
+    def test_spawn_fails_on_unknown_dialog(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        s = spawn_ok()
+        s["agent start"] = [E("agent_not_ready")]
+        s["agent read"] = [{"stdout": "Select login method\n", "exit": 0}]
+        self.fake(s)
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 1)
+        self.assertIn("Select login method", self.err)
+        self.assertEqual(self.argv_of("agent", "send-keys"), [])
+
+    def test_spawn_reports_herdr_error_as_exit_1(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        s = spawn_ok()
+        s["pane split"] = [E("pane_not_found", "pane w1:p1 not found")]
+        self.fake(s)
+        self.assertEqual(self.cli("spawn", a, "--split-from", "w1:p1"), 1)
+        self.assertIn("pane_not_found", self.err)
+
+    def test_launch_args_by_autonomy(self):
+        c = dict(oke.load_config(), autonomy="conservative")
+        self.assertIn("manual", oke.launch_args("worker", c, "/h", "/p"))
+        c["autonomy"] = "balanced"
+        args = oke.launch_args("worker", c, "/h", "/p")
+        self.assertIn("bypassPermissions", args)
+        self.assertEqual(args[args.index("--model") + 1], "sonnet")
+        self.assertNotIn("--bare", args)
+        r = oke.launch_args("reviewer", c, "/h", "/p")
+        self.assertNotIn("bypassPermissions", r)
+        self.assertIn("dontAsk", r)
+        self.assertNotIn("Write", r)
+        self.assertNotIn("Bash", r)
+
+    def test_edit_rules(self):
+        self.assertEqual(oke.edit_rules("/home/u/.oke", windows=False), ["Edit(//home/u/.oke/**)"])
+        self.assertEqual(oke.edit_rules("C:\\Users\\u\\.oke", windows=True),
+                         ["Edit(//c/Users/u/.oke/**)", "Edit(//C:/Users/u/.oke/**)"])
+
+    def test_spawn_resume_passes_session(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        self.fake(spawn_ok())
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9", "--resume", "s-9"), 0)
+        start = self.argv_of("agent", "start")[0]
+        self.assertEqual(start[start.index("--resume") + 1], "s-9")
+        self.assertLess(start.index("--"), start.index("--resume"))
+
+    def test_spawn_cwd_with_space_is_one_argv(self):
+        repo = self.git_repo("a b 한글")
+        self.assertEqual(self.cli("job", "new", "fix-s", "--repo", repo), 0)
+        self.assertEqual(self.cli("job", "phase", "fix-s", "working"), 0)
+        a = self.assignment("fix-s-w1", "worker", "fix-s", cwd=repo)
+        self.fake(spawn_ok())
+        self.assertEqual(self.cli("spawn", a, "--split-from", "w1:p1"), 0)
+        split = self.argv_of("pane", "split")[0]
+        self.assertEqual(split[split.index("--cwd") + 1], repo)
+
+
 if __name__ == "__main__":
     unittest.main()

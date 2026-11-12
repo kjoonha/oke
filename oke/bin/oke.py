@@ -236,6 +236,143 @@ def missing_commands():
     return missing
 
 
+# ---------------------------------------------------------------- spawn
+
+AGENT_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+TRUST_MARKER = "trust this folder"
+FIRST_PROMPT = ("Use the oke:{role} skill. Your assignment file is {path}. "
+                "Read it first, then follow it.")
+REVIEWER_TOOLS = ["Read", "Grep", "Glob", "Skill", "Bash(git diff:*)", "Bash(git log:*)",
+                  "Bash(git show:*)", "Bash(git status:*)"]
+
+
+def plugin_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def edit_rules(path, windows=None):
+    """Permission rules that let a session write under `path` only (see docs/probe-results.md)."""
+    if windows is None:
+        windows = os.name == "nt"
+    p = native_path(path.replace("\\", "/"), windows).rstrip("/")
+    if windows and re.match(r"^[a-zA-Z]:/", p):
+        drive, rest = p[0], p[2:]
+        return ["Edit(//%s%s/**)" % (drive.lower(), rest), "Edit(//%s:%s/**)" % (drive.upper(), rest)]
+    return ["Edit(/%s/**)" % p]
+
+
+def launch_args(role, config, home, plugin_dir, resume=None):
+    args = ["--model", config["models"].get(role, "sonnet"),
+            "--add-dir", home, "--add-dir", config["wiki_path"],
+            "--plugin-dir", plugin_dir]
+    if resume:
+        args += ["--resume", resume]
+    if role == "reviewer":
+        # dontAsk denies everything not listed without stopping at a dialog.
+        args += ["--permission-mode", "dontAsk", "--allowedTools"] + REVIEWER_TOOLS
+        args += edit_rules(home) + edit_rules(config["wiki_path"])
+    elif config.get("autonomy") == "conservative":
+        args += ["--permission-mode", "manual"]
+    else:
+        args += ["--permission-mode", "bypassPermissions"]
+    return args
+
+
+def repo_name(key):
+    name = os.path.basename(key)
+    if name == ".git":
+        name = os.path.basename(os.path.dirname(key))
+    if name.endswith(".git"):
+        name = name[:-4]
+    return slug(name)
+
+
+def pm_dir(key):
+    return os.path.join(oke_home(), "repos", repo_name(key), "pm")
+
+
+def children_path(key):
+    return os.path.join(pm_dir(key), "children.json")
+
+
+def session_of(agent):
+    session = agent.get("agent_session")
+    return session.get("value") if isinstance(session, dict) else None
+
+
+def list_agents():
+    return herdr("agent", "list").get("agents", [])
+
+
+def cmd_spawn(args):
+    path = os.path.abspath(native_path(args.assignment)).replace("\\", "/")
+    header = read_header(path)
+    if header is None:
+        return fail("cannot read assignment header: %s" % path)
+    for field in ("agent", "role", "cwd", "seq"):
+        if field not in header:
+            return fail("assignment is missing %r: %s" % (field, path))
+    agent, role, cwd = header["agent"], header["role"], native_path(header["cwd"])
+    if not AGENT_NAME.match(agent):
+        return fail("bad agent name %r: must match %s" % (agent, AGENT_NAME.pattern))
+    if role not in ("pm", "worker", "reviewer"):
+        return fail("bad role %r" % role)
+
+    state = load_state()
+    if role == "pm":
+        try:
+            key = repo_key(cwd)
+        except ValueError as e:
+            return fail(str(e))
+        known = True
+    else:
+        job = state["jobs"].get(header.get("job"))
+        if job is None:
+            return fail("unknown job %r in assignment" % header.get("job"))
+        if job["phase"] not in ("working", "reviewing"):
+            return fail("plan not approved: job %s is in phase %s" % (header["job"], job["phase"]))
+        key = job["repo"]
+        try:
+            known = repo_key(cwd) == key
+        except ValueError:
+            known = False
+
+    if any(a.get("name") == agent for a in list_agents()):
+        return fail("agent name in use: %s" % agent)
+
+    pane = args.pane
+    if not pane:
+        pane = herdr("pane", "split", "--pane", args.split_from, "--direction", "right",
+                     "--cwd", cwd, "--no-focus")["pane"]["pane_id"]
+
+    claude_args = launch_args(role, load_config(), oke_home(), plugin_root(), args.resume)
+    try:
+        herdr("agent", "start", agent, "--kind", "claude", "--pane", pane, "--", *claude_args)
+    except HerdrError as e:
+        if e.code != "agent_not_ready":
+            return fail("agent start failed: %s" % e)
+        screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
+        if TRUST_MARKER not in screen.lower() or not known:
+            return fail("agent %s is stopped at a dialog in pane %s:\n%s" % (agent, pane, screen))
+        herdr("agent", "send-keys", agent, "down", "enter")
+        herdr("agent", "wait", agent, "--until", "idle", "--timeout", "30000")
+
+    herdr("agent", "prompt", agent, FIRST_PROMPT.format(role=role, path=path))
+    info = herdr("agent", "get", agent).get("agent", {})
+    record = {"agent": agent, "pane": info.get("pane_id", pane), "session": session_of(info),
+              "seq": header["seq"], "role": role, "job": header.get("job")}
+    if role == "pm":
+        state = load_state()
+        state["repos"].setdefault(key, {})["pm"] = record
+        save_state(state)
+    else:
+        children = read_json(children_path(key), {})
+        children[agent] = record
+        write_json_atomic(children_path(key), children)
+    print(json.dumps({"agent": agent, "pane": record["pane"], "session": record["session"]}))
+    return 0
+
+
 # ---------------------------------------------------------------- job
 
 def cmd_job(args):
@@ -297,6 +434,14 @@ def build_parser():
     archive = job_sub.add_parser("archive")
     archive.add_argument("slug")
     job.set_defaults(func=cmd_job)
+
+    spawn = sub.add_parser("spawn")
+    spawn.add_argument("assignment")
+    where = spawn.add_mutually_exclusive_group(required=True)
+    where.add_argument("--pane")
+    where.add_argument("--split-from")
+    spawn.add_argument("--resume")
+    spawn.set_defaults(func=cmd_spawn)
     return parser
 
 
@@ -309,7 +454,7 @@ def main(argv=None):
         return args.func(args)
     except HerdrError as e:
         if e.code != "herdr_unavailable":
-            raise
+            return fail("herdr error: %s" % e)
         # exit 2: herdr itself is unreachable. Callers must not read this as "agent gone".
         sys.stderr.write("herdr unavailable: %s\n" % e.message)
         return 2
