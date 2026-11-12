@@ -215,7 +215,7 @@ on: <waiting 일 때 기다리는 대상>
 | agent 가 없음 | 이어 하기 / 보관 / 그대로 둠 |
 | `awaiting_approval`, `awaiting_merge` | 그 질문을 다시 띄움 |
 
-- 이어 하기: `oke spawn`. 세션 id 가 있으면 `--resume`, 실패하면 새 세션. 어느 쪽이든 배정 파일을 읽고 계속한다.
+- 이어 하기: `oke spawn`. 세션 id 가 있으면 `--resume`, 실패하면 새 세션. 옛 pane 은 닫고 새 pane 에서 띄운다 (강제 종료된 pane 은 터미널 상태가 깨져 다시 쓸 수 없다). 어느 쪽이든 배정 파일을 읽고 계속한다.
 - 보관: `archive/` 로 옮기고 `state.json` 에서 뺀다. worktree 와 branch 는 남기고 경로와 바뀐 파일 수를 알린다.
 - `state.json` 을 못 읽으면 `state.json.bad` 로 바꾸고 `jobs/` 목록으로 같은 질문을 한다.
 - `state.json` 의 orchestrator pane 에 다른 orchestrator 가 살아 있으면 시작을 거부하고 그 pane 을 알린다.
