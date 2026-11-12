@@ -68,6 +68,26 @@ class Base(unittest.TestCase):
         return code
 
 
+    def fake(self, scenario):
+        d = self.path("fake")
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        for name in ("calls.log", "counters.json"):
+            if os.path.exists(os.path.join(d, name)):
+                os.remove(os.path.join(d, name))
+        with io.open(os.path.join(d, "scenario.json"), "w", encoding="utf-8") as f:
+            f.write(json.dumps(scenario))
+        os.environ["FAKE_HERDR_DIR"] = d
+        os.environ["OKE_HERDR"] = json.dumps([sys.executable, os.path.join(HERE, "fake", "herdr.py")])
+
+    def calls(self):
+        p = os.path.join(self.path("fake"), "calls.log")
+        if not os.path.exists(p):
+            return []
+        with io.open(p, encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
+
+
 class TestState(Base):
     def test_first_run_creates_home_and_defaults(self):
         home = os.path.join(self.tmp, "nope")
@@ -144,6 +164,52 @@ class TestState(Base):
     def test_job_new_rejects_bad_slug(self):
         repo = self.git_repo("r")
         self.assertEqual(self.cli("job", "new", "Bad Name", "--repo", repo), 1)
+
+
+def J(result):
+    return {"stdout": json.dumps({"id": "x", "result": result}), "exit": 0}
+
+
+def E(code, message="m"):
+    return {"stdout": json.dumps({"id": "x", "error": {"code": code, "message": message}}), "exit": 1}
+
+
+OK = {"stdout": "", "exit": 0}
+
+
+class TestHerdr(Base):
+    def test_herdr_returns_result(self):
+        self.fake({"agent list": [J({"agents": []})]})
+        self.assertEqual(oke.herdr("agent", "list"), {"agents": []})
+
+    def test_herdr_error_code(self):
+        self.fake({"agent get": [E("agent_not_found")]})
+        with self.assertRaises(oke.HerdrError) as c:
+            oke.herdr("agent", "get", "x")
+        self.assertEqual(c.exception.code, "agent_not_found")
+
+    def test_herdr_garbage_is_unavailable(self):
+        self.fake({"agent list": [{"stdout": "connection refused", "exit": 1}]})
+        with self.assertRaises(oke.HerdrError) as c:
+            oke.herdr("agent", "list")
+        self.assertEqual(c.exception.code, "herdr_unavailable")
+
+    def test_herdr_missing_binary_is_unavailable(self):
+        os.environ["OKE_HERDR"] = json.dumps([self.path("no-such-herdr")])
+        with self.assertRaises(oke.HerdrError) as c:
+            oke.herdr("agent", "list")
+        self.assertEqual(c.exception.code, "herdr_unavailable")
+
+    def test_herdr_text(self):
+        self.fake({"agent read": [{"stdout": "line one\nline two\n", "exit": 0}]})
+        self.assertEqual(oke.herdr_text("agent", "read", "a"), "line one\nline two\n")
+
+    def test_missing_commands(self):
+        self.fake({"agent start --help": [OK], "agent prompt --help": [OK],
+                   "agent wait --help": [{"stdout": "", "exit": 2}], "agent read --help": [OK],
+                   "agent send-keys --help": [OK], "pane split --help": [OK],
+                   "worktree create --help": [OK]})
+        self.assertEqual(oke.missing_commands(), ["agent wait"])
 
 
 if __name__ == "__main__":

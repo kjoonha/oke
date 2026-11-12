@@ -168,6 +168,74 @@ def slug(text, limit=24):
     return s[:limit].rstrip("-")
 
 
+# ---------------------------------------------------------------- herdr
+
+REQUIRED_COMMANDS = ("agent start", "agent prompt", "agent wait", "agent read",
+                     "agent send-keys", "pane split", "worktree create")
+
+
+class HerdrError(Exception):
+    def __init__(self, code, message):
+        Exception.__init__(self, "%s: %s" % (code, message))
+        self.code = code
+        self.message = message
+
+
+def herdr_argv():
+    value = os.environ.get("OKE_HERDR", "herdr")
+    if value.lstrip().startswith("["):
+        return json.loads(value)
+    return value.split()
+
+
+def run_herdr(args):
+    """Return (exit code, stdout, stderr). Raises HerdrError when herdr cannot run."""
+    try:
+        p = subprocess.Popen(herdr_argv() + list(args), stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err = p.communicate()
+    except (OSError, ValueError) as e:
+        raise HerdrError("herdr_unavailable", str(e))
+    return (p.returncode,
+            out.decode("utf-8", "replace").replace("\r\n", "\n"),
+            err.decode("utf-8", "replace").replace("\r\n", "\n"))
+
+
+def herdr(*args):
+    code, out, err = run_herdr(args)
+    try:
+        data = json.loads(out)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        lines = (err.strip() or out.strip() or "no output (exit %d)" % code).splitlines()
+        raise HerdrError("herdr_unavailable", lines[0])
+    if "error" in data:
+        e = data["error"] if isinstance(data["error"], dict) else {}
+        raise HerdrError(e.get("code", "unknown"), e.get("message", ""))
+    return data.get("result", {})
+
+
+def herdr_text(*args):
+    code, out, err = run_herdr(args)
+    if code != 0:
+        try:
+            e = json.loads(out).get("error", {})
+            raise HerdrError(e.get("code", "unknown"), e.get("message", ""))
+        except (ValueError, AttributeError):
+            raise HerdrError("herdr_unavailable", (err.strip() or out.strip() or "exit %d" % code).splitlines()[0])
+    return out
+
+
+def missing_commands():
+    missing = []
+    for command in REQUIRED_COMMANDS:
+        code, _, _ = run_herdr(command.split() + ["--help"])
+        if code != 0:
+            missing.append(command)
+    return missing
+
+
 # ---------------------------------------------------------------- job
 
 def cmd_job(args):
@@ -237,7 +305,14 @@ def main(argv=None):
         args = build_parser().parse_args(argv)
     except SystemExit as e:
         return 1 if e.code else 0
-    return args.func(args)
+    try:
+        return args.func(args)
+    except HerdrError as e:
+        if e.code != "herdr_unavailable":
+            raise
+        # exit 2: herdr itself is unreachable. Callers must not read this as "agent gone".
+        sys.stderr.write("herdr unavailable: %s\n" % e.message)
+        return 2
 
 
 if __name__ == "__main__":
