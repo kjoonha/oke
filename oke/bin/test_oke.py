@@ -176,7 +176,8 @@ def J(result):
 
 
 def E(code, message="m"):
-    return {"stdout": json.dumps({"id": "x", "error": {"code": code, "message": message}}), "exit": 1}
+    # real herdr prints error JSON on stderr with an empty stdout
+    return {"stderr": json.dumps({"id": "x", "error": {"code": code, "message": message}}), "exit": 1}
 
 
 OK = {"stdout": "", "exit": 0}
@@ -192,6 +193,18 @@ class TestHerdr(Base):
         with self.assertRaises(oke.HerdrError) as c:
             oke.herdr("agent", "get", "x")
         self.assertEqual(c.exception.code, "agent_not_found")
+
+    def test_herdr_error_on_stdout_also_parsed(self):
+        self.fake({"agent get": [{"stdout": json.dumps({"error": {"code": "agent_not_found", "message": "m"}}), "exit": 1}]})
+        with self.assertRaises(oke.HerdrError) as c:
+            oke.herdr("agent", "get", "x")
+        self.assertEqual(c.exception.code, "agent_not_found")
+
+    def test_herdr_text_error_on_stderr(self):
+        self.fake({"agent read": [E("agent_not_idle")]})
+        with self.assertRaises(oke.HerdrError) as c:
+            oke.herdr_text("agent", "read", "x")
+        self.assertEqual(c.exception.code, "agent_not_idle")
 
     def test_herdr_garbage_is_unavailable(self):
         self.fake({"agent list": [{"stdout": "connection refused", "exit": 1}]})
@@ -244,6 +257,7 @@ class SpawnBase(Base):
     def setUp(self):
         Base.setUp(self)
         self.repo = self.git_repo("toy")
+        oke.DIALOG_POLL = 0
 
     def job(self, name, phase):
         self.assertEqual(self.cli("job", "new", name, "--repo", self.repo), 0)
@@ -330,6 +344,20 @@ class TestSpawn(SpawnBase):
         self.fake(s)
         self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
         self.assertEqual(self.argv_of("agent", "send-keys"), [["agent", "send-keys", "fix-a-w1", "down", "enter"]])
+
+    def test_spawn_waits_for_trust_dialog_to_render(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        s = spawn_ok()
+        s["agent start"] = [E("agent_not_ready")]
+        s["agent read"] = [{"stdout": "PS C:/x> claude\n", "exit": 0},
+                           {"stdout": " Accessing workspace:\n", "exit": 0},
+                           {"stdout": "   Yes, I trust this folder\n", "exit": 0}]
+        s["agent send-keys"] = [J({"type": "ok"})]
+        s["agent wait"] = [AGENT()]
+        self.fake(s)
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
+        self.assertEqual(len(self.argv_of("agent", "send-keys")), 1)
 
     def test_spawn_refuses_trust_dialog_outside_known_repo(self):
         self.job("fix-a", "working")

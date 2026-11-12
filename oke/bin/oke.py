@@ -201,29 +201,36 @@ def run_herdr(args):
             err.decode("utf-8", "replace").replace("\r\n", "\n"))
 
 
+def parse_json(text):
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def raise_herdr_error(code, out, err):
+    """herdr prints error JSON on stderr; anything else means herdr itself is unreachable."""
+    for text in (err, out):
+        data = parse_json(text)
+        if data and isinstance(data.get("error"), dict):
+            raise HerdrError(data["error"].get("code", "unknown"), data["error"].get("message", ""))
+    lines = (err.strip() or out.strip() or "no output (exit %d)" % code).splitlines()
+    raise HerdrError("herdr_unavailable", lines[0])
+
+
 def herdr(*args):
     code, out, err = run_herdr(args)
-    try:
-        data = json.loads(out)
-    except ValueError:
-        data = None
-    if not isinstance(data, dict):
-        lines = (err.strip() or out.strip() or "no output (exit %d)" % code).splitlines()
-        raise HerdrError("herdr_unavailable", lines[0])
-    if "error" in data:
-        e = data["error"] if isinstance(data["error"], dict) else {}
-        raise HerdrError(e.get("code", "unknown"), e.get("message", ""))
+    data = parse_json(out)
+    if data is None or "error" in data:
+        raise_herdr_error(code, out, err)
     return data.get("result", {})
 
 
 def herdr_text(*args):
     code, out, err = run_herdr(args)
     if code != 0:
-        try:
-            e = json.loads(out).get("error", {})
-            raise HerdrError(e.get("code", "unknown"), e.get("message", ""))
-        except (ValueError, AttributeError):
-            raise HerdrError("herdr_unavailable", (err.strip() or out.strip() or "exit %d" % code).splitlines()[0])
+        raise_herdr_error(code, out, err)
     return out
 
 
@@ -240,6 +247,8 @@ def missing_commands():
 
 AGENT_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 TRUST_MARKER = "trust this folder"
+DIALOG_TRIES = 5
+DIALOG_POLL = 1.0
 FIRST_PROMPT = ("Use the oke:{role} skill. Your assignment file is {path}. "
                 "Read it first, then follow it.")
 REVIEWER_TOOLS = ["Read", "Grep", "Glob", "Skill", "Bash(git diff:*)", "Bash(git log:*)",
@@ -351,7 +360,12 @@ def cmd_spawn(args):
     except HerdrError as e:
         if e.code != "agent_not_ready":
             return fail("agent start failed: %s" % e)
-        screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
+        # The dialog can still be drawing when herdr reports the agent blocked.
+        for _ in range(DIALOG_TRIES):
+            screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
+            if TRUST_MARKER in screen.lower():
+                break
+            time.sleep(DIALOG_POLL)
         if TRUST_MARKER not in screen.lower() or not known:
             return fail("agent %s is stopped at a dialog in pane %s:\n%s" % (agent, pane, screen))
         herdr("agent", "send-keys", agent, "down", "enter")

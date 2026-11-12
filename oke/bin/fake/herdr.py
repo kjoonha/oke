@@ -3,7 +3,7 @@
 
 Reads $FAKE_HERDR_DIR/scenario.json: {"<argv prefix joined by spaces>": [response, ...]}.
 The longest matching prefix wins. Each call uses the next response; the last one repeats.
-A response is {"stdout": "...", "exit": 0}. Every call is appended to calls.log.
+A response is {"stdout": "...", "stderr": "...", "exit": 0}. Every call is appended to calls.log.
 """
 import io
 import json
@@ -39,6 +39,7 @@ def main():
     responses = scenario[best]
     r = responses[min(n, len(responses) - 1)]
     sys.stdout.write(r.get("stdout", ""))
+    sys.stderr.write(r.get("stderr", ""))
     return r.get("exit", 0)
 
 
