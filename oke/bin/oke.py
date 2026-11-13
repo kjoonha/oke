@@ -596,6 +596,17 @@ def check_once(agent, report, seq):
     current = header is not None and header.get("seq") == seq
     if current and header.get("type") in FINAL_TYPES:
         return "report %s" % header["type"]
+    look = look_at(agent, os.path.dirname(report))
+    if look != "idle":
+        return look
+    if current and header.get("type") == "waiting":
+        return None
+    return "?" + (report_problem(report, header) or "idle_no_report")
+
+
+def look_at(agent, folder):
+    """herdr's view of an agent: 'gone', 'blocked\\n<screen>', 'idle' when it has
+    nothing to do, '?deliver' when idle with mail, or None while it works."""
     try:
         info = herdr("agent", "get", agent).get("agent", {})
     except HerdrError as e:
@@ -612,22 +623,59 @@ def check_once(agent, report, seq):
             raise
     if status not in ("idle", "done"):
         return None
-    if retry_pending(os.path.join(os.path.dirname(report), "api-retry.json")):
+    if retry_pending(os.path.join(folder, "api-retry.json")):
         return None  # its mod resubmits the turn after an API error
     if inbox_messages(agent):
         return "?deliver"  # idle with mail: deliver it, never call that "no report"
-    if current and header.get("type") == "waiting":
+    return "idle"
+
+
+def report_problem(report, header):
+    """Why an existing report cannot be read, or None (also when there is none)."""
+    if not os.path.exists(report):
         return None
-    if os.path.exists(report):
-        if header is None:
-            return "?bad_report no header (expected key: value lines, then ---)"
-        if "type" not in header or "seq" not in header:
-            return "?bad_report header needs type and seq"
-        if header["type"] not in REPORT_TYPES:
-            return "?bad_report unknown type %r" % header["type"]
-        if not isinstance(header["seq"], int):
-            return "?bad_report seq is not a number"
-    return "?idle_no_report"
+    if header is None:
+        return "bad_report no header (expected key: value lines, then ---)"
+    if "type" not in header or "seq" not in header:
+        return "bad_report header needs type and seq"
+    if header["type"] not in REPORT_TYPES:
+        return "bad_report unknown type %r" % header["type"]
+    if not isinstance(header["seq"], int):
+        return "bad_report seq is not a number"
+    return None
+
+
+def check_pm_once(agent, key):
+    """One look at a PM and every open job of its repository (read fresh each time,
+    so a job added later counts). A final report is returned once: `seen` remembers it."""
+    state = load_state()
+    jobs = []
+    for name in sorted(open_jobs(state, key)):
+        seq, header, mtime = pm_job_report(name)
+        if seq is not None:
+            jobs.append((name, seq, header, mtime))
+    fresh = [j for j in jobs if j[2].get("seq") == j[1] and j[2].get("type") in FINAL_TYPES
+             and state["jobs"][j[0]].get("seen") != j[1]]
+    if fresh:
+        name, seq, header, _ = min(fresh, key=lambda j: j[3] or 0)
+        with locked():
+            current = load_state()
+            if name in current["jobs"]:
+                current["jobs"][name]["seen"] = seq
+                save_state(current)
+        return "report %s %s" % (header["type"], name)
+    look = look_at(agent, pm_dir(key))
+    if look != "idle":
+        return look
+    for name, seq, header, _ in jobs:
+        if not (header.get("seq") == seq and header.get("type") in REPORT_TYPES):
+            report = os.path.join(pm_job_dir(name), "report.md")
+            problem = report_problem(report, read_header(report))
+            if problem:
+                word, why = problem.split(" ", 1)
+                return "?%s %s %s" % (word, name, why)
+            return "?idle_no_report %s" % name
+    return None
 
 
 _claims = [0]
@@ -664,7 +712,7 @@ def retry_pending(marker):
     return age < delay + RETRY_MARKER_GRACE
 
 
-def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
+def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, jobs_key=None):
     """No time limit: a five hour simulation is a normal wait. A herdr state read
     right after input can be stale and a report can be mid-write, so an idle
     verdict needs IDLE_CONFIRMATIONS consecutive polls."""
@@ -682,7 +730,10 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
         if superseded(agent, token):
             return "superseded"
         try:
-            result = check_once(agent, report, seq)
+            if jobs_key is None:
+                result = check_once(agent, report, seq)
+            else:
+                result = check_pm_once(agent, jobs_key)
             outage = 0
         except HerdrError as e:
             outage += 1
@@ -716,6 +767,16 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
 
 
 def cmd_wait(args):
+    if args.jobs:
+        state = load_state()
+        keys = [k for k, r in state["repos"].items() if (r.get("pm") or {}).get("agent") == args.agent]
+        if not keys:
+            return fail("--jobs needs a PM agent: %s is not one" % args.agent)
+        print(wait_loop(args.agent, None, None, poll=args.poll,
+                        after_blocked=args.after_blocked, jobs_key=keys[0]))
+        return 0
+    if args.report is None or args.seq is None:
+        return fail("wait needs --report and --seq, or --jobs for a PM")
     print(wait_loop(args.agent, native_path(args.report), args.seq, poll=args.poll,
                     after_blocked=args.after_blocked))
     return 0
@@ -1512,8 +1573,9 @@ def build_parser():
 
     wait = sub.add_parser("wait")
     wait.add_argument("agent")
-    wait.add_argument("--report", required=True)
-    wait.add_argument("--seq", type=int, required=True)
+    wait.add_argument("--report")
+    wait.add_argument("--seq", type=int)
+    wait.add_argument("--jobs", action="store_true")
     wait.add_argument("--poll", type=float, default=2)
     wait.add_argument("--after-blocked", action="store_true")
     wait.set_defaults(func=cmd_wait)
