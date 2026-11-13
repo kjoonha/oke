@@ -187,14 +187,16 @@ export const register: Register = on => {
       const extra = [n.report ? `report ${n.report}` : '', n.revives ? `revived ${n.revives}x` : '']
         .filter(Boolean)
         .join(', ')
+      // Text and buttons on separate lines: in a narrow pane one row squeezed the text away (seen live).
       const rows = [
+        <Text color={n.status === 'dead' ? 'red' : n.status === 'blocked' ? 'yellow' : undefined}>
+          {`${indent}${n.agent} ${n.role} ${n.status}${age}${extra ? ` (${extra})` : ''}`}
+        </Text>,
         <Box flexDirection="row">
-          <Text color={n.status === 'dead' ? 'red' : n.status === 'blocked' ? 'yellow' : undefined}>
-            {`${indent}${n.agent} ${n.role} ${n.status}${age}${extra ? ` (${extra})` : ''} `}
-          </Text>
-          <Button label={open.includes(n.agent) ? '접기' : '펼치기'} onPress={() => toggle(n.agent)} />
+          <Text>{indent}</Text>
+          <Button key={`open-${n.agent}`} label={open.includes(n.agent) ? '접기' : '펼치기'} onPress={() => toggle(n.agent)} />
           <Text> </Text>
-          <Button label="이동" onPress={() => focus(n.agent)} />
+          <Button key={`go-${n.agent}`} label="이동" onPress={() => focus(n.agent)} />
         </Box>,
       ]
       if (open.includes(n.agent)) {

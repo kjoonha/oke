@@ -2,8 +2,19 @@ import { expect, mock, test } from 'claude-code/testing'
 
 type Run = { argv: readonly string[] }
 
+const BOARD = [{
+  repo: 'toy-6b0484', key: 'k', pm: null,
+  jobs: [{ job: 'calc-sub', phase: 'working', agents: [{
+    agent: 'calc-sub-w1', role: 'worker', status: 'working', pane: 'w7:p9', report: null,
+    board: '## 지금\nwriting sub', revives: 1 }] }],
+}]
+
+let tickRole = 'worker'
+
 function answer(args: readonly string[]) {
-  if (args[0] === 'tick') return { role: 'worker', events: [], events_offset: 0, board: null, revived: {} }
+  if (args[0] === 'tick') {
+    return { role: tickRole, events: [], events_offset: 0, board: tickRole === 'worker' ? null : BOARD, revived: {} }
+  }
   if (args[0] === 'api-retry' && args.includes('--clear')) return { action: 'cleared' }
   if (args.includes('authentication_failed')) return { action: 'give_up', limit: 20 }
   return { action: 'retry', delay: 30, limit: 20 }
@@ -85,4 +96,29 @@ test('outside herdr the mod does nothing', async ($, on) => {
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.complete({ ...TURN, reason: 'error' } as any)
   expect(runs.length).toBe(0)
+})
+
+const PANE = {
+  plugin: 'oke', component: 'Pane', requestId: 'oke-board',
+  props: { title: 'OKe board', isFocused: false, bodyColumns: 30, placement: 'dock',
+           scroll: { offset: 0, bodyRows: 20 }, view: {} },
+} as const
+
+test('the board lists an agent and expands its board.md', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  engine(on, [], [])
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, surface })
+    expect((await ui.find({ type: 'Text', text: /calc-sub-w1 worker working/ }))?.text).toContain('revived 1x')
+    expect(await ui.find({ type: 'Text', text: /writing sub/ })).toBeFalsy()
+    await ui.press({ key: 'open-calc-sub-w1' })
+    expect(await ui.find({ type: 'Text', text: /writing sub/ })).toBeTruthy()
+    await ui.press({ key: 'open-calc-sub-w1' })
+    await ui.unmount()
+  }
+  tickRole = 'worker'
 })

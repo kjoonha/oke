@@ -347,6 +347,7 @@ AGENT_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 TRUST_MARKER = "trust this folder"
 DIALOG_TRIES = 5
 DIALOG_POLL = 1.0
+START_TIMEOUT_MS = 90000
 FIRST_PROMPT = ("Use the oke:{role} skill. Your assignment file is {path}. "
                 "Read it first, then follow it.")
 REVIEWER_TOOLS = ["Read", "Grep", "Glob", "Skill", "Bash(git diff:*)", "Bash(git log:*)",
@@ -444,7 +445,9 @@ def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: No
     send the first prompt and make sure the first turn started. `registered` runs once
     herdr knows the name. Returns herdr's agent info."""
     try:
-        herdr("agent", "start", agent, "--kind", "claude", "--pane", pane, "--", *claude_args)
+        # herdr's 30 s default was too short live for a claude resuming a long session
+        herdr("agent", "start", agent, "--kind", "claude", "--pane", pane, "--timeout", str(START_TIMEOUT_MS),
+              "--", *claude_args)
     except HerdrError as e:
         if e.code != "agent_not_ready":
             raise
