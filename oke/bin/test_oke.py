@@ -373,6 +373,13 @@ class TestSpawn(SpawnBase):
         pm = oke.load_state()["repos"][oke.repo_key(self.repo)]["pm"]
         self.assertEqual((pm["agent"], pm["pane"], pm["session"]), ("pm-toy", "w1:p9", "s-1"))
 
+    def test_spawn_pm_refuses_an_old_per_job_assignment(self):
+        # before slice 3 the PM folder held one job's instruction; it is no standing assignment
+        a = self.assignment("pm-toy", "pm", job="fix-a")
+        self.fake(spawn_ok())
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 1)
+        self.assertEqual(self.argv_of("agent", "start"), [])
+
     def test_spawn_name_in_use(self):
         self.job("fix-a", "working")
         a = self.assignment("fix-a-w1", "worker", "fix-a")
@@ -702,9 +709,9 @@ class TestStatus(SpawnBase):
             "j-work-w1": {"agent": "j-work-w1", "job": "j-work", "pane": "w2:p1"},
             "j-work-rv": {"agent": "j-work-rv", "job": "j-work", "pane": "w2:p2"}})
         alive = self.status([AG(name="pm-toy", pane="w1:p3", cwd=self.repo), AG(name="j-work-w1", pane="w2:p1")])
-        self.assertEqual(alive["jobs"]["j-work"],
-                         {"phase": "working", "class": "alive",
-                          "agents": {"j-work-w1": "alive", "j-work-rv": "dead"}})
+        work = alive["jobs"]["j-work"]
+        self.assertEqual((work["phase"], work["class"], work["agents"]),
+                         ("working", "alive", {"j-work-w1": "alive", "j-work-rv": "dead"}))
         self.assertEqual(alive["jobs"]["j-merge"]["class"], "awaiting_user")
         dead = self.status([])
         self.assertEqual(dead["jobs"]["j-work"]["class"], "disconnected")
@@ -931,7 +938,7 @@ class TestReviewFixes(SpawnBase):
         self.assertIn("w1:p9", self.err)
 
     # 9. status gives the orchestrator what its skill needs
-    def test_status_prints_pm_dir_session_and_assignment_seq(self):
+    def test_status_prints_pm_dir_and_session(self):
         key = oke.repo_key(self.repo)
         s = oke.load_state()
         s["repos"][key] = {"pm": {"agent": "pm-toy", "pane": "w1:p3", "session": "s-pm", "seq": 1}}
@@ -945,7 +952,7 @@ class TestReviewFixes(SpawnBase):
         self.fake(sc)
         self.assertEqual(self.cli("status"), 0)
         repo = json.loads(self.out)["repos"][key]
-        self.assertEqual((repo["session"], repo["seq"]), ("s-pm", 5))
+        self.assertEqual(repo["session"], "s-pm")  # seq is per job now: status.jobs[..].pm_seq
         self.assertEqual(repo["pm_dir"], oke.pm_dir(key).replace("\\", "/"))
 
 

@@ -11,12 +11,22 @@ If your first prompt says you were restarted after a crash, your earlier turns a
 
 ## Steps
 
-1. Read your assignment file (path in your first prompt). Header: `job`, `cwd`, `wiki`, `seq`. Your folder is the folder of that file. When a prompt says "Assignment updated", read it again: `이번 지시` and `seq` changed.
+1. Read your assignment file (path in your first prompt). Header: `job`, `cwd`, `wiki`, `parent`, `seq`. Your folder is the folder of that file. New instructions arrive as a prompt starting with `OKe inbox:` that says "Assignment updated": read the assignment again, `이번 지시` and `seq` changed.
 2. Read `<wiki>/index.md` if it exists, and the pages that matter for this job.
 3. Do the work in `cwd`. Stay inside the assignment's 범위. Do not write outside `cwd`, except your own folder.
 4. If your assignment header says `commit: yes`, commit your work in `cwd` on the current branch. Otherwise leave it uncommitted and say so in the report; the PM commits it after the user approves.
 5. Run the assignment's 검증 명령 for real. Paste the command and the end of its output into the report.
 6. Write your report and end your turn.
+
+## Urgent findings
+
+If you find something your PM must know now, while you keep working (the plan misses a file, the change breaks another part, the 검증 명령 cannot pass as written), send it without ending your turn:
+
+```
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py" send <parent> "URGENT <job>: <one line>. See <your folder>/board.md."
+```
+
+Use `python` if `python3` does not exist. Put the details in `board.md` first. The message must not start with `/`. Then continue; the PM answers with a new instruction when your turn ends. Do not wait for it.
 
 ## Board
 

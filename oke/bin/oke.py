@@ -15,7 +15,7 @@ import sys
 import time
 
 PHASES = ("intake", "planning", "awaiting_approval", "working", "reviewing",
-          "awaiting_merge", "done", "failed")
+          "awaiting_merge", "merging", "done", "failed")
 EMPTY_STATE = {"orchestrator": {}, "repos": {}, "jobs": {}}
 
 
@@ -101,13 +101,17 @@ def write_json_atomic(path, obj):
     directory = os.path.dirname(path)
     if not os.path.isdir(directory):
         os.makedirs(directory)
-    tmp = path + ".tmp"
+    tmp = "%s.%d.tmp" % (path, os.getpid())  # two processes may write the same file
     with io.open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True))
         f.write(u"\n")
+    replace_file(tmp, path)
+
+
+def replace_file(src, dst):
     for attempt in range(20):
         try:
-            os.replace(tmp, path)
+            os.replace(src, dst)
             return
         except OSError:  # Windows: another process has the file open for a moment
             if attempt == 19:
@@ -415,6 +419,11 @@ def pm_dir(key):
     return os.path.join(oke_home(), "repos", repo_name(key), "pm")
 
 
+def pm_job_dir(job):
+    """The orchestrator-PM channel of one job: assignment.md and report.md."""
+    return os.path.join(oke_home(), "jobs", job, "pm")
+
+
 def children_path(key):
     return os.path.join(pm_dir(key), "children.json")
 
@@ -503,6 +512,9 @@ def cmd_spawn(args):
     state = load_state()
     known_keys = set(state["repos"]) | set(j.get("repo") for j in state["jobs"].values())
     if role == "pm":
+        if "job" in header:
+            # a pre-slice-3 PM folder held one job's instruction here
+            return fail("%s is an old per-job PM assignment; rewrite it as the standing assignment" % path)
         try:
             key = repo_key(cwd)
         except ValueError as e:
@@ -511,7 +523,7 @@ def cmd_spawn(args):
         job = state["jobs"].get(header.get("job"))
         if job is None:
             return fail("unknown job %r in assignment" % header.get("job"))
-        if job["phase"] not in ("working", "reviewing"):
+        if job["phase"] not in ("working", "reviewing", "merging"):
             return fail("plan not approved: job %s is in phase %s" % (header["job"], job["phase"]))
         key = job["repo"]
 
@@ -591,6 +603,17 @@ def check_once(agent, report, seq):
     current = header is not None and header.get("seq") == seq
     if current and header.get("type") in FINAL_TYPES:
         return "report %s" % header["type"]
+    look = look_at(agent, os.path.dirname(report))
+    if look != "idle":
+        return look
+    if current and header.get("type") == "waiting":
+        return None
+    return "?" + (report_problem(report, header) or "idle_no_report")
+
+
+def look_at(agent, folder):
+    """herdr's view of an agent: 'gone', 'blocked\\n<screen>', 'idle' when it has
+    nothing to do, '?deliver' when idle with mail, or None while it works."""
     try:
         info = herdr("agent", "get", agent).get("agent", {})
     except HerdrError as e:
@@ -607,20 +630,129 @@ def check_once(agent, report, seq):
             raise
     if status not in ("idle", "done"):
         return None
-    if current and header.get("type") == "waiting":
-        return None
-    if retry_pending(os.path.join(os.path.dirname(report), "api-retry.json")):
+    if retry_pending(os.path.join(folder, "api-retry.json")):
         return None  # its mod resubmits the turn after an API error
-    if os.path.exists(report):
-        if header is None:
-            return "?bad_report no header (expected key: value lines, then ---)"
-        if "type" not in header or "seq" not in header:
-            return "?bad_report header needs type and seq"
-        if header["type"] not in REPORT_TYPES:
-            return "?bad_report unknown type %r" % header["type"]
-        if not isinstance(header["seq"], int):
-            return "?bad_report seq is not a number"
-    return "?idle_no_report"
+    if inbox_messages(agent):
+        return "?deliver"  # idle with mail: deliver it, never call that "no report"
+    return "idle"
+
+
+def report_problem(report, header):
+    """Why an existing report cannot be read, or None (also when there is none)."""
+    if not os.path.exists(report):
+        return None
+    if header is None:
+        return "bad_report no header (expected key: value lines, then ---)"
+    if "type" not in header or "seq" not in header:
+        return "bad_report header needs type and seq"
+    if header["type"] not in REPORT_TYPES:
+        return "bad_report unknown type %r" % header["type"]
+    if not isinstance(header["seq"], int):
+        return "bad_report seq is not a number"
+    return None
+
+
+SILENT_AFTER = 2  # warnings for one job and seq before the wait stops raising it
+
+
+def warn_job(result):
+    """Count an idle_no_report/bad_report of a job. The second one says "again"; after
+    that the shared PM wait skips the job, and `pending` lists it as silent."""
+    name = result.split(" ")[1]
+    with locked():
+        state = load_state()
+        job = state["jobs"].get(name)
+        if job is None:
+            return result
+        seq = pm_job_report(name)[0]
+        count = job["warned"][1] + 1 if (job.get("warned") or [None])[0] == seq else 1
+        job["warned"] = [seq, count]
+        save_state(state)
+    if count >= SILENT_AFTER:
+        word, rest = result.split(" ", 1)
+        return "%s again %s" % (word, rest)
+    return result
+
+
+def is_silent(job, seq):
+    warned = job.get("warned") or [None, 0]
+    return warned[0] == seq and warned[1] >= SILENT_AFTER
+
+
+def seen_mark(header):
+    """A blocked report may follow a question at the same seq: both must come through."""
+    return "%s:%s" % (header.get("type"), header.get("seq"))
+
+
+def check_pm_once(agent, key):
+    """One look at a PM and every open job of its repository (read fresh each time,
+    so a job added later counts). A final report is returned once: `seen` remembers it."""
+    state = load_state()
+    if not open_jobs(state, key) and not inbox_messages(agent):
+        return "no_jobs"  # nothing left to watch or deliver (a cancel goes in first)
+    jobs = []
+    for name in sorted(open_jobs(state, key)):
+        seq, header, mtime = pm_job_report(name)
+        if seq is not None:
+            jobs.append((name, seq, header, mtime))
+    fresh = [j for j in jobs if j[2].get("seq") == j[1] and j[2].get("type") in FINAL_TYPES
+             and state["jobs"][j[0]].get("seen") != seen_mark(j[2])]
+    if fresh:
+        name, seq, header, _ = min(fresh, key=lambda j: j[3] or 0)
+        with locked():
+            current = load_state()
+            if name not in current["jobs"] or current["jobs"][name].get("seen") == seen_mark(header):
+                return None  # another wait returned it a moment ago
+            current["jobs"][name]["seen"] = seen_mark(header)
+            save_state(current)
+        return "report %s %s" % (header["type"], name)
+    look = look_at(agent, pm_dir(key))
+    if look == "gone" and not open_jobs(state, key):
+        # Mail for a dead PM without open jobs (a cancel): nobody revives it, and the
+        # next PM of this repository must not get it.
+        done = os.path.join(inbox_dir(agent), "read")
+        if not os.path.isdir(done):
+            os.makedirs(done, exist_ok=True)
+        for path, _ in inbox_messages(agent):
+            replace_file(path, os.path.join(done, os.path.basename(path)))
+        return "no_jobs"
+    if look != "idle":
+        return look
+    for name, seq, header, _ in jobs:
+        if state["jobs"][name].get("sent_seq") != seq:
+            continue  # the orchestrator is still handing it over: the message is not sent yet
+        if is_silent(state["jobs"][name], seq):
+            continue  # the user was told twice; `pending` keeps it in view
+        if not (header.get("seq") == seq and header.get("type") in REPORT_TYPES):
+            report = os.path.join(pm_job_dir(name), "report.md")
+            problem = report_problem(report, read_header(report))
+            if problem:
+                word, why = problem.split(" ", 1)
+                return "?%s %s %s" % (word, name, why)
+            return "?idle_no_report %s" % name
+    return None
+
+
+DELIVER_TRIES = 3  # failed deliveries in a row before the wait says deliver_failed
+_claims = [0]
+
+
+def wait_mark(agent):
+    return os.path.join(oke_home(), "waits", agent)
+
+
+def claim_wait(agent):
+    """The newest wait on an agent is the only one: two would report one dialog twice
+    and deliver one message twice. Older waits see a foreign token and stop."""
+    _claims[0] += 1
+    token = "%.6f-%d-%d" % (time.time(), os.getpid(), _claims[0])
+    write_json_atomic(wait_mark(agent), {"token": token})
+    return token
+
+
+def superseded(agent, token):
+    mark = read_json(wait_mark(agent), None)
+    return isinstance(mark, dict) and mark.get("token") not in (None, token)
 
 
 RETRY_MARKER_GRACE = 120  # seconds past the marker's own delay
@@ -636,7 +768,7 @@ def retry_pending(marker):
     return age < delay + RETRY_MARKER_GRACE
 
 
-def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
+def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, jobs_key=None):
     """No time limit: a five hour simulation is a normal wait. A herdr state read
     right after input can be stale and a report can be mid-write, so an idle
     verdict needs IDLE_CONFIRMATIONS consecutive polls."""
@@ -648,14 +780,28 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
     # the agent may already be at its next dialog when this wait starts.
     armed = not after_blocked
     started = time.time()
+    failed_deliveries = 0
+    token = claim_wait(agent)
     while max_polls is None or polls < max_polls:
         polls += 1
+        if superseded(agent, token):
+            return "superseded"
         try:
-            result = check_once(agent, report, seq)
+            if jobs_key is None:
+                result = check_once(agent, report, seq)
+            else:
+                result = check_pm_once(agent, jobs_key)
             outage = 0
         except HerdrError as e:
             outage += 1
             if e.code != "herdr_unavailable" or outage > HERDR_RETRIES:
+                raise
+            result = None
+        except (OSError, StateError):
+            # Windows holds a file open for a moment, or state.json is locked a while:
+            # the next poll reads it again. Only a lasting failure ends the wait.
+            outage += 1
+            if outage > HERDR_RETRIES:
                 raise
             result = None
         if result is not None and result.startswith("blocked"):
@@ -663,22 +809,55 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
                 result = None
         else:
             armed = True
-        if result == "gone" and revive(agent) in ("revived", "alive", "busy", "failed"):
-            result = None  # failed counts toward the revive limit and is tried again
+        if result == "gone":
+            try:
+                if revive(agent) in ("revived", "alive", "busy", "failed"):
+                    result = None  # failed counts toward the revive limit and is tried again
+            except (OSError, StateError):
+                result = None  # state.json busy for a moment: look again next poll
         if result is None:
             idle = 0
         elif result.startswith("?"):
             idle += 1
             if idle >= IDLE_CONFIRMATIONS:
-                return result[1:]
+                if result != "?deliver":
+                    if superseded(agent, token):
+                        return "superseded"
+                    if jobs_key is not None:
+                        return warn_job(result[1:])
+                    return result[1:]
+                try:
+                    if deliver(agent) is False:  # the mail stays; the next round tries again
+                        failed_deliveries += 1
+                    else:
+                        failed_deliveries = 0
+                except (HerdrError, OSError):
+                    pass  # a passing outage: the next check_once counts it
+                if failed_deliveries >= DELIVER_TRIES:
+                    return "deliver_failed"  # never loop silently on mail that cannot go in
+                idle = 0
         else:
-            return result
+            # A newer wait may have started while this one looked. A --jobs report is
+            # already marked seen, so the newer wait would never return it: keep it.
+            if jobs_key is not None and result.startswith("report "):
+                return result
+            return "superseded" if superseded(agent, token) else result
         if poll:
             time.sleep(poll)
     return None
 
 
 def cmd_wait(args):
+    if args.jobs:
+        state = load_state()
+        keys = [k for k, r in state["repos"].items() if (r.get("pm") or {}).get("agent") == args.agent]
+        if not keys:
+            return fail("--jobs needs a PM agent: %s is not one" % args.agent)
+        print(wait_loop(args.agent, None, None, poll=args.poll,
+                        after_blocked=args.after_blocked, jobs_key=keys[0]))
+        return 0
+    if args.report is None or args.seq is None:
+        return fail("wait needs --report and --seq, or --jobs for a PM")
     print(wait_loop(args.agent, native_path(args.report), args.seq, poll=args.poll,
                     after_blocked=args.after_blocked))
     return 0
@@ -691,6 +870,14 @@ REVIVE_LIMIT = 3  # consecutive deaths with no new report in between
 ORCH_NAME = "oke-orch"
 REVIVE_PROMPT = ("You were restarted after a crash. Use the oke:{role} skill. Re-read your "
                  "assignment file {path} and your board.md, then continue.")
+
+
+def pm_jobs_note(state, key):
+    """The job assignments a restarted or compacted PM has to re-read."""
+    paths = [os.path.join(pm_job_dir(j), "assignment.md").replace("\\", "/")
+             for j in sorted(open_jobs(state, key))]
+    paths = [p for p in paths if os.path.exists(p)]
+    return (" Then re-read the assignment of each open job: %s." % ", ".join(paths)) if paths else ""
 
 
 def open_jobs(state, key=None):
@@ -852,6 +1039,8 @@ def relaunch(state, role, key, name, record, folder):
         path = os.path.join(folder, "assignment.md").replace("\\", "/")
         cwd = native_path((read_header(path) or {}).get("cwd") or oke_home())
         agent, prompt = name, REVIVE_PROMPT.format(role=role, path=path)
+        if role == "pm":
+            prompt += pm_jobs_note(state, key)
         args = launch_args(role, load_config(), oke_home(), plugin_root())
     if record.get("session"):
         args = args + ["--resume", record["session"]]
@@ -908,7 +1097,11 @@ def revive_locked(name):
     if live_agent(record, list_agents()):
         return "alive"
     folder = agent_folder(role, name, key, record)
-    mtime = report_mtime(folder) if folder else None
+    if role == "pm":  # a PM reports per job, in each job's pm folder
+        mtime = max([m for m in (report_mtime(pm_job_dir(j)) for j in open_jobs(state, key))
+                     if m is not None] or [None])
+    else:
+        mtime = report_mtime(folder) if folder else None
     revives = record.get("revives", 0)
     if folder and mtime != record.get("report_mtime"):
         revives = 0  # it reported since the last revive: not a crash loop
@@ -979,7 +1172,8 @@ def whoami(state, pane):
 def board_node(role, name, key, record, agents):
     folder = agent_folder(role, name, key, record)
     a = live_agent(record, agents)
-    report = read_header(os.path.join(folder, "report.md")) if folder else None
+    # a PM reports per job; an old pm/report.md from before is not its state
+    report = read_header(os.path.join(folder, "report.md")) if folder and role != "pm" else None
     try:
         with io.open(os.path.join(folder, "board.md"), encoding="utf-8") as f:
             board = f.read()
@@ -1071,9 +1265,19 @@ def cmd_api_retry(args):
     else:
         out["action"] = "give_up"
         log_event("api_gave_up %s: %s after %d attempts" % (name, kind or "error", args.attempt))
-        if folder:
-            seq = (read_header(os.path.join(folder, "assignment.md")) or {}).get("seq")
-            with io.open(os.path.join(folder, "report.md"), "w", encoding="utf-8", newline="\n") as f:
+        if role == "pm":
+            # A PM reports per job. A final report of the current seq still waits on
+            # the user (a plan to approve): leave it, fail only the jobs owing one.
+            folders = []
+            for job in sorted(open_jobs(state, key)):
+                seq, header, _ = pm_job_report(job)
+                if seq is not None and not (header.get("seq") == seq and header.get("type") in FINAL_TYPES):
+                    folders.append(pm_job_dir(job))
+        else:
+            folders = [folder] if folder else []
+        for f_dir in folders:
+            seq = (read_header(os.path.join(f_dir, "assignment.md")) or {}).get("seq")
+            with io.open(os.path.join(f_dir, "report.md"), "w", encoding="utf-8", newline="\n") as f:
                 f.write(u"type: failed\nseq: %s\n---\n## 요약\nAPI error %s: automatic retry stopped "
                         u"after %d attempts.\n" % (seq, kind or "unknown", args.attempt))
     if marker and os.path.exists(marker):
@@ -1160,12 +1364,10 @@ def status_locked(args):
             if session_of(found) and session_of(found) != record.get("session"):
                 record["session"] = session_of(found)
                 changed = True
-        assignment = read_header(os.path.join(pm_dir(key), "assignment.md")) or {}
         result["repos"][key] = {"pm": "alive" if found else "dead",
                                 "agent": record.get("agent"), "pane": record.get("pane"),
                                 "session": record.get("session"),
-                                "pm_dir": pm_dir(key).replace("\\", "/"),
-                                "seq": assignment.get("seq")}
+                                "pm_dir": pm_dir(key).replace("\\", "/")}
 
     for name, job in state["jobs"].items():
         key = job.get("repo")
@@ -1178,7 +1380,9 @@ def status_locked(args):
             cls = "alive"
         else:
             cls = "disconnected"
-        result["jobs"][name] = {"phase": job.get("phase"), "class": cls, "agents": job_agents}
+        result["jobs"][name] = {"phase": job.get("phase"), "class": cls, "agents": job_agents,
+                                "pm_seq": pm_job_report(name)[0],
+                                "pm_job_dir": pm_job_dir(name).replace("\\", "/")}
 
     here = os.environ.get("HERDR_PANE_ID")
     recorded = state["orchestrator"].get("pane")
@@ -1216,11 +1420,13 @@ def compact_message():
         return ("OKe: context was compacted. Re-read %s and run oke status before continuing."
                 % state_path().replace("\\", "/"))
     folder = None
+    note = ""
     repos = state.get("repos") or {}
     keys = set(repos) | set(j.get("repo") for j in (state.get("jobs") or {}).values() if j.get("repo"))
     for key in sorted(keys):
         if ((repos.get(key) or {}).get("pm") or {}).get("pane") == pane:
             folder = pm_dir(key)
+            note = pm_jobs_note({"jobs": state.get("jobs") or {}}, key)
             break
         for name, rec in read_children(key).items():
             if rec.get("pane") == pane and rec.get("job"):
@@ -1231,8 +1437,8 @@ def compact_message():
     if not folder:
         return ""
     folder = folder.replace("\\", "/")
-    return ("OKe: context was compacted. Re-read %s/assignment.md and %s/board.md before continuing."
-            % (folder, folder))
+    return ("OKe: context was compacted. Re-read %s/assignment.md and %s/board.md before continuing.%s"
+            % (folder, folder, note))
 
 
 def cmd_compact_hook(args):
@@ -1274,9 +1480,11 @@ def job_locked(args):
         if subprocess.call(["git", "-C", native_path(args.repo), "show-ref", "--verify", "--quiet", branch]) == 0:
             return fail("branch oke/%s already exists (an earlier job): pick another job name" % args.slug)
         os.makedirs(job_dir)
-        state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None}
+        state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None,
+                                    "phase_at": time.time()}
         save_state(state)
         print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key,
+                          "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
                           "pm_dir": pm_dir(key).replace("\\", "/"),
                           "pm_agent": "pm-" + repo_name(key),
                           "wiki": os.path.join(load_config()["wiki_path"], repo_name(key)).replace("\\", "/")},
@@ -1287,7 +1495,14 @@ def job_locked(args):
     if args.action == "phase":
         if args.phase not in PHASES:
             return fail("bad phase %r: one of %s" % (args.phase, ", ".join(PHASES)))
-        state["jobs"][args.slug]["phase"] = args.phase
+        state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
+        save_state(state)
+        return 0
+    if args.action == "defer":
+        item = pending_item(args.slug, state["jobs"][args.slug])
+        if item is None:
+            return fail("job %s has nothing waiting for the user" % args.slug)
+        state["jobs"][args.slug]["deferred"] = item["key"]
         save_state(state)
         return 0
     if args.action == "archive":
@@ -1302,6 +1517,176 @@ def job_locked(args):
         print(dst)
         return 0
     return fail("unknown action")
+
+
+# ---------------------------------------------------------------- inbox
+
+_sent = [0]
+
+
+def inbox_dir(agent):
+    return os.path.join(oke_home(), "inbox", agent)
+
+
+def inbox_messages(agent):
+    """[(path, text)] oldest first. Names start with a fixed-width time, so they sort."""
+    d = inbox_dir(agent)
+    try:
+        names = sorted(n for n in os.listdir(d) if n.endswith(".txt"))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        try:
+            with io.open(os.path.join(d, n), encoding="utf-8") as f:
+                out.append((os.path.join(d, n), f.read().strip()))
+        except (IOError, OSError, UnicodeDecodeError):
+            pass  # moved away by a delivery in another process
+    return out
+
+
+def cmd_send(args):
+    text = " ".join(" ".join(args.text).split())
+    if not text:
+        return fail("empty message")
+    if text.startswith("/"):
+        return fail("a message must not start with '/': Git Bash rewrites it into a Windows path")
+    state = load_state()
+    found = find_target(state, args.agent)
+    if found is None:
+        return fail("unknown agent: %s" % args.agent)
+    if found[0] == "orchestrator":
+        return fail("the orchestrator has no inbox: a PM reports to it instead")
+    sender = "user"
+    pane = os.environ.get("HERDR_PANE_ID")
+    if pane:
+        try:
+            me, _ = whoami(state, pane)
+        except HerdrError:
+            me = None
+        if me:
+            sender = me[1]
+    if args.job:
+        # From now on the PM owes this job a report for this seq (see check_pm_once).
+        # Recorded before the message: a crash in between leaves an idle_no_report
+        # nudge, never a job nobody waits for.
+        with locked():
+            current = load_state()
+            if args.job not in current["jobs"]:
+                return fail("unknown job: %s" % args.job)
+            seq = pm_job_report(args.job)[0]
+            if current["jobs"][args.job].get("sent_seq") != seq:
+                current["jobs"][args.job].pop("warned", None)  # a nudge keeps the count
+            current["jobs"][args.job]["sent_seq"] = seq
+            save_state(current)
+    d = inbox_dir(found[1])
+    if not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    _sent[0] += 1
+    path = os.path.join(d, "%.6f-%d-%d.txt" % (time.time(), os.getpid(), _sent[0]))
+    with io.open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
+        f.write(u"%s: %s\n" % (sender, text))
+    os.replace(path + ".tmp", path)
+    print(json.dumps({"agent": found[1], "queued": True}))
+    return 0
+
+
+def deliver(agent):
+    """Type the queued messages into `agent`, which the caller saw idle. They leave the
+    inbox only after herdr took them, so a failed prompt loses nothing."""
+    if not inbox_messages(agent):
+        return None
+    lock = "deliver-" + agent
+    if not try_lock(lock):
+        return None  # another wait delivers right now
+    try:
+        msgs = inbox_messages(agent)
+        if not msgs:
+            return None
+        text = "OKe inbox: " + " | ".join(t for _, t in msgs)
+        try:
+            herdr("agent", "prompt", agent, text, "--wait", "--until", "working",
+                  "--until", "blocked", "--timeout", "20000")
+        except HerdrError as e:
+            if e.code == "herdr_unavailable":
+                raise
+            # After a stall or timeout the text may be in although the wait for
+            # "working" failed: typing it again would give the same instruction twice.
+            # Any other error (a refusal) typed nothing.
+            if e.code not in ("agent_prompt_stalled", "timeout"):
+                return False
+            try:
+                status = herdr("agent", "get", agent).get("agent", {}).get("agent_status")
+            except HerdrError:
+                status = None
+            if status not in ("working", "blocked"):
+                return False
+        done = os.path.join(inbox_dir(agent), "read")
+        if not os.path.isdir(done):
+            os.makedirs(done, exist_ok=True)
+        for path, _ in msgs:
+            replace_file(path, os.path.join(done, os.path.basename(path)))
+        return True
+    finally:
+        unlock(lock)
+
+
+# ---------------------------------------------------------------- pending
+
+PENDING_RANKS = {"legacy": 0, "unsent": 0, "report_done": 0, "silent": 1, "question": 1, "blocked": 1, "failed": 1, "plan": 2, "merge": 3}
+ASKING_PHASES = ("planning", "working", "reviewing", "merging")
+
+
+def pm_job_report(job):
+    """(assignment seq, report header, report mtime) of a job's PM channel."""
+    folder = pm_job_dir(job)
+    seq = (read_header(os.path.join(folder, "assignment.md")) or {}).get("seq")
+    report = os.path.join(folder, "report.md")
+    try:
+        mtime = os.path.getmtime(report)
+    except OSError:
+        mtime = None
+    return seq, read_header(report) or {}, mtime
+
+
+def pending_item(name, job):
+    """What job `name` waits on the user (or the orchestrator) for, or None. The key
+    names this very item, so a deferral ends by itself when seq or phase moves on."""
+    phase = job.get("phase")
+    if phase in DONE_PHASES:
+        return None
+    seq, report, mtime = pm_job_report(name)
+    rtype = report.get("type") if seq is not None and report.get("seq") == seq else None
+    if seq is None and phase in ("planning", "working", "reviewing", "merging"):
+        kind, since, mark = "legacy", job.get("phase_at"), phase  # started before slice 3
+    elif seq is not None and job.get("sent_seq") != seq:
+        kind, since, mark = "unsent", job.get("phase_at"), seq  # written, never sent
+    elif rtype in ("question", "blocked", "failed"):
+        kind, since, mark = rtype, mtime, seq
+    elif rtype not in REPORT_TYPES and is_silent(job, seq):
+        kind, since, mark = "silent", mtime, seq
+    elif rtype == "done" and phase in ASKING_PHASES:
+        kind, since, mark = "report_done", mtime, seq
+    elif phase == "awaiting_approval":
+        kind, since, mark = "plan", job.get("phase_at"), job.get("phase_at")
+    elif phase == "awaiting_merge":
+        kind, since, mark = "merge", job.get("phase_at"), job.get("phase_at")
+    else:
+        return None
+    key = "%s:%r" % (kind, mark)
+    return {"job": name, "kind": kind, "rank": PENDING_RANKS[kind], "since": since or 0,
+            "key": key, "deferred": job.get("deferred") == key}
+
+
+def cmd_pending(args):
+    """The user queue, computed from state and files, so compaction loses nothing."""
+    state = load_state()
+    items = [i for i in (pending_item(n, j) for n, j in state["jobs"].items()) if i]
+    items.sort(key=lambda i: (i["rank"], i["since"], i["job"]))
+    for i in items:
+        i["pm_job_dir"] = pm_job_dir(i["job"]).replace("\\", "/")
+    print(json.dumps({"items": items}, ensure_ascii=False, indent=2))
+    return 0
 
 
 # ---------------------------------------------------------------- main
@@ -1322,6 +1707,8 @@ def build_parser():
     phase.add_argument("phase")
     archive = job_sub.add_parser("archive")
     archive.add_argument("slug")
+    defer = job_sub.add_parser("defer")
+    defer.add_argument("slug")
     job.set_defaults(func=cmd_job)
 
     spawn = sub.add_parser("spawn")
@@ -1334,8 +1721,9 @@ def build_parser():
 
     wait = sub.add_parser("wait")
     wait.add_argument("agent")
-    wait.add_argument("--report", required=True)
-    wait.add_argument("--seq", type=int, required=True)
+    wait.add_argument("--report")
+    wait.add_argument("--seq", type=int)
+    wait.add_argument("--jobs", action="store_true")
     wait.add_argument("--poll", type=float, default=2)
     wait.add_argument("--after-blocked", action="store_true")
     wait.set_defaults(func=cmd_wait)
@@ -1364,6 +1752,15 @@ def build_parser():
     retry.add_argument("--error", default="")
     retry.add_argument("--clear", action="store_true")
     retry.set_defaults(func=cmd_api_retry)
+
+    pending = sub.add_parser("pending")
+    pending.set_defaults(func=cmd_pending)
+
+    send = sub.add_parser("send")
+    send.add_argument("agent")
+    send.add_argument("text", nargs="+")
+    send.add_argument("--job")
+    send.set_defaults(func=cmd_send)
 
     hook = sub.add_parser("compact-hook")
     hook.set_defaults(func=cmd_compact_hook)
