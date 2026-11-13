@@ -355,7 +355,7 @@ class TestSpawn(SpawnBase):
         self.assertEqual(self.cli("spawn", a, "--split-from", "w1:p1"), 0)
         self.assertEqual([c[:2] for c in self.calls()],
                          [["agent", "list"], ["pane", "split"], ["agent", "start"],
-                          ["agent", "prompt"], ["agent", "get"]])
+                          ["agent", "prompt"], ["agent", "get"], ["pane", "get"]])
         rec = self.children()["fix-a-w1"]
         self.assertEqual((rec["session"], rec["pane"], rec["seq"], rec["job"], rec["role"]),
                          ("s-1", "w1:p9", 4, "fix-a", "worker"))
