@@ -94,7 +94,7 @@ A small job gets one line per section. Use no worktree only when the change is s
 
 ### kind: execute
 
-1. Worktree, if the plan uses one: `herdr worktree create --cwd <repo> --branch oke/<job> --label <job> --no-focus`. Read the new pane id and the checkout path from the JSON result. If it fails because the branch exists, retry once with `oke/<job>-2`, then report `failed`.
+1. Worktree, if the plan uses one: `herdr worktree create --cwd <repo> --branch oke/<job> --label <job> --no-focus`. Read the new pane id and the checkout path from the JSON result. If it fails, report `failed` with the error. Never use another branch name: `$OKE job merge` merges only `oke/<job>`.
 2. Write `~/.oke/jobs/<job>/<job>-w1/assignment.md`:
 
 ```
@@ -136,10 +136,12 @@ When a child's wait finishes, act on its first line:
 
 **A new instruction for a child:** edit its assignment (`이번 지시`, `seq` + 1), `$OKE send <child> "Assignment updated (seq <n>). Re-read <its assignment path>."`, then start its wait with the new seq. The wait types the message in once the child is idle, so start the wait last. A message must not start with `/`.
 
-**Review.** Write `~/.oke/jobs/<job>/<job>-rv/assignment.md` (role `reviewer`, same `cwd` as the worker, 이번 지시 = the diff range `<base branch>...oke/<job>` (three dots: only this job's changes, even after other jobs merged) when the worker committed, otherwise "uncommitted changes: `git diff HEAD`, and new files listed by `git status --short`"). `$OKE spawn <file> --split-from <worker pane>`. Wait for it.
+**Review.** With a worktree, the review always covers a commit: if the worker did not commit (`commit: no`), commit its changes first (`git -C <cwd> add -A`, `git -C <cwd> commit`). Then write `~/.oke/jobs/<job>/<job>-rv/assignment.md` (role `reviewer`, same `cwd` as the worker, `commit: <git -C <cwd> rev-parse HEAD>` in the header, 이번 지시 = the diff range `<base branch>...<that commit>` (three dots: only this job's changes, even after other jobs merged)). Without a worktree leave `commit` out; 이번 지시 = "uncommitted changes: `git diff HEAD`, and new files listed by `git status --short`". `$OKE spawn <file> --split-from <worker pane>`. Wait for it.
+
+Every new instruction to the reviewer (another round, a rebase) repeats this: commit the worker's changes if needed, and put the new `commit:` and range in its assignment. `$OKE job merge` refuses a branch whose tip is not the commit the passing review named.
 
 - `verdict: changes`: pass the findings to the worker as a new instruction, wait, then give the reviewer a new instruction to review again. At most 3 rounds; after that report `question` with the open findings.
-- `verdict: pass`: run `git -C <cwd> status --short` and compare it with the worker's report: the reviewer must not have changed anything (with `commit: yes` it must be clean). Report `done` for the job: summary, branch, number of changed files (`git diff --stat <base>...oke/<job>`, or `git diff --stat HEAD` when uncommitted), the worktree path, and the workers' 배운 것.
+- `verdict: pass`: run `git -C <cwd> status --short` and compare it with the worker's report: the reviewer must not have changed anything (with a worktree it must be clean: the work was committed before the review). Report `done` for the job: summary, branch, number of changed files (`git diff --stat <base>...oke/<job>`, or `git diff --stat HEAD` when uncommitted), the worktree path, and the workers' 배운 것.
 
 ### kind: merge
 
@@ -149,8 +151,8 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
 1. In the main checkout, `git status --short` must be empty. If it is not:
    - the changes belong to another open OKe job that works without a worktree: do not merge. Write this job's report as `waiting` (`on: <that job>`), and merge after that job is done.
    - nobody's job owns them: report `question` with the file list.
-2. If the work in the worktree is uncommitted (`commit: no` with a worktree, autonomy `conservative`): commit it now in the worker's `cwd` (`git add -A`, `git commit`).
-3. Merge: `$OKE job merge <job>` (never `git merge` yourself). It merges `oke/<job>` into the main checkout only when the job is in phase `merging` and the last review passed after the last worker report. Exit 0: merged, go to step 5. Exit 1: refused; the message says why (for example the worker reported after the review: give the reviewer a new instruction to review it, then run it again).
+2. With a worktree there is nothing to commit here: the work was committed before its review. Never commit in the worktree after the review: `job merge` would refuse it.
+3. Merge: `$OKE job merge <job>` (never `git merge` yourself). It merges `oke/<job>` into the main checkout only when the job is in phase `merging`, the last review passed after the last worker report, the branch tip is the commit that review named, and the main checkout is clean, on the job's base branch and not in the middle of a merge. Exit 0: merged, go to step 5. Exit 1: refused; the message says why. A review problem (the worker reported after it, or the branch moved past its commit): give the reviewer a new instruction for the current commit, then run it again. A main checkout problem (not clean, another branch, a merge in progress): report `question` for the job with the message; the user decides.
 4. Exit 2: conflict; the merge is already aborted and the output lists the files. Never resolve conflicts yourself. Climb this ladder:
    1. Give the worker a new instruction, with `commit: yes` in its header from now on: "Rebase `oke/<job>` onto `<base branch>`. Resolve the conflicts so that both changes keep their purpose. Run the 검증 명령 again, commit, and report." Write this job's report as `waiting` and wait. A dead worker is revived by the wait.
    2. Worker `done`: give the reviewer a new instruction to review what the rebase changed (`job merge` refuses until that review passes). `verdict: pass`: back to step 3. `changes`: as in the review rounds.

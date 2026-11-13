@@ -1608,10 +1608,19 @@ def latest_report(job_dir, pattern):
     return max(found) if found else None
 
 
+def git_out(cwd, *args):
+    """(exit code, stripped stdout) of one git command."""
+    p = subprocess.run(["git", "-C", cwd] + list(args), stdout=subprocess.PIPE,
+                       stderr=subprocess.DEVNULL)
+    return p.returncode, p.stdout.decode("utf-8", "replace").strip()
+
+
 def merge_job(job):
     """Merge oke/<job> into the main checkout, only if the user approved the merge and
-    the last review passed after the last worker report. A worker that reported again
-    (a rebase, a fix) needs a new review first (seen live: a PM skipped it)."""
+    the last review passed on the very commit the branch points at. A worker that
+    reported again (a rebase, a fix) needs a new review first (seen live: a PM skipped it).
+    The main checkout must be clean, on the job's base branch and not mid-merge: the
+    abort after a conflict must only ever undo OKe's own merge."""
     state = load_state()
     info = state["jobs"].get(job)
     if not info:
@@ -1632,15 +1641,44 @@ def merge_job(job):
         return fail("the worker reported after the last review (a rebase or a fix): give the reviewer "
                     "a new instruction to review it, then merge")
     main = native_path(os.path.dirname(info["repo"]))
-    result = subprocess.run(["git", "-C", main, "merge", "--no-ff", "--no-edit", "oke/" + job],
+    # The review counts only for the commit its assignment named, and only once the
+    # report answers that assignment: commits added after it were never reviewed.
+    review_asg = read_header(os.path.join(os.path.dirname(review[1]), "assignment.md")) or {}
+    review_seq = (read_header(review[1]) or {}).get("seq")
+    if review_seq != review_asg.get("seq"):
+        return fail("the review report of %s does not answer its current assignment (seq %s): wait for "
+                    "the reviewer" % (job, review_asg.get("seq")))
+    code, tip = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/%s^{commit}" % job)
+    if code != 0:
+        return fail("branch oke/%s does not exist" % job)
+    reviewed = review_asg.get("commit")
+    if not reviewed:
+        return fail("the review assignment of %s names no `commit:`: give the reviewer a new "
+                    "instruction with `commit: %s`, then merge" % (job, tip))
+    code, reviewed_full = git_out(main, "rev-parse", "-q", "--verify", reviewed + "^{commit}")
+    if code != 0 or reviewed_full != tip:
+        return fail("oke/%s is at %s but the review covered %s: give the reviewer a new instruction "
+                    "with `commit: %s`, then merge" % (job, tip[:12], reviewed, tip))
+    if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
+        return fail("a merge is already in progress in %s: leave it to the user" % main)
+    code, dirty = git_out(main, "status", "--porcelain")
+    if code != 0 or dirty:
+        return fail("the main checkout %s is not clean:\n%s" % (main, dirty))
+    base = info.get("base")
+    current = git_out(main, "symbolic-ref", "-q", "--short", "HEAD")[1]
+    if base and current != base:
+        return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
+                    % (current or "a detached HEAD", base))
+    result = subprocess.run(["git", "-C", main, "merge", "--no-ff", "--no-edit",
+                             "-m", "Merge branch 'oke/%s'" % job, tip],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if result.returncode == 0:
         print(json.dumps({"result": "merged", "job": job}))
         return 0
-    files = subprocess.run(["git", "-C", main, "diff", "--name-only", "--diff-filter=U"],
-                           stdout=subprocess.PIPE).stdout.decode("utf-8", "replace").split()
-    subprocess.call(["git", "-C", main, "merge", "--abort"], stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL)
+    files = git_out(main, "diff", "--name-only", "--diff-filter=U")[1].split()
+    if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
+        subprocess.call(["git", "-C", main, "merge", "--abort"], stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL)
     if not files:
         return fail("git merge failed: %s" % result.stdout.decode("utf-8", "replace").strip())
     print(json.dumps({"result": "conflict", "job": job, "files": files}))
@@ -1669,8 +1707,10 @@ def job_locked(args):
         if subprocess.call(["git", "-C", native_path(args.repo), "show-ref", "--verify", "--quiet", branch]) == 0:
             return fail("branch oke/%s already exists (an earlier job): pick another job name" % args.slug)
         os.makedirs(job_dir)
+        # the branch the main checkout is on now: `job merge` merges only into it
+        base = git_out(native_path(os.path.dirname(key)), "symbolic-ref", "-q", "--short", "HEAD")[1]
         state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None,
-                                    "phase_at": time.time()}
+                                    "phase_at": time.time(), "base": base or None}
         save_state(state)
         print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key,
                           "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
