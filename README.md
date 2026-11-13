@@ -20,10 +20,10 @@ claude plugin install oke@oke
 
 ## 설치 (인터넷 없는 곳, ftp 반입)
 
-인터넷 되는 곳에서 묶음 하나를 만든다. 설치물은 이 폴더뿐이다 (패키지, daemon, DB 없음).
+인터넷 되는 곳에서 묶음 하나를 만든다. 설치물은 이 폴더뿐이다 (패키지, daemon, DB 없음). `core.autocrlf=false` 는 Windows 에서 만들어도 줄 끝을 LF 로 둔다.
 
 ```
-git archive --format=tar.gz -o oke.tar.gz HEAD .claude-plugin oke
+git -c core.autocrlf=false archive --format=tar.gz -o oke.tar.gz HEAD .claude-plugin oke
 ```
 
 반입한 곳에서 (Linux, tcsh 도 같다):
