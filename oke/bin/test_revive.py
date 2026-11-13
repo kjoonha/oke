@@ -177,6 +177,15 @@ class TestRevive(ReviveBase):
         self.assertIn("revive_failed fix-a-w1", self.events())
         self.assertTrue(oke.try_lock("revive-fix-a-w1"))
 
+    def test_reset_lets_the_user_resume_after_give_up(self):
+        children = oke.read_children(self.key)
+        children["fix-a-w1"].update(revives=3, report_mtime=None, gave_up=True)
+        oke.write_json_atomic(oke.children_path(self.key), children)
+        self.revive_scenario()
+        self.assertEqual(self.cli("revive", "fix-a-w1", "--reset"), 0)
+        self.assertEqual(self.out.strip(), "revived")
+        self.assertEqual(self.child()["revives"], 1)
+
     def test_unknown_agent(self):
         self.revive_scenario()
         self.assertEqual(oke.revive("nobody"), "unknown")

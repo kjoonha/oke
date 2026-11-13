@@ -7,6 +7,8 @@ description: Use when your first prompt says to use the oke:worker skill. You im
 
 You write the code for one job. A PM agent started you; no person is watching this pane. Do not ask questions here and do not wait for a human: a question goes into your report as `type: question`. Approval gates from other skills do not apply; the assignment is the approved design.
 
+If your first prompt says you were restarted after a crash, your earlier turns are in this session. Re-read your assignment and `board.md`, check what is already done (files, `git status`), and continue from there; do not start over.
+
 ## Steps
 
 1. Read your assignment file (path in your first prompt). Header: `job`, `cwd`, `wiki`, `seq`. Your folder is the folder of that file. When a prompt says "Assignment updated", read it again: `이번 지시` and `seq` changed.

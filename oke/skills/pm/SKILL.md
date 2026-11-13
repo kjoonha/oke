@@ -50,9 +50,13 @@ on: <what you wait for, when type is waiting>
 
 Your folder may already hold `board.md` and `children.json` from before you died. Read both before you act on the assignment. `children.json` is written by `$OKE spawn` only: read it, never write or edit it.
 
-- For each child in `children.json` whose `job` is the current job, check `herdr agent list`. A child that is still alive keeps its work: do not spawn it again and do not create another worktree. Write your report as `waiting` and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If the child is at a dialog the wait says `blocked`; handle it as in the table below.
-- If `git -C <repo> worktree list` already shows `oke/<job>`, use that worktree. Never create `oke/<job>-2` for a job that already has one.
-- Only a child that is gone and has no finished report is spawned again.
+For each child in `children.json` whose `job` is the current job, decide in this order:
+
+1. Its `report.md` has the `seq` of its `assignment.md` and type `done`, `question` or `failed`: the child finished that step. Do not start it again. Handle that report as in the table below (a finished reviewer stays finished).
+2. It is in `herdr agent list`: it keeps its work. Write your report as `waiting` and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If it is at a dialog the wait says `blocked`; handle it as in the table below.
+3. Otherwise: `$OKE revive <child>` (it restarts the child in its own session and tells it to re-read its assignment), then wait as in 2. Your own watcher may have revived it already; then `revive` says `alive`.
+
+Never `$OKE spawn` a name that is already in `children.json`. If `git -C <repo> worktree list` already shows `oke/<job>`, use that worktree. Never create `oke/<job>-2` for a job that already has one.
 
 ## Assignment kinds
 
@@ -105,10 +109,10 @@ When a wait finishes, act on its first line:
 |---|---|
 | worker `report done` | If 검증 출력 is missing or does not show the command passing, send it back. Otherwise start the review |
 | worker `report question` | Answer from the plan, the code or the wiki if you can (autonomy `balanced` or `full`). If it is about what the user wants, or autonomy is `conservative`, report `question` upward and wait for `kind: answer` |
-| `blocked` | Report `type: blocked` upward: name the child agent and paste the screen text. End your turn without starting a wait. When you are prompted "Dialog answered for <child>", rewrite your report as `waiting` and start the child wait again with `--after-blocked` added |
+| `blocked` | Report `type: blocked` upward: name the child agent and paste the screen text. End your turn without starting a wait. When you are prompted "Dialog answered for <child>", rewrite your report as `waiting` and start the child wait again with `--after-blocked` added. When you are prompted "Dialog denied for <child>", the user refused that action: give the child a new instruction (below) saying "The user denied <the action>. Do not try it again. If you cannot finish without it, report `question` and say what you need.", then wait with the new seq |
 | `report blocked` | Children do not use this type. Treat it as `report question` |
 | `idle_no_report`, `bad_report` | Once: `herdr agent prompt <child> "Re-read your assignment and write a proper report." --wait --until working --until blocked --timeout 20000`, then wait again. Second time: report `failed` |
-| `gone` | Report `failed` with the agent name |
+| `gone` | `oke wait` already revived the child three times without a new report. Report `failed` with the agent name |
 | exit code 1 or 2 | herdr failed or is unreachable. Report `failed` with the stderr text. Do not treat the child as gone |
 
 To send a child a new instruction: edit its assignment (`이번 지시`, `seq` + 1), then `herdr agent prompt <child> "Assignment updated (seq <n>). Re-read it." --wait --until working --until blocked --timeout 20000`, then wait with the new seq.

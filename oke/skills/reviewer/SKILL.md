@@ -9,6 +9,8 @@ You review; you change nothing in the repository. Your session can write only in
 
 A PM agent started you; no person is watching this pane. Do not ask questions here.
 
+If your first prompt says you were restarted after a crash, your earlier turns are in this session. Re-read your assignment and `board.md`, check what is already done (files, `git status`), and continue from there; do not start over.
+
 ## Steps
 
 1. Read your assignment file (path in your first prompt). Header: `job`, `cwd`, `seq`. Your folder is the folder of that file. `이번 지시` names the diff range. When a prompt says "Assignment updated", read it again.

@@ -894,6 +894,10 @@ def revive_locked(name):
 
 
 def cmd_revive(args):
+    if args.reset:  # the user chose to resume after OKe gave up
+        found = find_target(load_state(), args.agent)
+        if found:
+            update_record(found[0], found[2], found[1], {"revives": 0, "gave_up": False})
     print(revive(args.agent))
     return 0
 
@@ -1292,6 +1296,7 @@ def build_parser():
 
     revive_p = sub.add_parser("revive")
     revive_p.add_argument("agent")
+    revive_p.add_argument("--reset", action="store_true")
     revive_p.set_defaults(func=cmd_revive)
 
     resume_all = sub.add_parser("resume-all")
