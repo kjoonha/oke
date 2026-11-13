@@ -6,6 +6,7 @@ import time
 import unittest
 
 from test_oke import AG, AGENT, E, J, OK, SpawnBase
+from test_revive import PANE_OK, ReviveBase, started
 import oke
 
 
@@ -259,6 +260,107 @@ class TestPmWait(InboxBase):
         self.fake({})
         self.assertEqual(self.cli("wait", "pm-toy"), 1)
         self.assertEqual(self.cli("wait", "fix-a-w1", "--jobs"), 1)
+
+
+class TestPmFolderUsers(ReviveBase):
+    pm_job = S3Base.pm_job
+    put = S3Base.put
+
+    def pm_scenario(self):
+        self.revive_scenario(**{"pane get": [PANE_OK("w1:p3")],
+                                "agent get": [AGENT("working", name="pm-toy", pane="w1:p3", session="s-pm")]})
+
+    def test_a_new_job_report_resets_the_pm_revive_count(self):
+        folder = self.pm_job("fix-a", 1, REPORT("waiting", 1))
+        s = oke.load_state()
+        s["repos"][self.key]["pm"].update(revives=3, report_mtime=1.0)
+        oke.save_state(s)
+        self.pm_scenario()
+        self.assertEqual(oke.revive("pm-toy"), "revived")
+        pm = oke.load_state()["repos"][self.key]["pm"]
+        self.assertEqual(pm["revives"], 1)
+        self.assertEqual(pm["report_mtime"], os.path.getmtime(os.path.join(folder, "report.md")))
+
+    def test_the_pm_revive_prompt_names_each_open_job_assignment(self):
+        self.pm_job("fix-a", 1)
+        self.pm_scenario()
+        oke.revive("pm-toy")
+        prompt = self.argv_of("agent", "prompt")[0][3]
+        self.assertIn("jobs/fix-a/pm/assignment.md", prompt)
+
+    def test_the_pm_compact_message_names_each_open_job_assignment(self):
+        self.pm_job("fix-a", 1)
+        os.environ["HERDR_PANE_ID"] = "w1:p3"
+        self.assertIn("jobs/fix-a/pm/assignment.md", oke.compact_message())
+
+    def give_up(self):
+        self.fake({"agent list": [J({"agents": [AG("pm-toy", pane="w1:p3", session="s-pm")]})]})
+        self.assertEqual(self.cli("api-retry", "--pane", "w1:p3", "--attempt", "1",
+                                  "--error", "billing_error"), 0)
+
+    def test_a_pm_give_up_fails_only_the_jobs_owing_a_report(self):
+        self.job("fix-b", "awaiting_approval")
+        owing = self.pm_job("fix-a", 3, REPORT("waiting", 2))
+        answered = self.pm_job("fix-b", 1, REPORT("done", 1))
+        self.give_up()
+        self.assertEqual(oke.read_header(os.path.join(owing, "report.md")), {"type": "failed", "seq": 3})
+        self.assertEqual(oke.read_header(os.path.join(answered, "report.md"))["type"], "done")
+
+    def test_status_gives_each_job_its_pm_seq_and_folder(self):
+        self.pm_job("fix-a", 4)
+        self.fake({"agent list": [J({"agents": []})], "agent start --help": [OK], "agent prompt --help": [OK],
+                   "agent wait --help": [OK], "agent read --help": [OK], "agent send-keys --help": [OK],
+                   "pane split --help": [OK], "worktree create --help": [OK]})
+        self.assertEqual(self.cli("status"), 0)
+        out = json.loads(self.out)
+        self.assertEqual(out["jobs"]["fix-a"]["pm_seq"], 4)
+        self.assertTrue(out["jobs"]["fix-a"]["pm_job_dir"].endswith("/jobs/fix-a/pm"))
+        self.assertNotIn("seq", out["repos"][self.key])
+
+
+class TestPending(S3Base):
+    def pending(self):
+        self.fake({})
+        self.assertEqual(self.cli("pending"), 0)
+        return json.loads(self.out)["items"]
+
+    def at(self, job, t):
+        s = oke.load_state()
+        s["jobs"][job]["phase_at"] = t
+        oke.save_state(s)
+
+    def test_order_is_rank_then_time(self):
+        self.job("m-old", "awaiting_merge")
+        self.at("m-old", 1.0)
+        self.job("p-new", "awaiting_approval")
+        self.at("p-new", 9.0)
+        self.job("q", "working")
+        self.pm_job("q", 2, REPORT("question", 2))
+        self.job("d", "planning")
+        self.pm_job("d", 1, REPORT("done", 1))
+        self.job("w", "working")
+        self.pm_job("w", 1, REPORT("waiting", 1))
+        items = self.pending()
+        self.assertEqual([(i["job"], i["kind"]) for i in items],
+                         [("d", "report_done"), ("q", "question"), ("p-new", "plan"), ("m-old", "merge")])
+
+    def test_a_report_of_an_old_seq_is_not_pending(self):
+        self.job("q", "working")
+        self.pm_job("q", 3, REPORT("question", 2))
+        self.assertEqual(self.pending(), [])
+
+    def test_a_deferred_item_is_flagged_until_its_job_moves_on(self):
+        self.job("q", "working")
+        self.pm_job("q", 2, REPORT("question", 2))
+        self.assertEqual(self.cli("job", "defer", "q"), 0)
+        self.assertTrue(self.pending()[0]["deferred"])
+        self.pm_job("q", 3, REPORT("question", 3))
+        self.assertFalse(self.pending()[0]["deferred"])
+
+    def test_done_and_failed_jobs_are_left_out(self):
+        self.job("x", "done")
+        self.pm_job("x", 1, REPORT("question", 1))
+        self.assertEqual(self.pending(), [])
 
 
 if __name__ == "__main__":

@@ -791,6 +791,14 @@ REVIVE_PROMPT = ("You were restarted after a crash. Use the oke:{role} skill. Re
                  "assignment file {path} and your board.md, then continue.")
 
 
+def pm_jobs_note(state, key):
+    """The job assignments a restarted or compacted PM has to re-read."""
+    paths = [os.path.join(pm_job_dir(j), "assignment.md").replace("\\", "/")
+             for j in sorted(open_jobs(state, key))]
+    paths = [p for p in paths if os.path.exists(p)]
+    return (" Then re-read the assignment of each open job: %s." % ", ".join(paths)) if paths else ""
+
+
 def open_jobs(state, key=None):
     return [n for n, j in state["jobs"].items()
             if j.get("phase") not in DONE_PHASES and (key is None or j.get("repo") == key)]
@@ -950,6 +958,8 @@ def relaunch(state, role, key, name, record, folder):
         path = os.path.join(folder, "assignment.md").replace("\\", "/")
         cwd = native_path((read_header(path) or {}).get("cwd") or oke_home())
         agent, prompt = name, REVIVE_PROMPT.format(role=role, path=path)
+        if role == "pm":
+            prompt += pm_jobs_note(state, key)
         args = launch_args(role, load_config(), oke_home(), plugin_root())
     if record.get("session"):
         args = args + ["--resume", record["session"]]
@@ -1006,7 +1016,11 @@ def revive_locked(name):
     if live_agent(record, list_agents()):
         return "alive"
     folder = agent_folder(role, name, key, record)
-    mtime = report_mtime(folder) if folder else None
+    if role == "pm":  # a PM reports per job, in each job's pm folder
+        mtime = max([m for m in (report_mtime(pm_job_dir(j)) for j in open_jobs(state, key))
+                     if m is not None] or [None])
+    else:
+        mtime = report_mtime(folder) if folder else None
     revives = record.get("revives", 0)
     if folder and mtime != record.get("report_mtime"):
         revives = 0  # it reported since the last revive: not a crash loop
@@ -1169,9 +1183,19 @@ def cmd_api_retry(args):
     else:
         out["action"] = "give_up"
         log_event("api_gave_up %s: %s after %d attempts" % (name, kind or "error", args.attempt))
-        if folder:
-            seq = (read_header(os.path.join(folder, "assignment.md")) or {}).get("seq")
-            with io.open(os.path.join(folder, "report.md"), "w", encoding="utf-8", newline="\n") as f:
+        if role == "pm":
+            # A PM reports per job. A final report of the current seq still waits on
+            # the user (a plan to approve): leave it, fail only the jobs owing one.
+            folders = []
+            for job in sorted(open_jobs(state, key)):
+                seq, header, _ = pm_job_report(job)
+                if seq is not None and not (header.get("seq") == seq and header.get("type") in FINAL_TYPES):
+                    folders.append(pm_job_dir(job))
+        else:
+            folders = [folder] if folder else []
+        for f_dir in folders:
+            seq = (read_header(os.path.join(f_dir, "assignment.md")) or {}).get("seq")
+            with io.open(os.path.join(f_dir, "report.md"), "w", encoding="utf-8", newline="\n") as f:
                 f.write(u"type: failed\nseq: %s\n---\n## 요약\nAPI error %s: automatic retry stopped "
                         u"after %d attempts.\n" % (seq, kind or "unknown", args.attempt))
     if marker and os.path.exists(marker):
@@ -1258,12 +1282,10 @@ def status_locked(args):
             if session_of(found) and session_of(found) != record.get("session"):
                 record["session"] = session_of(found)
                 changed = True
-        assignment = read_header(os.path.join(pm_dir(key), "assignment.md")) or {}
         result["repos"][key] = {"pm": "alive" if found else "dead",
                                 "agent": record.get("agent"), "pane": record.get("pane"),
                                 "session": record.get("session"),
-                                "pm_dir": pm_dir(key).replace("\\", "/"),
-                                "seq": assignment.get("seq")}
+                                "pm_dir": pm_dir(key).replace("\\", "/")}
 
     for name, job in state["jobs"].items():
         key = job.get("repo")
@@ -1276,7 +1298,9 @@ def status_locked(args):
             cls = "alive"
         else:
             cls = "disconnected"
-        result["jobs"][name] = {"phase": job.get("phase"), "class": cls, "agents": job_agents}
+        result["jobs"][name] = {"phase": job.get("phase"), "class": cls, "agents": job_agents,
+                                "pm_seq": pm_job_report(name)[0],
+                                "pm_job_dir": pm_job_dir(name).replace("\\", "/")}
 
     here = os.environ.get("HERDR_PANE_ID")
     recorded = state["orchestrator"].get("pane")
@@ -1314,11 +1338,13 @@ def compact_message():
         return ("OKe: context was compacted. Re-read %s and run oke status before continuing."
                 % state_path().replace("\\", "/"))
     folder = None
+    note = ""
     repos = state.get("repos") or {}
     keys = set(repos) | set(j.get("repo") for j in (state.get("jobs") or {}).values() if j.get("repo"))
     for key in sorted(keys):
         if ((repos.get(key) or {}).get("pm") or {}).get("pane") == pane:
             folder = pm_dir(key)
+            note = pm_jobs_note({"jobs": state.get("jobs") or {}}, key)
             break
         for name, rec in read_children(key).items():
             if rec.get("pane") == pane and rec.get("job"):
@@ -1329,8 +1355,8 @@ def compact_message():
     if not folder:
         return ""
     folder = folder.replace("\\", "/")
-    return ("OKe: context was compacted. Re-read %s/assignment.md and %s/board.md before continuing."
-            % (folder, folder))
+    return ("OKe: context was compacted. Re-read %s/assignment.md and %s/board.md before continuing.%s"
+            % (folder, folder, note))
 
 
 def cmd_compact_hook(args):
@@ -1541,6 +1567,17 @@ def pending_item(name, job):
             "key": key, "deferred": job.get("deferred") == key}
 
 
+def cmd_pending(args):
+    """The user queue, computed from state and files, so compaction loses nothing."""
+    state = load_state()
+    items = [i for i in (pending_item(n, j) for n, j in state["jobs"].items()) if i]
+    items.sort(key=lambda i: (i["rank"], i["since"], i["job"]))
+    for i in items:
+        i["pm_job_dir"] = pm_job_dir(i["job"]).replace("\\", "/")
+    print(json.dumps({"items": items}, ensure_ascii=False, indent=2))
+    return 0
+
+
 # ---------------------------------------------------------------- main
 
 def build_parser():
@@ -1604,6 +1641,9 @@ def build_parser():
     retry.add_argument("--error", default="")
     retry.add_argument("--clear", action="store_true")
     retry.set_defaults(func=cmd_api_retry)
+
+    pending = sub.add_parser("pending")
+    pending.set_defaults(func=cmd_pending)
 
     send = sub.add_parser("send")
     send.add_argument("agent")

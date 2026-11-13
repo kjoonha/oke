@@ -702,9 +702,9 @@ class TestStatus(SpawnBase):
             "j-work-w1": {"agent": "j-work-w1", "job": "j-work", "pane": "w2:p1"},
             "j-work-rv": {"agent": "j-work-rv", "job": "j-work", "pane": "w2:p2"}})
         alive = self.status([AG(name="pm-toy", pane="w1:p3", cwd=self.repo), AG(name="j-work-w1", pane="w2:p1")])
-        self.assertEqual(alive["jobs"]["j-work"],
-                         {"phase": "working", "class": "alive",
-                          "agents": {"j-work-w1": "alive", "j-work-rv": "dead"}})
+        work = alive["jobs"]["j-work"]
+        self.assertEqual((work["phase"], work["class"], work["agents"]),
+                         ("working", "alive", {"j-work-w1": "alive", "j-work-rv": "dead"}))
         self.assertEqual(alive["jobs"]["j-merge"]["class"], "awaiting_user")
         dead = self.status([])
         self.assertEqual(dead["jobs"]["j-work"]["class"], "disconnected")
@@ -931,7 +931,7 @@ class TestReviewFixes(SpawnBase):
         self.assertIn("w1:p9", self.err)
 
     # 9. status gives the orchestrator what its skill needs
-    def test_status_prints_pm_dir_session_and_assignment_seq(self):
+    def test_status_prints_pm_dir_and_session(self):
         key = oke.repo_key(self.repo)
         s = oke.load_state()
         s["repos"][key] = {"pm": {"agent": "pm-toy", "pane": "w1:p3", "session": "s-pm", "seq": 1}}
@@ -945,7 +945,7 @@ class TestReviewFixes(SpawnBase):
         self.fake(sc)
         self.assertEqual(self.cli("status"), 0)
         repo = json.loads(self.out)["repos"][key]
-        self.assertEqual((repo["session"], repo["seq"]), ("s-pm", 5))
+        self.assertEqual(repo["session"], "s-pm")  # seq is per job now: status.jobs[..].pm_seq
         self.assertEqual(repo["pm_dir"], oke.pm_dir(key).replace("\\", "/"))
 
 
