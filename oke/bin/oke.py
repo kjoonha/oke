@@ -1652,8 +1652,9 @@ def merge_job(job):
     if code != 0:
         return fail("branch oke/%s does not exist" % job)
     reviewed = review_asg.get("commit")
-    if not reviewed:
-        return fail("the review assignment of %s names no `commit:`: give the reviewer a new "
+    if not reviewed or not re.match(r"^[0-9a-f]{7,40}$", reviewed):
+        # a branch name would resolve to the moving tip and pass any check
+        return fail("the review assignment of %s names no commit sha in `commit:`: give the reviewer a new "
                     "instruction with `commit: %s`, then merge" % (job, tip))
     code, reviewed_full = git_out(main, "rev-parse", "-q", "--verify", reviewed + "^{commit}")
     if code != 0 or reviewed_full != tip:
@@ -1666,7 +1667,7 @@ def merge_job(job):
         return fail("the main checkout %s is not clean:\n%s" % (main, dirty))
     base = info.get("base")
     current = git_out(main, "symbolic-ref", "-q", "--short", "HEAD")[1]
-    if base and current != base:
+    if not current or (base and current != base):
         return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
                     % (current or "a detached HEAD", base))
     result = subprocess.run(["git", "-C", main, "merge", "--no-ff", "--no-edit",
@@ -1677,8 +1678,10 @@ def merge_job(job):
         return 0
     files = git_out(main, "diff", "--name-only", "--diff-filter=U")[1].split()
     if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
-        subprocess.call(["git", "-C", main, "merge", "--abort"], stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL)
+        if subprocess.call(["git", "-C", main, "merge", "--abort"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL) != 0:
+            return fail("git merge of oke/%s conflicted and `git merge --abort` failed: %s is "
+                        "mid-merge, ask the user" % (job, main))
     if not files:
         return fail("git merge failed: %s" % result.stdout.decode("utf-8", "replace").strip())
     print(json.dumps({"result": "conflict", "job": job, "files": files}))

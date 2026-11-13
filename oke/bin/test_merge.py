@@ -137,7 +137,49 @@ class TestReviewedCommit(MergeBase):
         self.assertIn("does not exist", self.err)
 
 
+class TestReviewGuards(MergeBase):
+    def test_a_branch_name_as_commit_is_refused(self):
+        # `commit: oke/fix-a` would always equal the tip: no gate at all
+        self.order(self.report("fix-a-w1", 1), self.review(1, commit="oke/fix-a"))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("commit sha", self.err)
+        self.assertFalse(self.merged())
+
+    def test_the_newest_reviewer_folder_decides(self):
+        old = self.review(1)  # fix-a-rv passed the tip
+        path = os.path.join(self.jobs, "fix-a-rv2", "assignment.md")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w") as f:
+            f.write("agent: fix-a-rv2\nrole: reviewer\njob: fix-a\nseq: 1\ncommit: %s\n---\n" % self.tip())
+        new = self.report("fix-a-rv2", 1, "verdict: changes")
+        self.order(self.report("fix-a-w1", 1), old, new)
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertFalse(self.merged())
+
+
 class TestMainCheckout(MergeBase):
+    def test_a_detached_head_is_refused(self):
+        import oke
+        state = oke.load_state()
+        state["jobs"]["fix-a"]["base"] = None  # job new ran on a detached HEAD
+        oke.save_state(state)
+        self.git(self.repo, "checkout", "-q", "--detach")
+        self.order(self.report("fix-a-w1", 1), self.review(1))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("detached", self.err)
+        self.assertFalse(self.merged())
+
+    def test_job_new_records_the_base_branch(self):
+        import oke
+        current = self.git_out(self.repo, "symbolic-ref", "--short", "HEAD").strip()
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["base"], current)
+
+    def test_an_untracked_file_counts_as_dirty(self):
+        self.write("toy/new.txt", "untracked\n")
+        self.order(self.report("fix-a-w1", 1), self.review(1))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("not clean", self.err)
+
     def test_a_merge_in_progress_is_left_alone(self):
         # the user's own merge, half resolved: OKe must neither merge nor abort it
         self.git(self.repo, "checkout", "-q", "-b", "side")
