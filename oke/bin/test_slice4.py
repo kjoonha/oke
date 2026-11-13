@@ -185,6 +185,22 @@ class TestLiveFindings(KindBase):
         self.assertEqual(self.argv_of("agent", "send-keys")[0][3:], ["esc"])
 
 
+class TestReviewFindings(KindBase):
+    def test_a_session_seen_before_the_record_exists_is_written_later(self):
+        info = {"agent_status": "working", "agent_session": {"value": "s-early"}}
+        self.fake({"agent get": [J({"agent": info})]})
+        oke.look_at("fix-a-w1", self.home)  # no children.json record yet
+        self.assertEqual(self.spawn(kind="codex"), 0)
+        self.fake({"agent get": [J({"agent": info})]})
+        oke.look_at("fix-a-w1", self.home)
+        self.assertEqual(self.children()["fix-a-w1"]["session"], "s-early")
+
+    def test_kind_ignores_case_and_spaces(self):
+        self.assertEqual(self.spawn(kind="Codex "), 0)
+        argv = self.start_argv()
+        self.assertEqual(argv[argv.index("--kind") + 1], "codex")
+
+
 class TestSessionLearnedLater(KindBase):
     def test_a_session_herdr_reports_after_the_first_turn_is_recorded(self):
         # codex has no session id until its first turn ends

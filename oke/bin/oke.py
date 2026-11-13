@@ -614,7 +614,7 @@ def cmd_spawn(args):
     if role not in ("pm", "worker", "reviewer"):
         return fail("bad role %r" % role)
     config = load_config()
-    kind = header.get("kind") or ("claude" if role == "pm" else config["agents"].get(role, "claude"))
+    kind = str(header.get("kind") or "").strip().lower() or ("claude" if role == "pm" else config["agents"].get(role, "claude"))
     if kind not in KINDS:
         return fail("unknown agent kind %r: use one of %s" % (kind, ", ".join(KINDS)))
     if role == "pm" and kind != "claude":
@@ -733,7 +733,9 @@ def remember_session(agent, info):
     if not session or _sessions.get(agent) == session:
         return
     found = find_target(load_state(), agent)
-    if found and found[0] in ("worker", "reviewer") and found[3].get("session") != session:
+    if not found or found[0] not in ("worker", "reviewer"):
+        return  # no record yet (spawn still starting): look again next time
+    if found[3].get("session") != session:
         update_record(found[0], found[2], found[1], {"session": session})
     _sessions[agent] = session
 
