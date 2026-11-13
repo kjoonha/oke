@@ -340,6 +340,14 @@ def children_path(key):
     return os.path.join(pm_dir(key), "children.json")
 
 
+def read_children(key):
+    """{agent: record}. Only spawn writes this file, but a PM once rewrote it as a list of records."""
+    data = read_json(children_path(key), {})
+    if isinstance(data, list):
+        data = dict((r["agent"], r) for r in data if isinstance(r, dict) and r.get("agent"))
+    return data if isinstance(data, dict) else {}
+
+
 def session_of(agent):
     session = agent.get("agent_session")
     return session.get("value") if isinstance(session, dict) else None
@@ -400,7 +408,7 @@ def cmd_spawn(args):
             current["repos"].setdefault(key, {})["pm"] = record
             save_state(current)
         else:
-            children = read_json(children_path(key), {})
+            children = read_children(key)
             children[agent] = record
             write_json_atomic(children_path(key), children)
 
@@ -448,6 +456,16 @@ def cmd_spawn(args):
             if e.code not in ("agent_prompt_stalled", "timeout"):
                 raise
         info = herdr("agent", "get", agent).get("agent", {})
+        if info.get("agent_status") in ("idle", "done"):
+            # Seen live: the prompt text sat in the input box with its Enter lost.
+            # Enter on an empty input does nothing, so one more is safe.
+            herdr("agent", "send-keys", agent, "enter")
+            try:
+                herdr("agent", "wait", agent, "--until", "working", "--until", "blocked", "--timeout", "20000")
+            except HerdrError as e:
+                if e.code != "timeout":
+                    raise
+            info = herdr("agent", "get", agent).get("agent", {})
     except HerdrError as e:
         if e.code == "herdr_unavailable":
             raise
@@ -612,7 +630,7 @@ def cmd_status(args):
 
     for name, job in state["jobs"].items():
         key = job.get("repo")
-        children = read_json(children_path(key), {}) if key else {}
+        children = read_children(key) if key else {}
         job_agents = dict((a, "alive" if a in names else "dead")
                           for a, rec in children.items() if rec.get("job") == name)
         if job.get("phase") in ("awaiting_approval", "awaiting_merge"):
@@ -662,7 +680,7 @@ def compact_message():
         if ((repos.get(key) or {}).get("pm") or {}).get("pane") == pane:
             folder = pm_dir(key)
             break
-        for name, rec in read_json(children_path(key), {}).items():
+        for name, rec in read_children(key).items():
             if rec.get("pane") == pane and rec.get("job"):
                 folder = os.path.join(home, "jobs", rec["job"], name)
                 break

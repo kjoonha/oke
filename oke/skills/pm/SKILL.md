@@ -48,7 +48,7 @@ on: <what you wait for, when type is waiting>
 
 ## If you were restarted
 
-Your folder may already hold `board.md` and `children.json` from before you died. Read both before you act on the assignment.
+Your folder may already hold `board.md` and `children.json` from before you died. Read both before you act on the assignment. `children.json` is written by `$OKE spawn` only: read it, never write or edit it.
 
 - For each child in `children.json` whose `job` is the current job, check `herdr agent list`. A child that is still alive keeps its work: do not spawn it again and do not create another worktree. Write your report as `waiting` and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If the child is at a dialog the wait says `blocked`; handle it as in the table below.
 - If `git -C <repo> worktree list` already shows `oke/<job>`, use that worktree. Never create `oke/<job>-2` for a job that already has one.

@@ -287,7 +287,7 @@ def spawn_ok(agents=()):
             "pane split": [J({"pane": {"pane_id": "w1:p9"}})],
             "agent start": [AGENT()],
             "agent prompt": [J({"type": "agent_prompted"})],
-            "agent get": [AGENT()]}
+            "agent get": [AGENT("working")]}
 
 
 class SpawnBase(Base):
@@ -322,6 +322,31 @@ class TestSpawn(SpawnBase):
         self.assertEqual(self.cli("spawn", a, "--pane", "w1:p2"), 1)
         self.assertIn("plan not approved", self.err)
         self.assertEqual(self.calls(), [])
+
+    def test_spawn_survives_a_children_file_in_list_form(self):
+        # live run: a PM rewrote children.json as a list, and the next spawn crashed with TypeError
+        self.job("fix-a", "working")
+        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
+                              [{"agent": "fix-a-w1", "job": "fix-a", "pane": "w1:p5"}])
+        a = self.assignment("fix-a-rv", "reviewer", "fix-a")
+        self.fake(spawn_ok())
+        self.assertEqual(self.cli("spawn", a, "--split-from", "w1:p1"), 0)
+        kids = self.children()
+        self.assertEqual(kids["fix-a-rv"]["pane"], "w1:p9")
+        self.assertEqual(kids["fix-a-w1"]["pane"], "w1:p5")
+
+    def test_spawn_submits_a_first_prompt_left_in_the_input(self):
+        # live run: the prompt text was typed but its Enter was lost, so the agent sat idle
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        sc = spawn_ok()
+        sc["agent prompt"] = [E("timeout")]
+        sc["agent get"] = [AGENT("idle"), AGENT("working")]
+        sc["agent send-keys"] = [J({"type": "ok"})]
+        sc["agent wait"] = [AGENT("working")]
+        self.fake(sc)
+        self.assertEqual(self.cli("spawn", a, "--split-from", "w1:p1"), 0)
+        self.assertEqual(self.argv_of("agent", "send-keys"), [["agent", "send-keys", "fix-a-w1", "enter"]])
 
     def test_spawn_order_and_record(self):
         self.job("fix-a", "working")
