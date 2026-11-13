@@ -406,6 +406,15 @@ class TestPmWait(InboxBase):
         self.fake({"agent get": [AGENT("idle")]})
         self.assertEqual(self.wait(), "no_jobs")
 
+    def test_a_cancel_for_the_last_job_is_delivered_before_no_jobs(self):
+        self.pm_job("fix-a", 3, REPORT("waiting", 2))
+        self.fake({})
+        self.cli("send", "pm-toy", "--job", "fix-a", "Job fix-a: assignment updated (seq 3)")
+        self.assertEqual(self.cli("job", "phase", "fix-a", "failed"), 0)
+        self.fake({"agent get": [AGENT("idle")], "agent prompt": [J({"type": "agent_prompted"})]})
+        self.assertEqual(self.wait(), "no_jobs")
+        self.assertEqual(self.texts("pm-toy"), [])
+
     def test_send_to_an_unknown_job_queues_nothing(self):
         self.fake({})
         self.assertEqual(self.cli("send", "pm-toy", "--job", "nope", "hello"), 1)

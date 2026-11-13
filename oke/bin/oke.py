@@ -685,8 +685,8 @@ def check_pm_once(agent, key):
     """One look at a PM and every open job of its repository (read fresh each time,
     so a job added later counts). A final report is returned once: `seen` remembers it."""
     state = load_state()
-    if not open_jobs(state, key):
-        return "no_jobs"  # nothing left to watch: do not poll herdr forever
+    if not open_jobs(state, key) and not inbox_messages(agent):
+        return "no_jobs"  # nothing left to watch or deliver (a cancel goes in first)
     jobs = []
     for name in sorted(open_jobs(state, key)):
         seq, header, mtime = pm_job_report(name)
