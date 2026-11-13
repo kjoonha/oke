@@ -407,6 +407,16 @@ class TestPmWait(InboxBase):
         self.fake({"agent get": [AGENT("idle")]})
         self.assertEqual(self.wait(), "no_jobs")
 
+    def test_a_cancel_for_the_last_job_of_a_dead_pm_is_dropped(self):
+        # nobody revives a PM without open jobs: the cancel must not wait for the next PM
+        self.pm_job("fix-a", 3, REPORT("waiting", 2))
+        self.fake({})
+        self.cli("send", "pm-toy", "--job", "fix-a", "Job fix-a: assignment updated (seq 3)")
+        self.assertEqual(self.cli("job", "phase", "fix-a", "failed"), 0)
+        self.fake({"agent get": [E("agent_not_found")]})
+        self.assertEqual(self.wait(), "no_jobs")
+        self.assertEqual(self.texts("pm-toy"), [])
+
     def test_a_cancel_for_the_last_job_is_delivered_before_no_jobs(self):
         self.pm_job("fix-a", 3, REPORT("waiting", 2))
         self.fake({})
