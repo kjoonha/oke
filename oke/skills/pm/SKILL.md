@@ -142,7 +142,7 @@ When a child's wait finishes, act on its first line:
 
 ### kind: merge
 
-Merges go one at a time, in the order the merge assignments reached you. Finish one before you start the next. While a merge is still in progress (for example in its conflict ladder), write the next job's report as `waiting` (`on: <the job being merged>`) and start it when that one is done.
+Merges go one at a time, in the order the merge assignments reached you. Finish one before you start the next. While a merge is still in progress (for example in its conflict ladder), write the next job's report as `waiting` (`on: <the job being merged>`) and start it when that one is done. A merge that waits at step 1 on a job without a worktree is not in progress: when that job's merge arrives, do it first, out of order, then the waiting one.
 
 0. A job without a worktree (`commit: no` in the main checkout): its own changes are the uncommitted files there. Commit them now (`git add -A`, `git commit`) and go to step 5.
 1. In the main checkout, `git status --short` must be empty. If it is not:
@@ -161,7 +161,7 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
 
 ### kind: cancel
 
-The user gave the job up. Stop its children's waits by not starting them again, close its worker and reviewer panes (`herdr pane close <pane>`), and leave its worktree and branch as they are (say so on the board). Write no report: the job is closed. If a merge waited for this job, start it now.
+The user gave the job up. Ignore any later wait result for that job's children (a `gone` after you close them included): write no report for it. Do not start their waits again, close its worker and reviewer panes (`herdr pane close <pane>`), and leave its worktree and branch as they are (say so on the board). A job without a worktree leaves uncommitted files in the main checkout that would block every later merge: report nothing for the cancelled job, but name those files in the next merge's `question` at step 1 ("left by the cancelled job <job>"). Write no report: the job is closed. If a merge waited for this job, start it now.
 
 ### kind: answer
 

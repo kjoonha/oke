@@ -123,7 +123,7 @@ orchestrator 는 PM 마다 대기를 1개만 건다: `oke wait <pm> --jobs`. job
 
 ## 6. merge 줄
 
-PM 이 저장소마다 한 번에 하나씩 merge 한다. merge 지시는 받은 순서대로 처리한다. PM 은 한 번에 한 턴만 돌고 수신함은 오래된 순서로 배달되므로, 순서는 저절로 지켜진다.
+PM 이 저장소마다 한 번에 하나씩 merge 한다. merge 지시는 받은 순서대로 처리한다. 예외: worktree 없는 job 을 기다리느라 멈춘 merge 는 "진행 중" 이 아니다. 그 job 의 merge 가 오면 그것을 먼저 한다 (서로 기다리는 일을 막음). PM 은 한 번에 한 턴만 돌고 수신함은 오래된 순서로 배달되므로, 순서는 저절로 지켜진다.
 
 1. main checkout 의 `git status --short` 가 비어 있지 않으면 merge 하지 않는다. 그 변경이 worktree 없이 일하는 다른 열린 job 의 것이면 이 job 의 보고를 `waiting` (`on: <그 job>`) 으로 쓰고, 그 job 이 끝난 뒤 merge 한다. 주인이 없는 변경이면 `question` 으로 올린다.
 2. 자동: `git merge --no-ff oke/<job>`. 충돌 없이 끝나면 조각 1 의 나머지 단계 (wiki, worktree 제거, pane 닫기, `done` 보고).
