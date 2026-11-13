@@ -1635,6 +1635,8 @@ def cmd_compact_hook(args):
 def cmd_job(args):
     if args.action == "merge":
         return merge_job(args.slug)  # git can take a while: not under the state lock
+    if args.action == "verify":
+        return verify_job(args.slug, args.command)  # can take hours
     with locked():
         return job_locked(args)
 
@@ -1685,6 +1687,14 @@ def merge_job(job):
     if info.get("phase") != "merging":
         return fail("job %s is in phase %s: set phase merging after the user approves the merge"
                     % (job, info.get("phase")))
+    already = merge_state(job)[0]
+    if already in ("unverified", "verified"):
+        return fail("job %s is already merged (%s): run `oke job verify %s`, not a second merge"
+                    % (job, already, job))
+    for other in open_jobs(state, info["repo"]):
+        if other != job and merge_state(other)[0] == "unverified":
+            return fail("the merge of %s is not verified yet: run `oke job verify %s` first"
+                        % (other, other))
     job_dir = os.path.join(oke_home(), "jobs", job)
     worker = latest_report(job_dir, r"-w\d+$")
     review = latest_report(job_dir, r"-rv\d*$")
@@ -1725,11 +1735,16 @@ def merge_job(job):
     if not current or (base and current != base):
         return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
                     % (current or "a detached HEAD", base))
+    pre = git_out(main, "rev-parse", "HEAD")[1]
     result = subprocess.run(["git", "-C", main, "merge", "--no-ff", "--no-edit",
                              "-m", "Merge branch 'oke/%s'" % job, tip],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if result.returncode == 0:
-        print(json.dumps({"result": "merged", "job": job}))
+        merged = git_out(main, "rev-parse", "HEAD")[1]
+        ledger_add(job, os.path.basename(os.path.dirname(review[1])), tip, "review", "pass",
+                   review[1].replace("\\", "/"))
+        ledger_add(job, "oke", merged, "merge", "ok", "pre=%s" % pre)
+        print(json.dumps({"result": "merged", "job": job, "commit": merged}))
         return 0
     files = git_out(main, "diff", "--name-only", "--diff-filter=U")[1].split()
     if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
@@ -1741,6 +1756,108 @@ def merge_job(job):
         return fail("git merge failed: %s" % result.stdout.decode("utf-8", "replace").strip())
     print(json.dumps({"result": "conflict", "job": job, "files": files}))
     return 2
+
+
+# ---------------------------------------------------------------- ledger
+
+LEDGER_FIELDS = ("time", "by", "commit", "check", "result", "detail")
+
+
+def ledger_path(job):
+    return os.path.join(oke_home(), "jobs", job, "ledger.tsv")
+
+
+def ledger_add(job, by, commit, check, result, detail=""):
+    """Append one row. Rows are never rewritten: a later row supersedes an earlier one."""
+    values = [time.strftime("%Y-%m-%dT%H:%M:%S"), by, commit, check, result, detail]
+    line = "\t".join(" ".join(str(v or "-").split()) for v in values)
+    with io.open(ledger_path(job), "a", encoding="utf-8", newline="\n") as f:
+        f.write(line + u"\n")
+
+
+def ledger_rows(job):
+    try:
+        with io.open(ledger_path(job), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (IOError, OSError, UnicodeDecodeError):
+        return []
+    return [dict(zip(LEDGER_FIELDS, l.split("\t"))) for l in lines if l.count("\t") == 5]
+
+
+def merge_state(job):
+    """(state, last merge row): state is none, unverified, verified or rolled_back."""
+    rows = ledger_rows(job)
+    merges = [i for i, r in enumerate(rows) if r["check"] == "merge"]
+    if not merges:
+        return "none", None
+    after = rows[merges[-1] + 1:]
+    if any(r["check"] == "rollback" for r in after):
+        return "rolled_back", rows[merges[-1]]
+    if any(r["check"] == "verify" and r["result"] == "pass" for r in after):
+        return "verified", rows[merges[-1]]
+    return "unverified", rows[merges[-1]]
+
+
+def shell_argv(command):
+    """Run the plan's 검증 명령 as the PM wrote it: in bash where there is one.
+    shortcut: on Windows `bash` must be Git Bash (first on PATH when OKe runs from it), not WSL."""
+    bash = shutil.which("bash")
+    return [bash, "-c", command] if bash else command
+
+
+def verify_job(job, command):
+    """Run the 검증 명령 on the merged main checkout. A failure resets the main branch to
+    where it was before the merge: the merge was clean, so nothing else is lost.
+    No time limit: a long simulation is a normal check. Run it in the background."""
+    state = load_state()
+    info = state["jobs"].get(job)
+    if not info:
+        return fail("unknown job: %s" % job)
+    status, row = merge_state(job)
+    if status == "verified":
+        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "already": True}))
+        return 0
+    if status != "unverified":
+        return fail("job %s has no merge to verify (%s): run `oke job merge %s` first" % (job, status, job))
+    main = native_path(os.path.dirname(info["repo"]))
+    if git_out(main, "rev-parse", "HEAD")[1] != row["commit"]:
+        return fail("the main checkout moved past the merge of %s (%s): ask the user"
+                    % (job, row["commit"][:12]))
+    n = len([r for r in ledger_rows(job) if r["check"] == "verify"]) + 1
+    log = os.path.join(oke_home(), "jobs", job, "verify-%d.log" % n)
+    argv = shell_argv(command)
+    with io.open(log, "wb") as f:
+        code = subprocess.call(argv, cwd=main, stdin=subprocess.DEVNULL, stdout=f,
+                               stderr=subprocess.STDOUT, shell=isinstance(argv, str))
+    with io.open(log, encoding="utf-8", errors="replace") as f:
+        tail = f.read().splitlines()[-40:]
+    log = log.replace("\\", "/")
+    if code == 0:
+        ledger_add(job, "oke", row["commit"], "verify", "pass", command)
+        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "log": log}))
+        return 0
+    ledger_add(job, "oke", row["commit"], "verify", "fail", "exit %d: %s" % (code, command))
+    pre = row["detail"][len("pre="):] if row["detail"].startswith("pre=") else None
+    # only tracked files are reset: the test run's untracked byproducts stay
+    if not pre or subprocess.call(["git", "-C", main, "reset", "-q", "--hard", pre]) != 0:
+        return fail("the 검증 명령 failed on the merge of %s and the reset to %s failed: ask the user (log %s)"
+                    % (job, pre, log))
+    ledger_add(job, "oke", pre, "rollback", "ok", "after verify fail")
+    print(json.dumps({"result": "verify_failed", "job": job, "exit": code, "log": log,
+                      "rolled_back_to": pre, "tail": tail}, ensure_ascii=False))
+    return 3
+
+
+def cmd_ledger(args):
+    if args.action == "add":
+        if not os.path.isdir(os.path.dirname(ledger_path(args.job))):
+            return fail("unknown job: %s" % args.job)
+        ledger_add(args.job, args.by, args.commit, args.check, args.result, args.detail)
+        return 0
+    status, _ = merge_state(args.job)
+    print(json.dumps({"job": args.job, "merge": status, "rows": ledger_rows(args.job)},
+                     ensure_ascii=False, indent=2))
+    return 0
 
 
 # Phases that pass a user gate may only be entered from the phase before that gate
@@ -1872,6 +1989,10 @@ def job_locked(args):
         if allowed is not None and now not in allowed:
             return fail("job %s cannot go from %s to %s: allowed only from %s"
                         % (args.slug, now, args.phase, ", ".join(allowed)))
+        if args.phase == "done" and merge_state(args.slug)[0] in ("unverified", "rolled_back"):
+            # a job merged without a worktree has no ledger merge row: only OKe's merges are held
+            return fail("job %s: its merge is %s, run `oke job verify` (or merge again) first"
+                        % (args.slug, merge_state(args.slug)[0]))
         if args.phase == "planning" and now == "intake":  # a re-plan needs no new interview
             problem = interview_problem(args.slug)
             if problem:
@@ -2092,7 +2213,24 @@ def build_parser():
     defer.add_argument("slug")
     merge = job_sub.add_parser("merge")
     merge.add_argument("slug")
+    verify = job_sub.add_parser("verify")
+    verify.add_argument("slug")
+    verify.add_argument("command", help="the plan's 검증 명령, as one quoted string")
     job.set_defaults(func=cmd_job)
+
+    ledger = sub.add_parser("ledger")
+    ledger_sub = ledger.add_subparsers(dest="action")
+    ledger_sub.required = True
+    show = ledger_sub.add_parser("show")
+    show.add_argument("job")
+    add = ledger_sub.add_parser("add")
+    add.add_argument("job")
+    add.add_argument("--by", required=True)
+    add.add_argument("--commit", required=True)
+    add.add_argument("--check", required=True)
+    add.add_argument("--result", required=True, choices=("pass", "fail"))
+    add.add_argument("--detail", default="")
+    ledger.set_defaults(func=cmd_ledger)
 
     spawn = sub.add_parser("spawn")
     spawn.add_argument("assignment")

@@ -211,7 +211,7 @@ When the user gives a job up: give the PM `kind: cancel` (steps 2, 4, 5 and 6 of
 
 Plan approval question: put a short summary of the plan in the option `preview`, mention the plan file path, and offer: approve / request changes / discuss in the PM pane (then `herdr agent focus <pm>` and defer).
 
-Merge question: summary, branch name, number of changed files. Offer: merge / hold / look myself.
+Merge question: summary, branch name, number of changed files, and the checks recorded so far (`$OKE ledger show <job>`: who checked which commit, pass or fail). Offer: merge / hold / look myself. A merge counts as done only after the PM verified it on the merged result (`merge: verified` in the ledger); when the PM reports merged, check that before `job phase done`.
 
 ## Autonomy
 

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """oke job merge: refuses to merge work the reviewer has not seen."""
+import json
 import os
 import subprocess
 import time
@@ -220,6 +221,85 @@ class TestMainCheckout(MergeBase):
         self.git(self.repo, "checkout", "-q", "-b", "feature")
         self.order(self.report("fix-a-w1", 1), self.review(1))
         self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+
+
+class TestLedgerAndVerify(MergeBase):
+    def merge(self):
+        self.order(self.report("fix-a-w1", 1), self.review(1))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+        return self.git_out(self.repo, "rev-parse", "HEAD").strip()
+
+    def ledger(self):
+        self.assertEqual(self.cli("ledger", "show", "fix-a"), 0)
+        return json.loads(self.out)
+
+    def test_a_merge_is_recorded_and_waits_for_verification(self):
+        merged = self.merge()
+        led = self.ledger()
+        self.assertEqual(led["merge"], "unverified")
+        self.assertEqual([(r["check"], r["result"]) for r in led["rows"]], [("review", "pass"), ("merge", "ok")])
+        self.assertEqual(led["rows"][0]["commit"], self.tip())
+        self.assertEqual(led["rows"][1]["commit"], merged)
+
+    def test_a_passing_check_verifies_the_merge(self):
+        merged = self.merge()
+        self.assertEqual(self.cli("job", "verify", "fix-a", "test -f a.txt && echo checked"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["result"], "verified")
+        self.assertEqual(self.ledger()["merge"], "verified")
+        self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), merged)
+        self.assertEqual(self.cli("job", "verify", "fix-a", "exit 1"), 0)  # verified stays verified
+        self.assertTrue(json.loads(self.out)["already"])
+
+    def test_a_failing_check_rolls_the_merge_back(self):
+        pre = self.git_out(self.repo, "rev-parse", "HEAD").strip()
+        self.merge()
+        # the check also dirties a tracked file before it fails
+        self.assertEqual(self.cli("job", "verify", "fix-a", "echo broken > a.txt; echo boom; exit 4"), 3)
+        out = json.loads(self.out)
+        self.assertEqual((out["result"], out["exit"], out["rolled_back_to"]), ("verify_failed", 4, pre))
+        self.assertIn("boom", out["tail"])
+        self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), pre)
+        self.assertEqual(self.git_out(self.repo, "status", "--porcelain").strip(), "")
+        self.assertEqual(self.ledger()["merge"], "rolled_back")
+        # fixed and reviewed again: the job may merge once more
+        self.order(self.report("fix-a-w1", 2), self.review(2))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+
+    def test_done_needs_a_verified_merge(self):
+        self.merge()
+        self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 1)
+        self.assertIn("unverified", self.err)
+        self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
+
+    def test_a_second_merge_of_the_same_job_is_refused(self):
+        self.merge()
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("already merged", self.err)
+
+    def test_another_merge_waits_for_the_verification(self):
+        self.merge()
+        self.job("fix-b", "merging")
+        self.assertEqual(self.cli("job", "merge", "fix-b"), 1)
+        self.assertIn("not verified", self.err)
+
+    def test_verify_without_a_merge_or_after_the_main_moved(self):
+        self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 1)
+        self.merge()
+        self.write("toy/z.txt", "user\n")
+        self.git(self.repo, "add", "-A")
+        self.git(self.repo, "commit", "-q", "-m", "user commit")
+        self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 1)
+        self.assertIn("moved past", self.err)
+
+    def test_a_worker_records_its_check(self):
+        self.assertEqual(self.cli("ledger", "add", "fix-a", "--by", "fix-a-w1", "--commit", "abc1234",
+                                  "--check", "verify", "--result", "pass", "--detail", "pytest -q\tall"), 0)
+        row = self.ledger()["rows"][0]
+        self.assertEqual((row["by"], row["check"], row["result"], row["detail"]),
+                         ("fix-a-w1", "verify", "pass", "pytest -q all"))
+        self.assertEqual(self.cli("ledger", "add", "nope", "--by", "x", "--commit", "x",
+                                  "--check", "verify", "--result", "pass"), 1)
 
 
 if __name__ == "__main__":
