@@ -189,7 +189,7 @@ Merge question: summary, branch name, number of changed files. Offer: merge / ho
 
 ## Autonomy
 
-Read `autonomy` from `~/.oke/config.json` (default `balanced`).
+Read `autonomy` from `~/.oke/config.json` (default `balanced`). `agents` there picks the CLI for workers and reviewers: `{"worker": "claude", "reviewer": "claude"}` by default; `codex` and `opencode` work too. If the user asks for one in a job, write it into `intake.md` (`## 원하는 결과`); the PM then puts `kind:` into that child's assignment. The PM is always claude.
 
 | Situation | conservative | balanced | full |
 |---|---|---|---|
