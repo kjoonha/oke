@@ -163,6 +163,84 @@ def save_state(state):
     write_json_atomic(state_path(), dict((k, v) for k, v in state.items() if k != "_recovered"))
 
 
+# A lock older than this is left over from a crashed holder. A revive takes about a
+# minute; this is not a rule about whether an agent is alive.
+LOCK_STALE = 120
+
+
+def lock_path(name):
+    return os.path.join(oke_home(), "locks", name)
+
+
+def try_lock(name):
+    path = lock_path(name)
+    if not os.path.isdir(os.path.dirname(path)):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    for _ in range(2):
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return True
+        except OSError:
+            try:
+                if time.time() - os.path.getmtime(path) <= LOCK_STALE:
+                    return False
+                os.remove(path)
+            except OSError:
+                pass  # the holder just released it: try again
+    return False
+
+
+def unlock(name):
+    try:
+        os.remove(lock_path(name))
+    except OSError:
+        pass
+
+
+class locked(object):
+    """Hold a lock around a read-modify-write of state.json or children.json: the
+    mods' ticks, waits, spawn and the orchestrator all write them now."""
+
+    def __init__(self, name="records", timeout=30):
+        self.name, self.timeout = name, timeout
+
+    def __enter__(self):
+        deadline = time.time() + self.timeout
+        while not try_lock(self.name):
+            if time.time() > deadline:
+                raise StateError("lock %s is held by another OKe process" % self.name)
+            time.sleep(0.05)
+
+    def __exit__(self, *exc):
+        unlock(self.name)
+
+
+def events_path():
+    return os.path.join(oke_home(), "events.log")
+
+
+def log_event(text):
+    with io.open(events_path(), "a", encoding="utf-8", newline="\n") as f:
+        f.write(u"%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), text))
+
+
+def read_events(offset):
+    """New complete lines after byte `offset` and the next offset. No offset: none, from the end."""
+    try:
+        size = os.path.getsize(events_path())
+    except OSError:
+        return [], 0
+    if offset is None:
+        return [], size
+    if offset > size:  # the log was replaced
+        offset = 0
+    with io.open(events_path(), "rb") as f:
+        f.seek(offset)
+        data = f.read()
+    end = data.rfind(b"\n") + 1
+    return data[:end].decode("utf-8", "replace").splitlines(), offset + end
+
+
 def repo_key(path):
     """Normalized git common dir: the same value from a checkout and its worktrees."""
     cwd = native_path(path)
@@ -357,6 +435,54 @@ def list_agents():
     return herdr("agent", "list").get("agents", [])
 
 
+class DialogError(Exception):
+    """The new agent stopped at a dialog OKe may not answer. The message is the screen."""
+
+
+def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: None):
+    """Start claude in `pane`, answer the trust dialog only when `trusted()` allows it,
+    send the first prompt and make sure the first turn started. `registered` runs once
+    herdr knows the name. Returns herdr's agent info."""
+    try:
+        herdr("agent", "start", agent, "--kind", "claude", "--pane", pane, "--", *claude_args)
+    except HerdrError as e:
+        if e.code != "agent_not_ready":
+            raise
+        registered()  # herdr keeps the name even though the agent is not ready
+        # The dialog can still be drawing when herdr reports the agent blocked.
+        for _ in range(DIALOG_TRIES):
+            screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
+            if TRUST_MARKER in screen.lower():
+                break
+            time.sleep(DIALOG_POLL)
+        if TRUST_MARKER not in screen.lower() or not trusted():
+            raise DialogError(screen)
+        herdr("agent", "send-keys", agent, "down", "enter")
+        herdr("agent", "wait", agent, "--until", "idle", "--timeout", "30000")
+    registered()
+
+    # Wait until the first turn starts: for a few seconds after a prompt herdr still
+    # says idle, and `oke wait` would read that as "idle with no report".
+    try:
+        herdr("agent", "prompt", agent, prompt,
+              "--wait", "--until", "working", "--until", "blocked", "--timeout", "20000")
+    except HerdrError as e:
+        if e.code not in ("agent_prompt_stalled", "timeout"):
+            raise
+    info = herdr("agent", "get", agent).get("agent", {})
+    if info.get("agent_status") in ("idle", "done"):
+        # Seen live: the prompt text sat in the input box with its Enter lost.
+        # Enter on an empty input does nothing, so one more is safe.
+        herdr("agent", "send-keys", agent, "enter")
+        try:
+            herdr("agent", "wait", agent, "--until", "working", "--until", "blocked", "--timeout", "20000")
+        except HerdrError as e:
+            if e.code != "timeout":
+                raise
+        info = herdr("agent", "get", agent).get("agent", {})
+    return info
+
+
 def cmd_spawn(args):
     path = os.path.abspath(native_path(args.assignment)).replace("\\", "/")
     header = read_header(path)
@@ -403,14 +529,15 @@ def cmd_spawn(args):
               "seq": header["seq"], "role": role, "job": header.get("job")}
 
     def save_record():
-        if role == "pm":
-            current = load_state()
-            current["repos"].setdefault(key, {})["pm"] = record
-            save_state(current)
-        else:
-            children = read_children(key)
-            children[agent] = record
-            write_json_atomic(children_path(key), children)
+        with locked():
+            if role == "pm":
+                current = load_state()
+                current["repos"].setdefault(key, {})["pm"] = record
+                save_state(current)
+            else:
+                children = read_children(key)
+                children[agent] = record
+                write_json_atomic(children_path(key), children)
 
     def trusted_folder():
         """The trust dialog is answered only for a repository OKe already works on,
@@ -429,43 +556,10 @@ def cmd_spawn(args):
 
     claude_args = launch_args(role, load_config(), oke_home(), plugin_root(), args.resume)
     try:
-        try:
-            herdr("agent", "start", agent, "--kind", "claude", "--pane", pane, "--", *claude_args)
-        except HerdrError as e:
-            if e.code != "agent_not_ready":
-                raise
-            save_record()  # herdr keeps the name even though the agent is not ready
-            # The dialog can still be drawing when herdr reports the agent blocked.
-            for _ in range(DIALOG_TRIES):
-                screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
-                if TRUST_MARKER in screen.lower():
-                    break
-                time.sleep(DIALOG_POLL)
-            if TRUST_MARKER not in screen.lower() or not trusted_folder():
-                return fail("agent %s is stopped at a dialog in pane %s:\n%s" % (agent, pane, screen))
-            herdr("agent", "send-keys", agent, "down", "enter")
-            herdr("agent", "wait", agent, "--until", "idle", "--timeout", "30000")
-        save_record()
-
-        # Wait until the first turn starts: for a few seconds after a prompt herdr still
-        # says idle, and `oke wait` would read that as "idle with no report".
-        try:
-            herdr("agent", "prompt", agent, FIRST_PROMPT.format(role=role, path=path),
-                  "--wait", "--until", "working", "--until", "blocked", "--timeout", "20000")
-        except HerdrError as e:
-            if e.code not in ("agent_prompt_stalled", "timeout"):
-                raise
-        info = herdr("agent", "get", agent).get("agent", {})
-        if info.get("agent_status") in ("idle", "done"):
-            # Seen live: the prompt text sat in the input box with its Enter lost.
-            # Enter on an empty input does nothing, so one more is safe.
-            herdr("agent", "send-keys", agent, "enter")
-            try:
-                herdr("agent", "wait", agent, "--until", "working", "--until", "blocked", "--timeout", "20000")
-            except HerdrError as e:
-                if e.code != "timeout":
-                    raise
-            info = herdr("agent", "get", agent).get("agent", {})
+        info = start_agent(agent, pane, claude_args, FIRST_PROMPT.format(role=role, path=path),
+                           trusted_folder, save_record)
+    except DialogError as e:
+        return fail("agent %s is stopped at a dialog in pane %s:\n%s" % (agent, pane, e))
     except HerdrError as e:
         if e.code == "herdr_unavailable":
             raise
@@ -511,6 +605,8 @@ def check_once(agent, report, seq):
         return None
     if current and header.get("type") == "waiting":
         return None
+    if os.path.exists(os.path.join(os.path.dirname(report), "api-retry.json")):
+        return None  # its mod resubmits the turn after an API error
     if os.path.exists(report):
         if header is None:
             return "?bad_report no header (expected key: value lines, then ---)"
@@ -550,6 +646,8 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
                 result = None
         else:
             armed = True
+        if result == "gone" and revive(agent) in ("revived", "alive", "busy", "failed"):
+            result = None  # failed counts toward the revive limit and is tried again
         if result is None:
             idle = 0
         elif result.startswith("?"):
@@ -566,6 +664,368 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
 def cmd_wait(args):
     print(wait_loop(args.agent, native_path(args.report), args.seq, poll=args.poll,
                     after_blocked=args.after_blocked))
+    return 0
+
+
+# ---------------------------------------------------------------- revive
+
+DONE_PHASES = ("done", "failed")
+REVIVE_LIMIT = 3  # consecutive deaths with no new report in between
+ORCH_NAME = "oke-orch"
+REVIVE_PROMPT = ("You were restarted after a crash. Use the oke:{role} skill. Re-read your "
+                 "assignment file {path} and your board.md, then continue.")
+
+
+def open_jobs(state, key=None):
+    return [n for n, j in state["jobs"].items()
+            if j.get("phase") not in DONE_PHASES and (key is None or j.get("repo") == key)]
+
+
+def all_keys(state):
+    return sorted(set(state["repos"]) | set(j.get("repo") for j in state["jobs"].values() if j.get("repo")))
+
+
+def records(state):
+    """Every recorded OKe agent as (role, name, key, record)."""
+    out = [("orchestrator", "orchestrator", None, state["orchestrator"])]
+    for key in all_keys(state):
+        pm = (state["repos"].get(key) or {}).get("pm")
+        if pm and pm.get("agent"):
+            out.append(("pm", pm["agent"], key, pm))
+        for name, rec in sorted(read_children(key).items()):
+            out.append((rec.get("role") or "worker", name, key, rec))
+    return out
+
+
+def find_target(state, name):
+    for role, n, key, rec in records(state):
+        if n == name or (role == "orchestrator" and name == rec.get("agent")):
+            return role, n, key, rec
+    return None
+
+
+def agent_folder(role, name, key, record):
+    if role == "pm":
+        return pm_dir(key)
+    if role in ("worker", "reviewer") and record.get("job"):
+        return os.path.join(oke_home(), "jobs", record["job"], name)
+    return None
+
+
+def should_be_alive(state, role, key, name, record):
+    """Only agents with work left are revived: never a worker closed after merge."""
+    if role == "orchestrator":
+        return record.get("argv") is not None and bool(open_jobs(state))
+    if role == "pm":
+        return bool(open_jobs(state, key))
+    job = state["jobs"].get(record.get("job"))
+    if not job or job.get("phase") in DONE_PHASES:
+        return False
+    folder = agent_folder(role, name, key, record)
+    assignment = read_header(os.path.join(folder, "assignment.md")) or {}
+    report = read_header(os.path.join(folder, "report.md")) or {}
+    return not (report.get("type") in FINAL_TYPES and "seq" in assignment
+                and report.get("seq") == assignment["seq"])
+
+
+def same_agent(record, a):
+    if record.get("agent") and a.get("name") == record["agent"]:
+        return True
+    mine, theirs = record.get("session"), session_of(a)
+    if record.get("pane") and a.get("pane_id") == record["pane"]:
+        return not (mine and theirs and mine != theirs)
+    return bool(mine and theirs == mine)
+
+
+def live_agent(record, agents):
+    for a in agents:
+        if same_agent(record, a):
+            return a
+    return None
+
+
+def pane_has_claude(pane):
+    try:
+        info = herdr("pane", "process-info", "--pane", pane).get("process_info", {})
+    except HerdrError as e:
+        if e.code == "herdr_unavailable":
+            raise
+        return False
+    return any("claude" in (p.get("name") or "").lower() for p in info.get("foreground_processes") or [])
+
+
+def pane_exists(pane):
+    try:
+        herdr("pane", "get", pane)
+        return True
+    except HerdrError as e:
+        if e.code == "herdr_unavailable":
+            raise
+        return False
+
+
+def strip_resume(argv):
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+            if not a.startswith("-"):
+                continue
+        if a in ("--resume", "-r"):
+            skip = True
+        elif a not in ("--continue", "-c") and not a.startswith("--resume="):
+            out.append(a)
+    return out
+
+
+def update_record(role, key, name, fields):
+    with locked():
+        if role == "orchestrator":
+            state = load_state()
+            state["orchestrator"].update(fields)
+            save_state(state)
+        elif role == "pm":
+            state = load_state()
+            state["repos"].setdefault(key, {}).setdefault("pm", {}).update(fields)
+            save_state(state)
+        else:
+            children = read_children(key)
+            children.setdefault(name, {}).update(fields)
+            write_json_atomic(children_path(key), children)
+
+
+def report_mtime(folder):
+    try:
+        return os.path.getmtime(os.path.join(folder, "report.md"))
+    except OSError:
+        return None
+
+
+def new_pane(state, role, key, cwd):
+    """A pane next to the agent's parent; a new workspace when no parent pane is left."""
+    if role == "orchestrator":
+        parents = [(r.get("pm") or {}).get("pane") for r in state["repos"].values()]
+    elif role == "pm":
+        parents = [state["orchestrator"].get("pane")]
+    else:
+        parents = [((state["repos"].get(key) or {}).get("pm") or {}).get("pane")]
+    for parent in [p for p in parents if p]:
+        try:
+            return herdr("pane", "split", "--pane", parent, "--direction", "right",
+                         "--cwd", cwd, "--no-focus")["pane"]["pane_id"]
+        except HerdrError as e:
+            if e.code == "herdr_unavailable":
+                raise
+    return herdr("workspace", "create", "--cwd", cwd, "--label", "oke", "--no-focus")["root_pane"]["pane_id"]
+
+
+def relaunch(state, role, key, name, record, folder):
+    if role == "orchestrator":
+        agent, prompt, cwd = ORCH_NAME, "/oke:start", native_path(record.get("cwd") or oke_home())
+        args = strip_resume(record["argv"])
+    else:
+        path = os.path.join(folder, "assignment.md").replace("\\", "/")
+        cwd = native_path((read_header(path) or {}).get("cwd") or oke_home())
+        agent, prompt = name, REVIVE_PROMPT.format(role=role, path=path)
+        args = launch_args(role, load_config(), oke_home(), plugin_root())
+    if record.get("session"):
+        args = args + ["--resume", record["session"]]
+    # A dead claude leaves its shell behind: start in place so the layout stays.
+    pane = record.get("pane")
+    if not (pane and pane_exists(pane)):
+        pane = new_pane(state, role, key, cwd)
+    # The folder was trusted when the agent first started; a trust dialog now is unexpected.
+    return start_agent(agent, pane, args, prompt, lambda: False)
+
+
+def revive(name):
+    """Bring a dead OKe agent back in its own session. Returns revived, alive, busy
+    (another process is reviving it), not_needed, gave_up, failed or unknown."""
+    state = load_state()
+    found = find_target(state, name)
+    if found is None:
+        return "unknown"
+    lock = "revive-" + found[1]
+    if not try_lock(lock):
+        return "busy"
+    try:
+        return revive_locked(found[1])
+    finally:
+        unlock(lock)
+
+
+def revive_locked(name):
+    state = load_state()  # again, under the lock: another watcher may have revived it
+    role, name, key, record = find_target(state, name)
+    if not should_be_alive(state, role, key, name, record):
+        return "not_needed"
+    if live_agent(record, list_agents()) or (record.get("pane") and pane_has_claude(record["pane"])):
+        return "alive"
+    folder = agent_folder(role, name, key, record)
+    mtime = report_mtime(folder) if folder else None
+    revives = record.get("revives", 0)
+    if folder and mtime != record.get("report_mtime"):
+        revives = 0  # it reported since the last revive: not a crash loop
+    if revives >= REVIVE_LIMIT:
+        if not record.get("gave_up"):
+            log_event("gave_up %s after %d restarts" % (name, revives))
+            update_record(role, key, name, {"gave_up": True})
+        return "gave_up"
+    if folder:
+        try:
+            os.remove(os.path.join(folder, "api-retry.json"))  # the dead process's retry
+        except OSError:
+            pass
+    fields = {"revives": revives + 1, "report_mtime": mtime, "gave_up": False}
+    try:
+        info = relaunch(state, role, key, name, record, folder)
+    except (HerdrError, DialogError) as e:
+        if isinstance(e, HerdrError) and e.code == "herdr_unavailable":
+            raise
+        update_record(role, key, name, fields)
+        log_event("revive_failed %s: %s" % (name, (str(e).strip().splitlines() or [""])[0]))
+        return "failed"
+    fields.update(pane=info.get("pane_id"), session=session_of(info) or record.get("session"))
+    if role == "orchestrator":
+        fields["agent"] = ORCH_NAME
+    update_record(role, key, name, fields)
+    log_event("revived %s pane %s" % (name, fields["pane"]))
+    return "revived"
+
+
+def cmd_revive(args):
+    print(revive(args.agent))
+    return 0
+
+
+def cmd_resume_all(args):
+    """After a reboot: the orchestrator brings back each PM with work left; the PMs'
+    own watchers bring back their children."""
+    state = load_state()
+    result = dict((name, revive(name)) for role, name, key, rec in records(state) if role == "pm")
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
+def whoami(state, pane):
+    """(role, name, key, record) of the OKe agent in `pane`, or None. Pane ids come
+    back after a herdr restart, so a recorded session has to match as well."""
+    mine = [r for r in records(state) if r[3].get("pane") == pane]
+    if not mine:
+        return None, []
+    agents = list_agents()
+    here = [a for a in agents if a.get("pane_id") == pane]
+    if not here:
+        return None, agents
+    session = session_of(here[0])
+    for r in mine:
+        if not (r[3].get("session") and session and r[3]["session"] != session):
+            return r, agents
+    return None, agents
+
+
+def board_node(role, name, key, record, agents):
+    folder = agent_folder(role, name, key, record)
+    a = live_agent(record, agents)
+    report = read_header(os.path.join(folder, "report.md")) if folder else None
+    try:
+        with io.open(os.path.join(folder, "board.md"), encoding="utf-8") as f:
+            board = f.read()
+    except (IOError, OSError, TypeError, UnicodeDecodeError):
+        board = ""
+    return {"agent": name, "role": role, "status": a.get("agent_status") if a else "dead",
+            "pane": (a or {}).get("pane_id") or record.get("pane"),
+            "report": (report or {}).get("type"), "board": board,
+            "revives": record.get("revives", 0)}
+
+
+def board_tree(state, agents, only_key=None):
+    tree = []
+    for key in all_keys(state):
+        if only_key and key != only_key:
+            continue
+        pm = (state["repos"].get(key) or {}).get("pm")
+        children = read_children(key)
+        jobs = []
+        for job in sorted(n for n, j in state["jobs"].items() if j.get("repo") == key):
+            nodes = [board_node(rec.get("role") or "worker", name, key, rec, agents)
+                     for name, rec in sorted(children.items()) if rec.get("job") == job]
+            jobs.append({"job": job, "phase": state["jobs"][job].get("phase"), "agents": nodes})
+        tree.append({"repo": repo_name(key), "key": key, "jobs": jobs,
+                     "pm": board_node("pm", pm["agent"], key, pm, agents) if pm and pm.get("agent") else None})
+    return tree
+
+
+def cmd_tick(args):
+    """One watcher round for a mod: who am I, revive what died, new events, the board."""
+    state = load_state()
+    events, offset = read_events(args.events_from)
+    out = {"role": None, "agent": None, "revived": {}, "events": events,
+           "events_offset": offset, "board": None}
+    me, agents = whoami(state, args.pane)
+    if me is not None:
+        role, name, key, record = me
+        out["role"], out["agent"] = role, name
+        if role == "orchestrator":
+            targets = [r for r in records(state) if r[0] == "pm"]
+        elif role == "pm":
+            targets = [r for r in records(state) if r[0] == "orchestrator"
+                       or (r[2] == key and r[0] in ("worker", "reviewer"))]
+        else:
+            targets = []
+        for t_role, t_name, t_key, t_rec in targets:
+            a = live_agent(t_rec, agents)
+            if a:
+                if not t_rec.get("session") and session_of(a):  # spawn could not see it yet
+                    update_record(t_role, t_key, t_name, {"session": session_of(a)})
+            elif should_be_alive(state, t_role, t_key, t_name, t_rec):
+                out["revived"][t_name] = revive(t_name)
+        if args.board and role in ("orchestrator", "pm"):
+            out["board"] = board_tree(state, agents, key if role == "pm" else None)
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+# ---------------------------------------------------------------- api retry
+
+RETRYABLE_ERRORS = ("rate_limit", "overloaded", "server_error", "unknown", "")
+API_RETRY_LIMIT = 20
+
+
+def cmd_api_retry(args):
+    """The mod reports an API-error turn (or a good turn with --clear); OKe decides
+    whether to retry and after how long, and gives up with a failed report."""
+    state = load_state()
+    me, _ = whoami(state, args.pane)
+    if me is None:
+        print(json.dumps({"action": "none", "role": None}))
+        return 0
+    role, name, key, record = me
+    folder = agent_folder(role, name, key, record)
+    marker = os.path.join(folder, "api-retry.json") if folder else None
+    limit = int(load_config().get("api_retry_limit", API_RETRY_LIMIT))
+    out = {"role": role, "agent": name, "limit": limit}
+    kind = args.error or ""
+    if args.clear:
+        out["action"] = "cleared"
+    elif kind in RETRYABLE_ERRORS and args.attempt <= limit:
+        out["action"], out["delay"] = "retry", 30 * 2 ** min(max(args.attempt, 1) - 1, 4)
+        out["delay"] = min(out["delay"], 300)
+        if marker:
+            write_json_atomic(marker, {"attempt": args.attempt, "error": kind, "delay": out["delay"]})
+        print(json.dumps(out))
+        return 0
+    else:
+        out["action"] = "give_up"
+        log_event("api_gave_up %s: %s after %d attempts" % (name, kind or "error", args.attempt))
+        if folder:
+            seq = (read_header(os.path.join(folder, "assignment.md")) or {}).get("seq")
+            with io.open(os.path.join(folder, "report.md"), "w", encoding="utf-8", newline="\n") as f:
+                f.write(u"type: failed\nseq: %s\n---\n## 요약\nAPI error %s: automatic retry stopped "
+                        u"after %d attempts.\n" % (seq, kind or "unknown", args.attempt))
+    if marker and os.path.exists(marker):
+        os.remove(marker)
+    print(json.dumps(out))
     return 0
 
 
@@ -592,6 +1052,32 @@ def find_agent(record, agents, key):
 
 
 def cmd_status(args):
+    with locked():
+        return status_locked(args)
+
+
+def own_launch(pane, agents):
+    """How the orchestrator in `pane` was started, so a watcher can start it again."""
+    found = {}
+    try:
+        info = herdr("pane", "process-info", "--pane", pane).get("process_info", {})
+    except HerdrError:
+        info = {}  # without it the orchestrator just cannot be revived; the claim still stands
+    for p in info.get("foreground_processes") or []:
+        if "claude" in (p.get("name") or "").lower() and p.get("argv"):
+            argv = p["argv"][1:]
+            # shortcut: a node-run claude has its script as the next argument; other launchers unhandled
+            if os.path.basename(p["argv"][0]).lower().startswith("node") and argv:
+                argv = argv[1:]
+            found["argv"], found["cwd"] = strip_resume(argv), p.get("cwd")
+            break
+    for a in agents:
+        if a.get("pane_id") == pane and session_of(a):
+            found["session"] = session_of(a)
+    return found
+
+
+def status_locked(args):
     state = load_state(recover=True)
     home = oke_home()
     result = {"herdr": {"inside": os.environ.get("HERDR_ENV") == "1", "missing": []},
@@ -650,8 +1136,10 @@ def cmd_status(args):
     if args.claim:
         if result["orchestrator_conflict"]:
             code = fail("another orchestrator is alive in pane %s" % recorded)
-        elif here and recorded != here:
+        elif here:
             state["orchestrator"]["pane"] = here
+            state["orchestrator"].update(own_launch(here, agents))
+            state["orchestrator"].update(revives=0, gave_up=False)
             changed = True
     if changed or state.get("_recovered"):
         save_state(state)
@@ -706,6 +1194,11 @@ def cmd_compact_hook(args):
 # ---------------------------------------------------------------- job
 
 def cmd_job(args):
+    with locked():
+        return job_locked(args)
+
+
+def job_locked(args):
     state = load_state()
     home = oke_home()
     if args.action == "archive" and args.slug not in state["jobs"]:
@@ -796,6 +1289,26 @@ def build_parser():
     status = sub.add_parser("status")
     status.add_argument("--claim", action="store_true")
     status.set_defaults(func=cmd_status)
+
+    revive_p = sub.add_parser("revive")
+    revive_p.add_argument("agent")
+    revive_p.set_defaults(func=cmd_revive)
+
+    resume_all = sub.add_parser("resume-all")
+    resume_all.set_defaults(func=cmd_resume_all)
+
+    tick = sub.add_parser("tick")
+    tick.add_argument("--pane", required=True)
+    tick.add_argument("--board", action="store_true")
+    tick.add_argument("--events-from", type=int)
+    tick.set_defaults(func=cmd_tick)
+
+    retry = sub.add_parser("api-retry")
+    retry.add_argument("--pane", required=True)
+    retry.add_argument("--attempt", type=int, default=1)
+    retry.add_argument("--error", default="")
+    retry.add_argument("--clear", action="store_true")
+    retry.set_defaults(func=cmd_api_retry)
 
     hook = sub.add_parser("compact-hook")
     hook.set_defaults(func=cmd_compact_hook)
