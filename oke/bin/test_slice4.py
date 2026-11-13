@@ -130,9 +130,27 @@ class TestSpawnKinds(KindBase):
     def test_another_dialog_stops_the_spawn(self):
         s = spawn_ok()
         s["agent start"] = [E("agent_not_ready")]
-        s["agent read"] = [{"stdout": "  1 hook needs review before it can run.\n", "exit": 0}]
+        s["agent read"] = [{"stdout": "  Sign in with ChatGPT\n", "exit": 0}]
         self.assertEqual(self.spawn(kind="codex", scenario=s), 1)
         self.assertEqual(self.argv_of("agent", "send-keys"), [])
+
+
+class TestLiveFindings(KindBase):
+    def test_a_report_with_a_byte_order_mark_is_read(self):
+        # codex on Windows wrote report.md with a UTF-8 BOM (seen live)
+        path = self.write("r/report.md", u"﻿type: done\nseq: 1\n---\n")
+        self.assertEqual(oke.read_header(path), {"type": "done", "seq": 1})
+
+    def test_the_hook_review_panel_is_closed_before_the_first_prompt(self):
+        # codex showed it after herdr called the agent ready; the prompt went nowhere
+        s = spawn_ok()
+        s["agent read"] = [{"stdout": "  1 hook needs review before it can run.\n  t trust all, esc close\n", "exit": 0},
+                           {"stdout": "> Ask Codex to do anything\n", "exit": 0}]
+        s["agent send-keys"] = [J({"type": "ok"})]
+        self.assertEqual(self.spawn(kind="codex", scenario=s), 0)
+        names = [" ".join(c[:2]) for c in self.calls()]
+        self.assertLess(names.index("agent send-keys"), names.index("agent prompt"))
+        self.assertEqual(self.argv_of("agent", "send-keys")[0][3:], ["esc"])
 
 
 class TestSessionLearnedLater(KindBase):
