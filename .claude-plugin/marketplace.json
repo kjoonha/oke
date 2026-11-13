@@ -1,0 +1,11 @@
+{
+  "name": "oke",
+  "owner": { "name": "kjoonha" },
+  "plugins": [
+    {
+      "name": "oke",
+      "source": "./oke",
+      "description": "Talk to one orchestrator; it runs PM, worker and reviewer agents in herdr panes."
+    }
+  ]
+}
