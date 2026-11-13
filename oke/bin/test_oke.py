@@ -62,6 +62,21 @@ class Base(unittest.TestCase):
         self.git(repo, "worktree", "add", "-q", p, "-b", "wt")
         return p
 
+    PATH = ("intake", "planning", "awaiting_approval", "working", "awaiting_merge", "merging", "done")
+
+    def advance(self, name, phase):
+        """Walk job `name` through the phases up to `phase`, as the orchestrator does
+        (a clear interview first: planning needs one)."""
+        if not os.path.exists(oke.interview_path(name)):
+            self.assertEqual(self.cli("interview", name, "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
+        if phase in ("failed", "reviewing"):
+            self.assertEqual(self.cli("job", "phase", name, phase), 0, self.err)
+            return
+        now = oke.load_state()["jobs"][name]["phase"]
+        start = self.PATH.index(now) + 1 if now in self.PATH else 0
+        for step in self.PATH[start:self.PATH.index(phase) + 1]:
+            self.assertEqual(self.cli("job", "phase", name, step), 0, self.err)
+
     def cli(self, *args):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
@@ -161,7 +176,7 @@ class TestState(Base):
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 1)
         self.assertEqual(self.cli("job", "phase", "fix-a", "nonsense"), 1)
         self.assertEqual(self.cli("job", "phase", "nope", "planning"), 1)
-        self.assertEqual(self.cli("job", "phase", "fix-a", "planning"), 0)
+        self.advance("fix-a", "planning")
         st = oke.load_state()
         self.assertEqual(st["jobs"]["fix-a"]["phase"], "planning")
         self.assertEqual(st["jobs"]["fix-a"]["repo"], oke.repo_key(repo))
@@ -298,7 +313,7 @@ class SpawnBase(Base):
 
     def job(self, name, phase):
         self.assertEqual(self.cli("job", "new", name, "--repo", self.repo), 0)
-        self.assertEqual(self.cli("job", "phase", name, phase), 0)
+        self.advance(name, phase)
 
     def assignment(self, agent, role, job=None, seq=1, cwd=None):
         lines = ["agent: " + agent, "role: " + role, "cwd: " + (cwd or self.repo), "seq: %d" % seq]
@@ -520,7 +535,7 @@ class TestSpawn(SpawnBase):
     def test_spawn_cwd_with_space_is_one_argv(self):
         repo = self.git_repo("a b 한글")
         self.assertEqual(self.cli("job", "new", "fix-s", "--repo", repo), 0)
-        self.assertEqual(self.cli("job", "phase", "fix-s", "working"), 0)
+        self.advance("fix-s", "working")
         a = self.assignment("fix-s-w1", "worker", "fix-s", cwd=repo)
         self.fake(spawn_ok())
         self.assertEqual(self.cli("spawn", a, "--split-from", "w1:p1"), 0)
@@ -731,6 +746,16 @@ class TestStatus(SpawnBase):
         self.status([AG(name=None, pane="w8:p1")], "--claim")
         self.assertEqual(self.code, 1)
         self.assertEqual(oke.load_state()["orchestrator"]["pane"], "w8:p1")
+
+    def test_another_agent_in_a_reused_pane_is_no_conflict(self):
+        # pane ids come back after a herdr restart: a different session there is not us
+        s = oke.load_state()
+        s["orchestrator"] = {"pane": "w8:p1", "session": "s-orch"}
+        oke.save_state(s)
+        st = self.status([AG(name=None, pane="w8:p1", session="s-other")])
+        self.assertIsNone(st["orchestrator_conflict"])
+        st = self.status([AG(name=None, pane="w8:p1", session="s-orch")])
+        self.assertEqual(st["orchestrator_conflict"], "w8:p1")
 
     def test_claim_takes_over_dead_orchestrator(self):
         s = oke.load_state()

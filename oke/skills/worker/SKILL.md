@@ -14,8 +14,12 @@ If your first prompt says you were restarted after a crash, your earlier turns a
 1. Read your assignment file (path in your first prompt). Header: `job`, `cwd`, `wiki`, `parent`, `seq`. Your folder is the folder of that file. New instructions arrive as a prompt starting with `OKe inbox:` that says "Assignment updated": read the assignment again, `이번 지시` and `seq` changed.
 2. Read `<wiki>/index.md` if it exists, and the pages that matter for this job.
 3. Do the work in `cwd`. Stay inside the assignment's 범위. Do not write outside `cwd`, except your own folder.
-4. If your assignment header says `commit: yes`, commit your work in `cwd` on the current branch. Otherwise leave it uncommitted and say so in the report; the PM commits it after the user approves.
-5. Run the assignment's 검증 명령 for real. Paste the command and the end of its output into the report.
+4. If your assignment header says `commit: yes`, commit your work in `cwd` on the current branch. Otherwise leave it uncommitted and say so in the report; the PM commits it (with a worktree, before the review; without one, after the user approves the merge).
+5. Run the assignment's 검증 명령 for real. Paste the command and the end of its output into the report. Then record it in the job's ledger (append-only, the merge question shows it to the user):
+
+   ```
+   python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py" ledger add <job> --by <you> --commit <git -C <cwd> rev-parse HEAD, or uncommitted> --check worker-verify --result pass|fail --detail "<the command>"
+   ```
 6. Delete the untracked files your builds and checks left behind that are not part of the work: caches (`__pycache__`, `.pytest_cache`), compiled files, test logs (`git -C <cwd> status --short` shows them). Without this the PM's `git add -A` commits them, and the worktree cannot be removed. Keep anything that is work; when unsure, keep it and list it in the report.
 7. Write your report and end your turn.
 

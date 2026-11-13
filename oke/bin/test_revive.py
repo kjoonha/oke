@@ -165,7 +165,7 @@ class TestRevive(ReviveBase):
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
 
     def test_finished_job_means_not_needed(self):
-        self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0)
+        self.advance("fix-a", "done")
         self.revive_scenario()
         self.assertEqual(oke.revive("fix-a-w1"), "not_needed")
         self.assertEqual(started(self.calls()), [])

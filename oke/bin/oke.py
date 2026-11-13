@@ -294,14 +294,27 @@ def herdr_argv():
     return value.split()
 
 
+HERDR_TIMEOUT = 180  # seconds; longer than any --timeout OKe passes (agent start: 90 s)
+
+
 def run_herdr(args):
-    """Return (exit code, stdout, stderr). Raises HerdrError when herdr cannot run."""
+    """Return (exit code, stdout, stderr). Raises HerdrError when herdr cannot run
+    or hangs: a hung herdr must not freeze a wait or hold a lock forever."""
     try:
         p = subprocess.Popen(herdr_argv() + list(args), stdin=subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = p.communicate()
     except (OSError, ValueError) as e:
         raise HerdrError("herdr_unavailable", str(e))
+    try:
+        out, err = p.communicate(timeout=HERDR_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        try:
+            p.communicate(timeout=5)  # a child that inherited the pipes may keep them open
+        except subprocess.TimeoutExpired:
+            pass
+        raise HerdrError("herdr_unavailable", "herdr %s did not answer in %d s"
+                         % (" ".join(args[:2]), HERDR_TIMEOUT))
     return (p.returncode,
             out.decode("utf-8", "replace").replace("\r\n", "\n"),
             err.decode("utf-8", "replace").replace("\r\n", "\n"))
@@ -408,6 +421,9 @@ def agent_command(kind, role, config, home, plugin_dir, folder, resume=None):
     return kind, args
 REVIEWER_TOOLS = ["Read", "Grep", "Glob", "Skill", "Bash(git diff:*)", "Bash(git log:*)",
                   "Bash(git show:*)", "Bash(git status:*)"]
+# shortcut: relies on `*` matching anywhere in a Bash rule (not probed live, see
+# docs/probe-results.md); the PM's `git status` check after a review is the backstop.
+REVIEWER_DENIED = ["Bash(git *--output*)"]
 
 
 def plugin_root():
@@ -442,6 +458,8 @@ def launch_args(role, config, home, plugin_dir, resume=None):
         # dontAsk denies everything not listed without stopping at a dialog.
         args += ["--permission-mode", "dontAsk", "--allowedTools"] + REVIEWER_TOOLS
         args += edit_rules(home) + edit_rules(config["wiki_path"])
+        # `git diff/log/show --output=<file>` writes a file: deny rules beat allow rules
+        args += ["--disallowedTools"] + REVIEWER_DENIED
     elif config.get("autonomy") == "conservative":
         # Ask for everything except the agent's own OKe files; without this every
         # report and board write would be a dialog.
@@ -905,6 +923,7 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
     idle = 0
     polls = 0
     outage = 0
+    revive_outage = 0  # not reset by a good look: a revive that always meets an outage must end
     # after_blocked: a key was just sent to a dialog the caller already reported. Do not
     # report that dialog again while herdr still shows the old state. Only a short grace:
     # the agent may already be at its next dialog when this wait starts.
@@ -945,6 +964,14 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                     result = None  # failed counts toward the revive limit and is tried again
             except (OSError, StateError):
                 result = None  # state.json busy for a moment: look again next poll
+            except HerdrError as e:
+                # an outage during a revive is the same passing outage as during a look
+                revive_outage += 1
+                if e.code != "herdr_unavailable" or revive_outage > HERDR_RETRIES:
+                    raise
+                result = None
+            else:
+                revive_outage = 0
         if result is None:
             idle = 0
         elif result.startswith("?"):
@@ -1261,6 +1288,8 @@ def revive_locked(name):
         info = relaunch(state, role, key, name, record, folder)
     except (HerdrError, DialogError) as e:
         if isinstance(e, HerdrError) and e.code == "herdr_unavailable":
+            # herdr was down, the agent did not crash again: do not count this try
+            update_record(role, key, name, {"revives": revives})
             raise
         log_event("revive_failed %s: %s" % (name, (str(e).strip().splitlines() or [""])[0]))
         return "failed"
@@ -1447,8 +1476,14 @@ def find_agent(record, agents, key):
 
 
 def cmd_status(args):
+    # herdr calls are slow (seconds each): make them before taking the lock, so
+    # spawn and the waits do not time out on it. The agent list may then be a few
+    # seconds old: an agent that just started can show as dead until the next status.
+    herdr_info = None
+    if os.environ.get("HERDR_ENV") == "1":
+        herdr_info = (missing_commands(), list_agents())
     with locked():
-        return status_locked(args)
+        return status_locked(args, herdr_info)
 
 
 def own_launch(pane, agents):
@@ -1472,7 +1507,7 @@ def own_launch(pane, agents):
     return found
 
 
-def status_locked(args):
+def status_locked(args, herdr_info):
     state = load_state(recover=True)
     home = oke_home()
     result = {"herdr": {"inside": os.environ.get("HERDR_ENV") == "1", "missing": []},
@@ -1485,8 +1520,7 @@ def status_locked(args):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    result["herdr"]["missing"] = missing_commands()
-    agents = list_agents()
+    result["herdr"]["missing"], agents = herdr_info
     names = set(a.get("name") for a in agents if a.get("name"))
     changed = False
 
@@ -1524,7 +1558,14 @@ def status_locked(args):
 
     here = os.environ.get("HERDR_PANE_ID")
     recorded = state["orchestrator"].get("pane")
-    if recorded and recorded != here and any(a.get("pane_id") == recorded for a in agents):
+    there = [a for a in agents if a.get("pane_id") == recorded]
+    orch = state["orchestrator"]
+    # pane ids come back after a herdr restart: with a known name or session, the
+    # agent now in that pane must be the recorded orchestrator to count as a conflict
+    # (herdr may not know a fresh session yet: an agent without one there still counts)
+    if recorded and recorded != here and there and (
+            not (orch.get("agent") or orch.get("session")) or same_agent(orch, there[0])
+            or (not orch.get("agent") and not session_of(there[0]))):
         result["orchestrator_conflict"] = recorded
 
     code = 0
@@ -1594,6 +1635,10 @@ def cmd_compact_hook(args):
 def cmd_job(args):
     if args.action == "merge":
         return merge_job(args.slug)  # git can take a while: not under the state lock
+    if args.action == "verify":
+        if bool(args.command) == bool(args.accept):
+            return fail("give the 검증 명령, or --accept \"<why>\" when the user accepts the merge as it is")
+        return verify_job(args.slug, args.command, args.accept)  # can take hours
     with locked():
         return job_locked(args)
 
@@ -1608,10 +1653,35 @@ def latest_report(job_dir, pattern):
     return max(found) if found else None
 
 
+def review_verdict(path):
+    """The verdict on the first non-empty line after the header's `---`, or None.
+    Only that line counts: a finding in the body may quote `verdict: pass`."""
+    try:
+        with io.open(path, encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+    except (IOError, OSError, UnicodeDecodeError):
+        return None
+    if "---" not in [l.strip() for l in lines]:
+        return None
+    body = lines[[l.strip() for l in lines].index("---") + 1:]
+    first = next((l.strip() for l in body if l.strip()), "")
+    m = re.match(r"^verdict:\s*(pass|changes)\b", first)
+    return m.group(1) if m else None
+
+
+def git_out(cwd, *args):
+    """(exit code, stripped stdout) of one git command."""
+    p = subprocess.run(["git", "-C", cwd] + list(args), stdout=subprocess.PIPE,
+                       stderr=subprocess.DEVNULL)
+    return p.returncode, p.stdout.decode("utf-8", "replace").strip()
+
+
 def merge_job(job):
     """Merge oke/<job> into the main checkout, only if the user approved the merge and
-    the last review passed after the last worker report. A worker that reported again
-    (a rebase, a fix) needs a new review first (seen live: a PM skipped it)."""
+    the last review passed on the very commit the branch points at. A worker that
+    reported again (a rebase, a fix) needs a new review first (seen live: a PM skipped it).
+    The main checkout must be clean, on the job's base branch and not mid-merge: the
+    abort after a conflict must only ever undo OKe's own merge."""
     state = load_state()
     info = state["jobs"].get(job)
     if not info:
@@ -1619,32 +1689,324 @@ def merge_job(job):
     if info.get("phase") != "merging":
         return fail("job %s is in phase %s: set phase merging after the user approves the merge"
                     % (job, info.get("phase")))
+    already = merge_state(job)[0]
+    if already in ("unverified", "verified"):
+        return fail("job %s is already merged (%s): run `oke job verify %s`, not a second merge"
+                    % (job, already, job))
+    # every job of this repository, a failed or cancelled one too: its merge is still in main
+    for other in [n for n, j in state["jobs"].items() if j.get("repo") == info["repo"]]:
+        if other != job and merge_state(other)[0] == "unverified":
+            return fail("the merge of %s is not verified yet: run `oke job verify %s` first"
+                        % (other, other))
     job_dir = os.path.join(oke_home(), "jobs", job)
     worker = latest_report(job_dir, r"-w\d+$")
     review = latest_report(job_dir, r"-rv\d*$")
     if not review:
         return fail("job %s has no review report: have the reviewer review the branch first" % job)
-    with io.open(review[1], encoding="utf-8-sig") as f:
-        verdict = re.search(r"^verdict:\s*(\S+)", f.read(), re.M)
-    if not verdict or verdict.group(1) != "pass":
+    if review_verdict(review[1]) != "pass":
         return fail("the last review of %s did not pass: %s" % (job, review[1].replace("\\", "/")))
     if worker and worker[0] > review[0]:
         return fail("the worker reported after the last review (a rebase or a fix): give the reviewer "
                     "a new instruction to review it, then merge")
     main = native_path(os.path.dirname(info["repo"]))
-    result = subprocess.run(["git", "-C", main, "merge", "--no-ff", "--no-edit", "oke/" + job],
+    # The review counts only for the commit its assignment named, and only once the
+    # report answers that assignment: commits added after it were never reviewed.
+    review_asg = read_header(os.path.join(os.path.dirname(review[1]), "assignment.md")) or {}
+    review_seq = (read_header(review[1]) or {}).get("seq")
+    if review_seq != review_asg.get("seq"):
+        return fail("the review report of %s does not answer its current assignment (seq %s): wait for "
+                    "the reviewer" % (job, review_asg.get("seq")))
+    code, tip = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/%s^{commit}" % job)
+    if code != 0:
+        return fail("branch oke/%s does not exist" % job)
+    reviewed = review_asg.get("commit")
+    if not reviewed or not re.match(r"^[0-9a-f]{7,40}$", reviewed):
+        # a branch name would resolve to the moving tip and pass any check
+        return fail("the review assignment of %s names no commit sha in `commit:`: give the reviewer a new "
+                    "instruction with `commit: %s`, then merge" % (job, tip))
+    code, reviewed_full = git_out(main, "rev-parse", "-q", "--verify", reviewed + "^{commit}")
+    if code != 0 or reviewed_full != tip:
+        return fail("oke/%s is at %s but the review covered %s: give the reviewer a new instruction "
+                    "with `commit: %s`, then merge" % (job, tip[:12], reviewed, tip))
+    if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
+        return fail("a merge is already in progress in %s: leave it to the user" % main)
+    code, dirty = git_out(main, "status", "--porcelain")
+    if code != 0 or dirty:
+        return fail("the main checkout %s is not clean:\n%s" % (main, dirty))
+    base = info.get("base")
+    current = git_out(main, "symbolic-ref", "-q", "--short", "HEAD")[1]
+    if not current or (base and current != base):
+        return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
+                    % (current or "a detached HEAD", base))
+    pre = git_out(main, "rev-parse", "HEAD")[1]
+    result = subprocess.run(["git", "-C", main, "merge", "--no-ff", "--no-edit",
+                             "-m", "Merge branch 'oke/%s'" % job, tip],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if result.returncode == 0:
-        print(json.dumps({"result": "merged", "job": job}))
+        merged = git_out(main, "rev-parse", "HEAD")[1]
+        ledger_add(job, os.path.basename(os.path.dirname(review[1])), tip, "review", "pass",
+                   review[1].replace("\\", "/"))
+        ledger_add(job, "oke", merged, "merge", "ok", "pre=%s" % pre)
+        print(json.dumps({"result": "merged", "job": job, "commit": merged}))
         return 0
-    files = subprocess.run(["git", "-C", main, "diff", "--name-only", "--diff-filter=U"],
-                           stdout=subprocess.PIPE).stdout.decode("utf-8", "replace").split()
-    subprocess.call(["git", "-C", main, "merge", "--abort"], stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL)
+    files = git_out(main, "diff", "--name-only", "--diff-filter=U")[1].split()
+    if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
+        if subprocess.call(["git", "-C", main, "merge", "--abort"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL) != 0:
+            return fail("git merge of oke/%s conflicted and `git merge --abort` failed: %s is "
+                        "mid-merge, ask the user" % (job, main))
     if not files:
         return fail("git merge failed: %s" % result.stdout.decode("utf-8", "replace").strip())
     print(json.dumps({"result": "conflict", "job": job, "files": files}))
     return 2
+
+
+# ---------------------------------------------------------------- ledger
+
+LEDGER_FIELDS = ("time", "by", "commit", "check", "result", "detail")
+
+
+def ledger_path(job):
+    return os.path.join(oke_home(), "jobs", job, "ledger.tsv")
+
+
+def ledger_add(job, by, commit, check, result, detail=""):
+    """Append one row. Rows are never rewritten: a later row supersedes an earlier one."""
+    values = [time.strftime("%Y-%m-%dT%H:%M:%S"), by, commit, check, result, detail]
+    line = "\t".join(" ".join(str(v or "-").split()) for v in values)
+    path = ledger_path(job)
+    try:
+        with io.open(path, "rb") as f:
+            f.seek(-1, os.SEEK_END)
+            torn = f.read(1) != b"\n"  # a writer died mid-line: do not glue this row onto it
+    except (IOError, OSError):
+        torn = False
+    with io.open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write((u"\n" if torn else u"") + line + u"\n")
+
+
+def ledger_rows(job):
+    try:
+        with io.open(ledger_path(job), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (IOError, OSError, UnicodeDecodeError):
+        return []
+    return [dict(zip(LEDGER_FIELDS, l.split("\t"))) for l in lines if l.count("\t") == 5]
+
+
+# Rows only OKe itself writes; `oke ledger add` refuses them so nobody forges a verdict.
+OKE_CHECKS = ("review", "merge", "verify", "rollback")
+
+
+def merge_state(job):
+    """(state, last merge row): state is none, unverified, verified or rolled_back."""
+    rows = ledger_rows(job)
+    merges = [i for i, r in enumerate(rows) if r["check"] == "merge"]
+    if not merges:
+        return "none", None
+    after = rows[merges[-1] + 1:]
+    if any(r["check"] == "rollback" for r in after):
+        return "rolled_back", rows[merges[-1]]
+    if any(r["check"] == "verify" and r["result"] == "pass" for r in after):
+        return "verified", rows[merges[-1]]
+    return "unverified", rows[merges[-1]]
+
+
+def find_bash():
+    """bash for the plan's 검증 명령. On Windows only Git Bash: the `bash` on PATH may be
+    the WSL launcher (System32, WindowsApps), which has no Windows python or tools."""
+    if os.name != "nt":
+        return shutil.which("bash")
+    code, path = git_out(oke_home(), "--exec-path")  # <git>/mingw64/libexec/git-core
+    if code == 0:
+        bash = os.path.normpath(os.path.join(native_path(path), "..", "..", "..", "bin", "bash.exe"))
+        if os.path.isfile(bash):
+            return bash
+    bash = shutil.which("bash")
+    if bash and not re.search(r"system32|windowsapps", bash, re.I):
+        return bash
+    return None
+
+
+VERIFY_LOCK_TOUCH = 60  # seconds: keeps the lock fresh during a check of any length
+
+
+def run_check(command, cwd, log, lock):
+    """Exit code of `command` in bash (else the platform shell), output to `log`. No time
+    limit; the lock's mtime is refreshed so it never looks stale while the check runs."""
+    bash = find_bash()
+    argv = [bash, "-c", command] if bash else command
+    with io.open(log, "wb") as f:
+        p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=f,
+                             stderr=subprocess.STDOUT, shell=bash is None)
+        while True:
+            try:
+                return p.wait(timeout=VERIFY_LOCK_TOUCH)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.utime(lock_path(lock), None)
+                except OSError:
+                    pass
+
+
+def verify_job(job, command, accept=None):
+    """Run the 검증 명령 on the merged main checkout. A failure undoes the merge, but never
+    anybody else's work: only while HEAD is still the merge, and with `reset --keep`,
+    which keeps local edits and refuses when they would be lost.
+    No time limit: a long simulation is a normal check. Run it in the background.
+    A second run (a restarted PM) waits for the first and then sees its result."""
+    info = load_state()["jobs"].get(job)
+    if not info:
+        return fail("unknown job: %s" % job)
+    lock = "verify-" + job
+    while not try_lock(lock):
+        time.sleep(5)
+    try:
+        return verify_locked(job, command, accept, info, lock)
+    finally:
+        unlock(lock)
+
+
+def verify_locked(job, command, accept, info, lock):
+    status, row = merge_state(job)
+    if status == "verified":
+        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "already": True}))
+        return 0
+    if status != "unverified":
+        return fail("job %s has no merge to verify (%s): run `oke job merge %s` first" % (job, status, job))
+    if accept:
+        # the user's call, e.g. after the main branch moved on: recorded as such
+        ledger_add(job, "user", row["commit"], "verify", "pass", "accepted: " + accept)
+        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "accepted": True}))
+        return 0
+    main = native_path(os.path.dirname(info["repo"]))
+    if git_out(main, "rev-parse", "HEAD")[1] != row["commit"]:
+        return fail("the main checkout moved past the merge of %s (%s): ask the user; if they accept "
+                    "the merge as it is, `oke job verify %s --accept \"<why>\"`" % (job, row["commit"][:12], job))
+    n = len([r for r in ledger_rows(job) if r["check"] == "verify"]) + 1
+    log = os.path.join(oke_home(), "jobs", job, "verify-%d.log" % n)
+    code = run_check(command, main, log, lock)
+    with io.open(log, encoding="utf-8", errors="replace") as f:
+        tail = f.read().splitlines()[-40:]
+    log = log.replace("\\", "/")
+    if code == 0:
+        ledger_add(job, "oke", row["commit"], "verify", "pass", command)
+        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "log": log}))
+        return 0
+    if code in (126, 127):  # the shell could not run the command: not a verdict on the merge
+        return fail("the 검증 명령 could not run (exit %d, see %s): fix the command; the merge stays"
+                    % (code, log))
+    ledger_add(job, "oke", row["commit"], "verify", "fail", "exit %d: %s" % (code, command))
+    pre = row["detail"][len("pre="):] if row["detail"].startswith("pre=") else None
+    head = git_out(main, "rev-parse", "HEAD")[1]
+    if not pre or head != row["commit"] or subprocess.call(
+            ["git", "-C", main, "reset", "-q", "--keep", pre],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+        return fail("the 검증 명령 failed on the merge of %s (log %s), and the merge was NOT undone: "
+                    "the main checkout moved on or has local edits in the merged files. Ask the user."
+                    % (job, log))
+    ledger_add(job, "oke", pre, "rollback", "ok", "after verify fail")
+    print(json.dumps({"result": "verify_failed", "job": job, "exit": code, "log": log,
+                      "rolled_back_to": pre, "tail": tail}))
+    return 3
+
+
+def cmd_ledger(args):
+    if args.action == "add":
+        if not os.path.isdir(os.path.dirname(ledger_path(args.job))):
+            return fail("unknown job: %s" % args.job)
+        if args.check in OKE_CHECKS:
+            return fail("check %r is written by OKe itself; use a name like worker-verify" % args.check)
+        ledger_add(args.job, args.by, args.commit, args.check, args.result, args.detail)
+        return 0
+    status, _ = merge_state(args.job)
+    print(json.dumps({"job": args.job, "merge": status, "rows": ledger_rows(args.job)}, indent=2))
+    return 0
+
+
+# Phases that pass a user gate may only be entered from the phase before that gate
+# (or stay). Not proof of a user's approval, but a PM or an orchestrator slip cannot
+# skip the approval step. Phases not listed here are free.
+PHASE_FROM = {
+    "planning": ("intake", "planning", "awaiting_approval", "working", "reviewing", "awaiting_merge"),
+    "working": ("awaiting_approval", "working", "reviewing", "awaiting_merge", "merging"),
+    "merging": ("awaiting_merge", "merging"),
+    "done": ("merging", "done"),
+}
+
+
+# ---------------------------------------------------------------- interview
+
+DIMENSIONS = (("goal", 0.40), ("constraints", 0.30), ("criteria", 0.30))
+INTERVIEW_THRESHOLD = 0.2  # ambiguity at or below this ends the interview
+INTERVIEW_MAX_ROUNDS = 10
+STALL_ROUNDS, STALL_BAND = 3, 0.05
+CHALLENGES = {3: "contrarian", 5: "simplifier"}  # round -> one-time challenge question
+
+
+def interview_path(job):
+    return os.path.join(oke_home(), "jobs", job, "interview.json")
+
+
+def ambiguity(scores):
+    return round(1 - sum(scores[name] * weight for name, weight in DIMENSIONS), 3)
+
+
+def interview_problem(job):
+    """Why job `job` may not start planning yet, or None."""
+    data = read_json(interview_path(job), None)
+    if not isinstance(data, dict) or not data.get("done"):
+        return ("job %s has no finished interview: run `oke interview %s --goal .. --constraints .. "
+                "--criteria ..` until it says done" % (job, job))
+    return None
+
+
+def cmd_interview(args):
+    """One round of the intake interview: record the orchestrator's clarity scores
+    (and the question just answered), compute ambiguity, say what to ask next."""
+    path = interview_path(args.job)
+    if not os.path.isdir(os.path.dirname(path)):
+        return fail("unknown job: %s (run `oke job new` first)" % args.job)
+    scores = {}
+    for name, _ in DIMENSIONS:
+        value = getattr(args, name)
+        if not 0.0 <= value <= 1.0:
+            return fail("--%s must be between 0 and 1" % name)
+        scores[name] = value
+    config = load_config()
+    try:
+        threshold = float(config.get("interview_threshold", INTERVIEW_THRESHOLD))
+        max_rounds = int(config.get("interview_max_rounds", INTERVIEW_MAX_ROUNDS))
+    except (TypeError, ValueError):
+        return fail("interview_threshold / interview_max_rounds in config.json must be numbers")
+    data = read_json(path, None)
+    if not isinstance(data, dict):
+        data = {"rounds": [], "done": False}
+    if data.get("done"):
+        return fail("the interview of %s is already done (%s)" % (args.job, data.get("reason")))
+    number = len(data["rounds"])  # round 0 scores the user's first request, no question
+    amb = ambiguity(scores)
+    data["rounds"].append({"round": number, "scores": scores, "ambiguity": amb,
+                           "question": args.question, "answer": args.answer})
+    if amb <= threshold:
+        reason = "clear"
+    elif args.stop:
+        reason = "user_stop"
+    elif number >= max_rounds:
+        reason = "round_cap"
+    else:
+        reason = None
+    data.update(done=reason is not None, reason=reason, threshold=threshold)
+    write_json_atomic(path, data)
+    last = [r["ambiguity"] for r in data["rounds"][-STALL_ROUNDS:]]
+    out = {"job": args.job, "round": number, "ambiguity": amb, "threshold": threshold,
+           "scores": scores, "done": data["done"], "reason": reason,
+           # the weakest dimension weighs most: it is what the next question is about
+           "weakest": min(DIMENSIONS, key=lambda d: (scores[d[0]] - 1) * d[1])[0],
+           "stalled": len(last) == STALL_ROUNDS and max(last) - min(last) <= STALL_BAND,
+           "challenge": None if reason else CHALLENGES.get(number)}
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
 
 
 def job_locked(args):
@@ -1669,8 +2031,10 @@ def job_locked(args):
         if subprocess.call(["git", "-C", native_path(args.repo), "show-ref", "--verify", "--quiet", branch]) == 0:
             return fail("branch oke/%s already exists (an earlier job): pick another job name" % args.slug)
         os.makedirs(job_dir)
+        # the branch the main checkout is on now: `job merge` merges only into it
+        base = git_out(native_path(os.path.dirname(key)), "symbolic-ref", "-q", "--short", "HEAD")[1]
         state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None,
-                                    "phase_at": time.time()}
+                                    "phase_at": time.time(), "base": base or None}
         save_state(state)
         print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key,
                           "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
@@ -1684,6 +2048,19 @@ def job_locked(args):
     if args.action == "phase":
         if args.phase not in PHASES:
             return fail("bad phase %r: one of %s" % (args.phase, ", ".join(PHASES)))
+        now = state["jobs"][args.slug].get("phase")
+        allowed = PHASE_FROM.get(args.phase)
+        if allowed is not None and now not in allowed:
+            return fail("job %s cannot go from %s to %s: allowed only from %s"
+                        % (args.slug, now, args.phase, ", ".join(allowed)))
+        if args.phase == "done" and merge_state(args.slug)[0] in ("unverified", "rolled_back"):
+            # a job merged without a worktree has no ledger merge row: only OKe's merges are held
+            return fail("job %s: its merge is %s, run `oke job verify` (or merge again) first"
+                        % (args.slug, merge_state(args.slug)[0]))
+        if args.phase == "planning" and now == "intake":  # a re-plan needs no new interview
+            problem = interview_problem(args.slug)
+            if problem:
+                return fail(problem)
         state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
         save_state(state)
         return 0
@@ -1753,8 +2130,8 @@ def cmd_send(args):
             me, _ = whoami(state, pane)
         except HerdrError:
             me = None
-        if me:
-            sender = me[1]
+        # a pane OKe does not know is not proof of the user: say so, never "user"
+        sender = me[1] if me else "unverified (pane %s)" % pane
     if args.job:
         # From now on the PM owes this job a report for this seq (see check_pm_once).
         # Recorded before the message: a crash in between leaves an idle_no_report
@@ -1900,7 +2277,25 @@ def build_parser():
     defer.add_argument("slug")
     merge = job_sub.add_parser("merge")
     merge.add_argument("slug")
+    verify = job_sub.add_parser("verify")
+    verify.add_argument("slug")
+    verify.add_argument("command", nargs="?", help="the plan's 검증 명령, as one quoted string")
+    verify.add_argument("--accept", help="the user accepts the merge without (another) check: why")
     job.set_defaults(func=cmd_job)
+
+    ledger = sub.add_parser("ledger")
+    ledger_sub = ledger.add_subparsers(dest="action")
+    ledger_sub.required = True
+    show = ledger_sub.add_parser("show")
+    show.add_argument("job")
+    add = ledger_sub.add_parser("add")
+    add.add_argument("job")
+    add.add_argument("--by", required=True)
+    add.add_argument("--commit", required=True)
+    add.add_argument("--check", required=True)
+    add.add_argument("--result", required=True, choices=("pass", "fail"))
+    add.add_argument("--detail", default="")
+    ledger.set_defaults(func=cmd_ledger)
 
     spawn = sub.add_parser("spawn")
     spawn.add_argument("assignment")
@@ -1943,6 +2338,15 @@ def build_parser():
     retry.add_argument("--error", default="")
     retry.add_argument("--clear", action="store_true")
     retry.set_defaults(func=cmd_api_retry)
+
+    interview = sub.add_parser("interview")
+    interview.add_argument("job")
+    for name, _ in DIMENSIONS:
+        interview.add_argument("--" + name, type=float, required=True)
+    interview.add_argument("--question")
+    interview.add_argument("--answer")
+    interview.add_argument("--stop", action="store_true", help="the user chose to stop asking")
+    interview.set_defaults(func=cmd_interview)
 
     pending = sub.add_parser("pending")
     pending.set_defaults(func=cmd_pending)
