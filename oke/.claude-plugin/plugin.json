@@ -1,5 +1,6 @@
 {
   "name": "oke",
   "version": "0.1.0",
-  "description": "Talk to one orchestrator; it runs PM, worker and reviewer agents in herdr panes."
+  "description": "Talk to one orchestrator; it runs PM, worker and reviewer agents in herdr panes.",
+  "types": "./types/index.d.ts"
 }
