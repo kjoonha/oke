@@ -4,9 +4,12 @@ type Run = { argv: readonly string[] }
 
 const BOARD = [{
   repo: 'toy-6b0484', key: 'k', pm: null,
-  jobs: [{ job: 'calc-sub', phase: 'working', agents: [{
+  jobs: [{ job: 'calc-sub', phase: 'working', merge: 'rolled_back', pending: 'question', agents: [{
     agent: 'calc-sub-w1', role: 'worker', status: 'working', pane: 'w7:p9', report: null,
-    board: '## 지금\nwriting sub', revives: 1 }] }],
+    board: '## 지금\nwriting sub', revives: 1 }] },
+  { job: 'calc-add', phase: 'done', merge: 'verified', pending: null, agents: [{
+    agent: 'calc-add-w1', role: 'worker', status: 'idle', pane: 'w7:p8', report: 'done',
+    board: '', revives: 0 }] }],
 }]
 
 let tickRole = 'worker'
@@ -136,12 +139,33 @@ test('the board lists an agent and expands its board.md', async ($, on) => {
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /calc-sub-w1 worker working/ }))?.text).toContain('revived 1x')
+    expect((await ui.find({ key: 'open-calc-sub-w1' }))?.text).toMatch(/● w1 작업 중 .*revived 1x/)
     expect(await ui.find({ type: 'Text', text: /writing sub/ })).toBeFalsy()
+    expect(await ui.find({ key: 'go-calc-sub-w1' })).toBeFalsy()
     await ui.press({ key: 'open-calc-sub-w1' })
     expect(await ui.find({ type: 'Text', text: /writing sub/ })).toBeTruthy()
+    expect(await ui.find({ key: 'go-calc-sub-w1' })).toBeTruthy()
     await ui.press({ key: 'open-calc-sub-w1' })
     await ui.unmount()
   }
+  tickRole = 'worker'
+})
+
+test('the board puts what waits on the user first and folds finished jobs', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  engine(on, [], [])
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /내 차례 1/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /calc-sub: PM 질문/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^toy$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /calc-sub rollback ✗/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /계획 승인 작업 리뷰 병합 검증/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /✓ calc-add 끝/ })).toBeTruthy()
+  expect(await ui.find({ key: 'open-calc-add-w1' })).toBeFalsy()
+  await ui.unmount()
   tickRole = 'worker'
 })

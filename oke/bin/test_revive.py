@@ -453,6 +453,8 @@ class TestTick(ReviveBase):
         self.assertEqual((job["job"], job["phase"]), ("fix-a", "working"))
         self.assertEqual(job["agents"][0]["agent"], "fix-a-w1")
         self.assertIn("coding", job["agents"][0]["board"])
+        self.assertEqual(job["merge"], "none")
+        self.assertIn("pending", job)
 
 
 class TestApiRetry(ReviveBase):

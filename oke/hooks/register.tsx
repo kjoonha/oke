@@ -5,12 +5,12 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { BoardNode, BoardRepo, Since } from '../types'
+import type { BoardJob, BoardNode, BoardRepo, Since } from '../types'
 
 const PANE = 'oke-board'
 const TICK_MS = 10_000
 const UNKNOWN_EVERY = 6 // ticks: a session that is not (yet) an OKe agent is checked every 60 s
-const board = atom({ plugin: 'oke', key: 'board' } as const, [] as BoardRepo[], { shape: 'board-1' })
+const board = atom({ plugin: 'oke', key: 'board' } as const, [] as BoardRepo[], { shape: 'board-2' })
 const expanded = atom({ plugin: 'oke', key: 'expanded' } as const, [] as string[], { shape: 'expanded-1' })
 const since = atom({ plugin: 'oke', key: 'since' } as const, {} as Record<string, Since>, { shape: 'since-1' })
 
@@ -89,6 +89,46 @@ async function clearRetry($: any) {
   if (!pane) return
   // Keep the count until the marker is really gone, so the next good turn clears again.
   if ((await oke($, ['api-retry', '--pane', pane, '--clear'])) !== null) attempt = 0
+}
+
+/** herdr agent status: mark, word, color. */
+const STATUS: Record<string, [string, string, string | undefined]> = {
+  working: ['●', '작업 중', 'green'],
+  idle: ['○', '대기', undefined],
+  blocked: ['!', '막힘', 'yellow'],
+  dead: ['✗', '죽음', 'red'],
+}
+
+/** `oke pending` kinds, as the person reads them. */
+const PENDING: Record<string, string> = {
+  plan: '계획 승인',
+  merge: 'merge 승인',
+  question: 'PM 질문',
+  blocked: 'PM 막힘',
+  failed: 'PM 실패 보고',
+  silent: 'PM 응답 없음',
+  report_done: 'PM 보고 확인',
+  unsent: '지시 안 보냄',
+  legacy: '확인 필요',
+}
+
+/** The ledger's merge state beside the job name. */
+const LEDGER: Record<string, [string, string]> = {
+  unverified: ['검증 대기', 'yellow'],
+  verified: ['검증 ✓', 'green'],
+  rolled_back: ['rollback ✗', 'red'],
+}
+
+const STEPS = ['계획', '승인', '작업', '리뷰', '병합', '검증']
+const PHASE_STEP: Record<string, number> = {
+  intake: 0, planning: 0, awaiting_approval: 1, working: 2, reviewing: 3, awaiting_merge: 4, merging: 4,
+}
+
+/** The step a job is on: past the merge the ledger says, verified is past the last. */
+function step(job: BoardJob): number {
+  const at = PHASE_STEP[job.phase] ?? 0
+  if (at < 4) return at
+  return job.merge === 'verified' ? STEPS.length : job.merge === 'unverified' ? 5 : 4
 }
 
 function nodes(tree: BoardRepo[]): BoardNode[] {
@@ -193,25 +233,29 @@ export const register: Register = on => {
       void update($, expanded, list => (list.includes(agent) ? list.filter(a => a !== agent) : [...list, agent]))
     const focus = (agent: string) => void $.process.run(['herdr', 'agent', 'focus', agent], { timeoutMs: 10_000 })
 
-    const agentRows = (n: BoardNode, indent: string) => {
+    // One row per agent, the row itself toggles it open: a second row of buttons per
+    // agent doubled the height, and buttons beside text squeezed it away (seen live).
+    const agentRows = (n: BoardNode, indent: string, name: string) => {
       const t = times[n.agent]
-      const age = t ? ` ${elapsed(now - t.at)}` : ''
-      const extra = [n.report ? `report ${n.report}` : '', n.revives ? `revived ${n.revives}x` : '']
-        .filter(Boolean)
-        .join(', ')
-      // Text and buttons on separate lines: in a narrow pane one row squeezed the text away (seen live).
+      const [mark, word, color] = STATUS[n.status] ?? ['·', n.status, undefined]
+      const extra = [n.report ? `보고 ${n.report}` : '', n.revives ? `revived ${n.revives}x` : ''].filter(Boolean)
+      const isOpen = open.includes(n.agent)
       const rows = [
-        <Text color={n.status === 'dead' ? 'red' : n.status === 'blocked' ? 'yellow' : undefined}>
-          {`${indent}${n.agent} ${n.role} ${n.status}${age}${extra ? ` (${extra})` : ''}`}
-        </Text>,
-        <Box flexDirection="row">
-          <Text>{indent}</Text>
-          <Button key={`open-${n.agent}`} label={open.includes(n.agent) ? '접기' : '펼치기'} onPress={() => toggle(n.agent)} />
-          <Text> </Text>
-          <Button key={`go-${n.agent}`} label="이동" onPress={() => focus(n.agent)} />
-        </Box>,
+        <Button key={`open-${n.agent}`} plain onPress={() => toggle(n.agent)}>
+          {indent}
+          <Text color={color} dimColor={n.status === 'idle'}>{`${mark} `}</Text>
+          <Text bold>{name}</Text>
+          <Text color={color} dimColor={n.status === 'idle'}>{` ${word}`}</Text>
+          <Text dimColor>{`${t ? ` ${elapsed(now - t.at)}` : ''}${extra.length ? ` · ${extra.join(', ')}` : ''}`}</Text>
+        </Button>,
       ]
-      if (open.includes(n.agent)) {
+      if (isOpen) {
+        rows.push(
+          <Box flexDirection="row">
+            <Text>{`${indent}  `}</Text>
+            <Button key={`go-${n.agent}`} label="이동" onPress={() => focus(n.agent)} />
+          </Box>,
+        )
         for (const line of (n.board || '(no board.md)').split('\n')) {
           rows.push(<Text dimColor>{`${indent}  ${line}`}</Text>)
         }
@@ -220,12 +264,43 @@ export const register: Register = on => {
     }
 
     const rows = []
+    const waiting = tree.flatMap(repo => repo.jobs.filter(j => j.pending))
+    if (waiting.length) {
+      rows.push(<Text bold color="yellow">{`내 차례 ${waiting.length}`}</Text>)
+      for (const j of waiting) {
+        rows.push(<Text color="yellow">{`  ▸ ${j.job}: ${PENDING[j.pending as string] ?? j.pending}`}</Text>)
+      }
+      rows.push(<Text> </Text>)
+    }
     for (const repo of tree) {
-      rows.push(<Text bold>{repo.repo}</Text>)
-      if (repo.pm) rows.push(...agentRows(repo.pm, '  '))
+      rows.push(<Text bold>{repo.repo.replace(/-[0-9a-f]{6}$/, '')}</Text>)
+      if (repo.pm) rows.push(...agentRows(repo.pm, '  ', 'PM'))
       for (const job of repo.jobs) {
-        rows.push(<Text>{`    ${job.job} [${job.phase}]`}</Text>)
-        for (const n of job.agents) rows.push(...agentRows(n, '      '))
+        if (job.phase === 'done' || job.phase === 'failed') {
+          rows.push(<Text dimColor color={job.phase === 'failed' ? 'red' : undefined}>
+            {`  ${job.phase === 'done' ? '✓' : '✗'} ${job.job} ${job.phase === 'done' ? '끝' : '실패'}`}
+          </Text>)
+          continue
+        }
+        const [label, labelColor] = LEDGER[job.merge] ?? ['', undefined]
+        rows.push(
+          <Text>
+            <Text bold>{`  ${job.job}`}</Text>
+            {label ? <Text color={labelColor}>{` ${label}`}</Text> : ''}
+          </Text>,
+        )
+        const at = step(job)
+        rows.push(
+          <Text>
+            {'    '}
+            {STEPS.map((s, i) => (
+              <Text color={i < at ? 'green' : undefined} dimColor={i > at} bold={i === at} inverse={i === at}>
+                {i ? ` ${s}` : s}
+              </Text>
+            ))}
+          </Text>,
+        )
+        for (const n of job.agents) rows.push(...agentRows(n, '    ', n.agent.startsWith(`${job.job}-`) ? n.agent.slice(job.job.length + 1) : n.agent))
       }
     }
     return <Box flexDirection="column">{rows}</Box>
