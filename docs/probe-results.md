@@ -42,3 +42,14 @@
 
 - Git Bash 는 `/` 로 시작하는 인자를 Windows 경로로 바꾼다 (`/exit` 가 `C:/Program Files/Git/exit` 가 됨). `oke.py` 는 `subprocess` 의 argv 로 직접 실행하므로 해당 없다. skill 이 Bash 로 `herdr agent prompt` 를 부를 때 `/` 로 시작하는 글을 보내지 않는다.
 - 로그인 오류로 턴이 끝난 agent 도 herdr 에서는 `done` 이다. 보고가 없으므로 `idle_no_report` 로 잡힌다.
+
+# 조각 2 실물 확인 (mod)
+
+2026-11-13, Claude Code 2.1.323. 실험용 플러그인 (`hooks/hooks.json` 에 `modules` 와 command hook 을 같이 둠) 을 `--plugin-dir` 로 띄웠다.
+
+- mod 는 `bypassPermissions`, `manual`, `dontAsk` 세 모드 모두에서 사용자 승인 없이 켜졌다. 같은 `hooks.json` 의 command hook (SessionStart) 도 같이 돌았다.
+- mod 의 `$.process.run(["herdr", "agent", "list"])` 는 세 모드 모두에서 성공했다. 도구 권한과 무관하다.
+- `$.clock.every(5000, ...)` 가 돌았다.
+- `turn.complete` 는 정상 턴에서 `reason=answer`, 없는 모델로 낸 API 오류에서 `reason=error` 였다. 오류 종류 (`rate_limit` 등) 는 `turn.complete` 에 없다. 종류가 필요하면 `classic.StopFailure` 나 `model.complete` 에서 읽어야 한다 (미확인).
+- 턴이 끝난 뒤 `$.prompt.submit({ text })` 를 부르면 그 세션에서 새 턴이 바로 시작됐다.
+- `claude plugin validate`: mod 안에서 `$` 를 넘겨받는 함수는 파일 맨 위의 function 선언이어야 한다 (`const log = async ($) => ...` 를 hook 안에 두면 거부).
