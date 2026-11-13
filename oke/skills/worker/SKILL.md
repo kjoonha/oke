@@ -16,7 +16,8 @@ If your first prompt says you were restarted after a crash, your earlier turns a
 3. Do the work in `cwd`. Stay inside the assignment's 범위. Do not write outside `cwd`, except your own folder.
 4. If your assignment header says `commit: yes`, commit your work in `cwd` on the current branch. Otherwise leave it uncommitted and say so in the report; the PM commits it after the user approves.
 5. Run the assignment's 검증 명령 for real. Paste the command and the end of its output into the report.
-6. Write your report and end your turn.
+6. Delete the untracked files your builds and checks left behind that are not part of the work: caches (`__pycache__`, `.pytest_cache`), compiled files, test logs (`git -C <cwd> status --short` shows them). Without this the PM's `git add -A` commits them, and the worktree cannot be removed. Keep anything that is work; when unsure, keep it and list it in the report.
+7. Write your report and end your turn.
 
 ## Urgent findings
 

@@ -151,7 +151,7 @@ When it finishes, read the first line of its output. If the user speaks before i
 Run the queue after every wait result except `superseded`, after the start procedure, and after each answer:
 
 1. `$OKE pending`.
-2. Take the first item whose `deferred` is false. Before you ask the user, say in one line how many other items wait (and how many are deferred).
+2. Take the first item whose `deferred` is false. If it is a `plan` or a `merge`, take with it the next items of the same kind that are not deferred and ask them in one popup: one tab per item, at most 4 tabs (an item with several choices takes one tab per choice; such an item that needs more than 4 tabs gets its own popups). Never put several jobs into one question: the user must be able to approve one job and hold another. Every other kind is one item per popup. Before you ask the user, say in one line how many other items wait (and how many are deferred).
 3. Handle it by `kind`:
    - `report_done`: no question. Read `<pm_job_dir>/report.md` and act as in "Flow".
    - `question`: read the report. Ask the user with `AskUserQuestion`. Before you give the answer to the PM (`kind: answer`), read the report again: if it now says `blocked`, ask about the dialog too, and give both in one assignment: `kind: dialog` with the dialog line, then a line `Answer: <the user's answer>`. Write it, send the key to the child as for `blocked`, then steps 3 to 6. Never write two assignments for one job before the PM has reported on the first: the second overwrites the first.

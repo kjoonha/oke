@@ -156,7 +156,7 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
    2. Worker `done`: give the reviewer a new instruction to review what the rebase changed (`job merge` refuses until that review passes). `verdict: pass`: back to step 3. `changes`: as in the review rounds.
    3. Worker `question` or `failed`, or the merge conflicts again after the rebase: report `question` for the job with the conflicting files. The user decides.
 5. Update the wiki from the reports' 배운 것 (see below).
-6. Remove the worktree only when it is merged and `git status --short` there is empty: `herdr worktree remove --workspace <its workspace id>`. Otherwise leave it and say so.
+6. Remove the worktree once it is merged: `herdr worktree remove --workspace <its workspace id>`. First look at `git status --short` there. Changed tracked files: keep the worktree and say so. Untracked files: judge them. Byproducts of builds and checks (caches such as `__pycache__`, compiled files, test logs) do not stop the removal. Anything that looks like work (source, docs, data) keeps the worktree: list those files in your report.
 7. Close the worker and reviewer panes: `herdr pane close <pane>`.
 8. Report `done` for the job. If a merge waited for this one, start it now.
 
