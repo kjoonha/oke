@@ -15,7 +15,7 @@ import sys
 import time
 
 PHASES = ("intake", "planning", "awaiting_approval", "working", "reviewing",
-          "awaiting_merge", "done", "failed")
+          "awaiting_merge", "merging", "done", "failed")
 EMPTY_STATE = {"orchestrator": {}, "repos": {}, "jobs": {}}
 
 
@@ -415,6 +415,11 @@ def pm_dir(key):
     return os.path.join(oke_home(), "repos", repo_name(key), "pm")
 
 
+def pm_job_dir(job):
+    """The orchestrator-PM channel of one job: assignment.md and report.md."""
+    return os.path.join(oke_home(), "jobs", job, "pm")
+
+
 def children_path(key):
     return os.path.join(pm_dir(key), "children.json")
 
@@ -511,7 +516,7 @@ def cmd_spawn(args):
         job = state["jobs"].get(header.get("job"))
         if job is None:
             return fail("unknown job %r in assignment" % header.get("job"))
-        if job["phase"] not in ("working", "reviewing"):
+        if job["phase"] not in ("working", "reviewing", "merging"):
             return fail("plan not approved: job %s is in phase %s" % (header["job"], job["phase"]))
         key = job["repo"]
 
@@ -1274,9 +1279,11 @@ def job_locked(args):
         if subprocess.call(["git", "-C", native_path(args.repo), "show-ref", "--verify", "--quiet", branch]) == 0:
             return fail("branch oke/%s already exists (an earlier job): pick another job name" % args.slug)
         os.makedirs(job_dir)
-        state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None}
+        state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None,
+                                    "phase_at": time.time()}
         save_state(state)
         print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key,
+                          "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
                           "pm_dir": pm_dir(key).replace("\\", "/"),
                           "pm_agent": "pm-" + repo_name(key),
                           "wiki": os.path.join(load_config()["wiki_path"], repo_name(key)).replace("\\", "/")},
@@ -1287,7 +1294,14 @@ def job_locked(args):
     if args.action == "phase":
         if args.phase not in PHASES:
             return fail("bad phase %r: one of %s" % (args.phase, ", ".join(PHASES)))
-        state["jobs"][args.slug]["phase"] = args.phase
+        state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
+        save_state(state)
+        return 0
+    if args.action == "defer":
+        item = pending_item(args.slug, state["jobs"][args.slug])
+        if item is None:
+            return fail("job %s has nothing waiting for the user" % args.slug)
+        state["jobs"][args.slug]["deferred"] = item["key"]
         save_state(state)
         return 0
     if args.action == "archive":
@@ -1302,6 +1316,47 @@ def job_locked(args):
         print(dst)
         return 0
     return fail("unknown action")
+
+
+# ---------------------------------------------------------------- pending
+
+PENDING_RANKS = {"report_done": 0, "question": 1, "blocked": 1, "failed": 1, "plan": 2, "merge": 3}
+ASKING_PHASES = ("planning", "working", "reviewing", "merging")
+
+
+def pm_job_report(job):
+    """(assignment seq, report header, report mtime) of a job's PM channel."""
+    folder = pm_job_dir(job)
+    seq = (read_header(os.path.join(folder, "assignment.md")) or {}).get("seq")
+    report = os.path.join(folder, "report.md")
+    try:
+        mtime = os.path.getmtime(report)
+    except OSError:
+        mtime = None
+    return seq, read_header(report) or {}, mtime
+
+
+def pending_item(name, job):
+    """What job `name` waits on the user (or the orchestrator) for, or None. The key
+    names this very item, so a deferral ends by itself when seq or phase moves on."""
+    phase = job.get("phase")
+    if phase in DONE_PHASES:
+        return None
+    seq, report, mtime = pm_job_report(name)
+    rtype = report.get("type") if seq is not None and report.get("seq") == seq else None
+    if rtype in ("question", "blocked", "failed"):
+        kind, since, mark = rtype, mtime, seq
+    elif rtype == "done" and phase in ASKING_PHASES:
+        kind, since, mark = "report_done", mtime, seq
+    elif phase == "awaiting_approval":
+        kind, since, mark = "plan", job.get("phase_at"), job.get("phase_at")
+    elif phase == "awaiting_merge":
+        kind, since, mark = "merge", job.get("phase_at"), job.get("phase_at")
+    else:
+        return None
+    key = "%s:%r" % (kind, mark)
+    return {"job": name, "kind": kind, "rank": PENDING_RANKS[kind], "since": since or 0,
+            "key": key, "deferred": job.get("deferred") == key}
 
 
 # ---------------------------------------------------------------- main
@@ -1322,6 +1377,8 @@ def build_parser():
     phase.add_argument("phase")
     archive = job_sub.add_parser("archive")
     archive.add_argument("slug")
+    defer = job_sub.add_parser("defer")
+    defer.add_argument("slug")
     job.set_defaults(func=cmd_job)
 
     spawn = sub.add_parser("spawn")
