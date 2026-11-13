@@ -1635,6 +1635,15 @@ def cmd_compact_hook(args):
 def cmd_job(args):
     if args.action == "merge":
         return merge_job(args.slug)  # git can take a while: not under the state lock
+    if args.action == "tree":
+        info = load_state()["jobs"].get(args.slug)
+        if not info:
+            return fail("unknown job: %s" % args.slug)
+        tree = pending_tree(native_path(os.path.dirname(info["repo"])))
+        if not tree:
+            return fail("git could not read the main checkout of %s" % args.slug)
+        print(json.dumps({"job": args.slug, "tree": tree}))
+        return 0
     if args.action == "verify":
         if bool(args.command) == bool(args.accept):
             return fail("give the 검증 명령, or --accept \"<why>\" when the user accepts the merge as it is")
@@ -1717,9 +1726,12 @@ def merge_job(job):
         return fail("the review report of %s does not answer its current assignment (seq %s): wait for "
                     "the reviewer" % (job, review_asg.get("seq")))
     code, tip = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/%s^{commit}" % job)
+    if code != 0 and review_asg.get("tree"):
+        # no worktree: the review covered the uncommitted changes in the main checkout
+        return commit_direct(job, info, main, review[1], review_asg["tree"])
+    reviewed = review_asg.get("commit")
     if code != 0:
         return fail("branch oke/%s does not exist" % job)
-    reviewed = review_asg.get("commit")
     if not reviewed or not re.match(r"^[0-9a-f]{7,40}$", reviewed):
         # a branch name would resolve to the moving tip and pass any check
         return fail("the review assignment of %s names no commit sha in `commit:`: give the reviewer a new "
@@ -1759,6 +1771,61 @@ def merge_job(job):
         return fail("git merge failed: %s" % result.stdout.decode("utf-8", "replace").strip())
     print(json.dumps({"result": "conflict", "job": job, "files": files}))
     return 2
+
+
+def pending_tree(main):
+    """Tree sha of the main checkout as `git add -A` would commit it. The real index is
+    untouched. The review of a job without a worktree names this tree."""
+    idx = os.path.join(oke_home(), "tree-%d.index" % os.getpid())
+    env = dict(os.environ, GIT_INDEX_FILE=idx)
+    try:
+        for argv in (["read-tree", "HEAD"], ["add", "-A"], ["write-tree"]):
+            result = subprocess.run(["git", "-C", main] + argv, env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            if result.returncode != 0:
+                return None
+        return result.stdout.decode().strip()
+    finally:
+        try:
+            os.remove(idx)
+        except OSError:
+            pass
+
+
+def commit_direct(job, info, main, review, reviewed):
+    """A job without a worktree: commit its reviewed, uncommitted changes in the main
+    checkout and record that commit as the job's merge, so it is verified like one.
+    Only the exact tree the review named: anything changed or added since is refused."""
+    if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
+        return fail("a merge is already in progress in %s: leave it to the user" % main)
+    base = info.get("base")
+    current = git_out(main, "symbolic-ref", "-q", "--short", "HEAD")[1]
+    if not current or (base and current != base):
+        return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
+                    % (current or "a detached HEAD", base))
+    code, dirty = git_out(main, "status", "--porcelain")
+    if code != 0 or not dirty:
+        return fail("job %s has no branch oke/%s and no changes in %s to commit" % (job, job, main))
+    tree = pending_tree(main)
+    if tree != reviewed:
+        return fail("the changes in %s are not the ones the review covered (tree %s, reviewed %s): give "
+                    "the reviewer a new instruction with `tree: %s`, then merge" % (main, tree, reviewed, tree))
+    pre = git_out(main, "rev-parse", "HEAD")[1]
+    for argv in (["add", "-A"], ["commit", "-q", "-m", "oke: %s" % job]):
+        result = subprocess.run(["git", "-C", main] + argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if result.returncode != 0:
+            subprocess.call(["git", "-C", main, "reset", "-q"])  # unstage; the files stay as they are
+            return fail("git %s failed: %s" % (argv[0], result.stdout.decode("utf-8", "replace").strip()))
+    if git_out(main, "rev-parse", "HEAD^{tree}")[1] != reviewed:  # changed between the check and the commit
+        subprocess.call(["git", "-C", main, "reset", "-q", "--soft", pre])
+        subprocess.call(["git", "-C", main, "reset", "-q"])
+        return fail("the changes in %s moved during the commit: run `oke job merge %s` again" % (main, job))
+    merged = git_out(main, "rev-parse", "HEAD")[1]
+    ledger_add(job, os.path.basename(os.path.dirname(review)), merged, "review", "pass",
+               review.replace("\\", "/"))
+    ledger_add(job, "oke", merged, "merge", "ok", "pre=%s direct" % pre)
+    print(json.dumps({"result": "merged", "job": job, "commit": merged, "direct": True}))
+    return 0
 
 
 # ---------------------------------------------------------------- ledger
@@ -1897,17 +1964,20 @@ def verify_locked(job, command, accept, info, lock):
         return fail("the 검증 명령 could not run (exit %d, see %s): fix the command; the merge stays"
                     % (code, log))
     ledger_add(job, "oke", row["commit"], "verify", "fail", "exit %d: %s" % (code, command))
-    pre = row["detail"][len("pre="):] if row["detail"].startswith("pre=") else None
+    words = row["detail"].split()
+    pre = words[0][len("pre="):] if words and words[0].startswith("pre=") else None
+    # a direct commit (no worktree) goes back to uncommitted changes for the worker to fix
+    mode = "--mixed" if "direct" in words else "--keep"
     head = git_out(main, "rev-parse", "HEAD")[1]
     if not pre or head != row["commit"] or subprocess.call(
-            ["git", "-C", main, "reset", "-q", "--keep", pre],
+            ["git", "-C", main, "reset", "-q", mode, pre],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
         return fail("the 검증 명령 failed on the merge of %s (log %s), and the merge was NOT undone: "
                     "the main checkout moved on or has local edits in the merged files. Ask the user."
                     % (job, log))
     ledger_add(job, "oke", pre, "rollback", "ok", "after verify fail")
     print(json.dumps({"result": "verify_failed", "job": job, "exit": code, "log": log,
-                      "rolled_back_to": pre, "tail": tail}))
+                      "rolled_back_to": pre, "uncommitted": mode == "--mixed", "tail": tail}))
     return 3
 
 
@@ -2277,6 +2347,7 @@ def build_parser():
     defer.add_argument("slug")
     merge = job_sub.add_parser("merge")
     merge.add_argument("slug")
+    job_sub.add_parser("tree", help="the tree a review of a job without a worktree names").add_argument("slug")
     verify = job_sub.add_parser("verify")
     verify.add_argument("slug")
     verify.add_argument("command", nargs="?", help="the plan's 검증 명령, as one quoted string")

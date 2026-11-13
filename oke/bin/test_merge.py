@@ -356,5 +356,64 @@ class TestLedgerAndVerify(MergeBase):
         self.assertIn("not verified", self.err)
 
 
+
+class TestDirectCommit(MergeBase):
+    """A job without a worktree: its reviewed changes are uncommitted in the main checkout."""
+    def setUp(self):
+        MergeBase.setUp(self)
+        self.git(self.repo, "branch", "-q", "-D", "oke/fix-a")
+        self.write("toy/d.txt", "d\n")
+        path = os.path.join(self.jobs, "fix-a-rv", "assignment.md")
+        os.makedirs(os.path.dirname(path))
+        self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
+        self.tree = json.loads(self.out)["tree"]
+        with open(path, "w") as f:  # it reviewed `git diff HEAD`: the tree, not a commit
+            f.write("agent: fix-a-rv\nrole: reviewer\njob: fix-a\nseq: 1\ncommit: no\ntree: %s\n---\n" % self.tree)
+        self.order(self.report("fix-a-w1", 1), self.report("fix-a-rv", 1, "verdict: pass"))
+        self.pre = self.git_out(self.repo, "rev-parse", "HEAD").strip()
+
+    def ledger(self):
+        self.assertEqual(self.cli("ledger", "show", "fix-a"), 0)
+        return json.loads(self.out)
+
+    def test_merge_commits_the_changes_and_waits_for_verification(self):
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+        self.assertTrue(json.loads(self.out)["direct"])
+        self.assertEqual(self.git_out(self.repo, "status", "--porcelain").strip(), "")
+        self.assertEqual(self.ledger()["merge"], "unverified")
+        self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 1)
+        self.assertEqual(self.cli("job", "verify", "fix-a", "test -f d.txt"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
+
+    def test_a_failed_check_gives_the_changes_back_uncommitted(self):
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+        self.assertEqual(self.cli("job", "verify", "fix-a", "exit 1"), 3)
+        self.assertTrue(json.loads(self.out)["uncommitted"])
+        self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), self.pre)
+        self.assertEqual(self.git_out(self.repo, "status", "--porcelain").strip(), "?? d.txt")
+        self.assertEqual(self.ledger()["merge"], "rolled_back")
+
+    def test_a_change_after_the_review_is_refused(self):
+        self.write("toy/other.txt", "not reviewed\n")
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("not the ones the review covered", self.err)
+        self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), self.pre)
+        self.assertEqual(self.git_out(self.repo, "diff", "--cached", "--name-only").strip(), "")
+
+    def test_the_commit_holds_exactly_the_reviewed_tree(self):
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+        self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD^{tree}").strip(), self.tree)
+
+    def test_nothing_to_commit_is_refused(self):
+        os.remove(os.path.join(self.repo, "d.txt"))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("no changes", self.err)
+
+    def test_a_reviewed_commit_without_its_branch_is_still_refused(self):
+        self.review(1, commit=self.pre)
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("does not exist", self.err)
+
+
 if __name__ == "__main__":
     unittest.main()
