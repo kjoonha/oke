@@ -125,10 +125,12 @@ export const register: Register = on => {
     // Workers and reviewers watch no one. An unknown pane may become a PM once spawn
     // records it, or the orchestrator after /oke:start: look at it only every minute,
     // so the many non-OKe sessions inside herdr do not run python every 10 s.
+    // The first minute ticks every time: spawn records a new PM a moment after it starts.
     let skipped = 0
+    let early = UNKNOWN_EVERY
     $.clock.every(TICK_MS, () => {
       if (role === 'worker' || role === 'reviewer') return
-      if (role === null && ++skipped < UNKNOWN_EVERY) return
+      if (role === null && --early < 0 && ++skipped < UNKNOWN_EVERY) return
       skipped = 0
       void tick($)
     })

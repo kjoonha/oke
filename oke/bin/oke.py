@@ -309,7 +309,10 @@ def run_herdr(args):
         out, err = p.communicate(timeout=HERDR_TIMEOUT)
     except subprocess.TimeoutExpired:
         p.kill()
-        p.communicate()
+        try:
+            p.communicate(timeout=5)  # a child that inherited the pipes may keep them open
+        except subprocess.TimeoutExpired:
+            pass
         raise HerdrError("herdr_unavailable", "herdr %s did not answer in %d s"
                          % (" ".join(args[:2]), HERDR_TIMEOUT))
     return (p.returncode,
@@ -920,6 +923,7 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
     idle = 0
     polls = 0
     outage = 0
+    revive_outage = 0  # not reset by a good look: a revive that always meets an outage must end
     # after_blocked: a key was just sent to a dialog the caller already reported. Do not
     # report that dialog again while herdr still shows the old state. Only a short grace:
     # the agent may already be at its next dialog when this wait starts.
@@ -962,10 +966,12 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                 result = None  # state.json busy for a moment: look again next poll
             except HerdrError as e:
                 # an outage during a revive is the same passing outage as during a look
-                outage += 1
-                if e.code != "herdr_unavailable" or outage > HERDR_RETRIES:
+                revive_outage += 1
+                if e.code != "herdr_unavailable" or revive_outage > HERDR_RETRIES:
                     raise
                 result = None
+            else:
+                revive_outage = 0
         if result is None:
             idle = 0
         elif result.startswith("?"):
@@ -1471,7 +1477,8 @@ def find_agent(record, agents, key):
 
 def cmd_status(args):
     # herdr calls are slow (seconds each): make them before taking the lock, so
-    # spawn and the waits do not time out on it
+    # spawn and the waits do not time out on it. The agent list may then be a few
+    # seconds old: an agent that just started can show as dead until the next status.
     herdr_info = None
     if os.environ.get("HERDR_ENV") == "1":
         herdr_info = (missing_commands(), list_agents())
@@ -1555,8 +1562,10 @@ def status_locked(args, herdr_info):
     orch = state["orchestrator"]
     # pane ids come back after a herdr restart: with a known name or session, the
     # agent now in that pane must be the recorded orchestrator to count as a conflict
+    # (herdr may not know a fresh session yet: an agent without one there still counts)
     if recorded and recorded != here and there and (
-            not (orch.get("agent") or orch.get("session")) or same_agent(orch, there[0])):
+            not (orch.get("agent") or orch.get("session")) or same_agent(orch, there[0])
+            or (not orch.get("agent") and not session_of(there[0]))):
         result["orchestrator_conflict"] = recorded
 
     code = 0
@@ -1652,7 +1661,7 @@ def review_verdict(path):
         return None
     body = lines[[l.strip() for l in lines].index("---") + 1:]
     first = next((l.strip() for l in body if l.strip()), "")
-    m = re.match(r"^verdict:\s*(\S+)$", first)
+    m = re.match(r"^verdict:\s*(pass|changes)\b", first)
     return m.group(1) if m else None
 
 
@@ -1784,8 +1793,11 @@ def cmd_interview(args):
             return fail("--%s must be between 0 and 1" % name)
         scores[name] = value
     config = load_config()
-    threshold = float(config.get("interview_threshold", INTERVIEW_THRESHOLD))
-    max_rounds = int(config.get("interview_max_rounds", INTERVIEW_MAX_ROUNDS))
+    try:
+        threshold = float(config.get("interview_threshold", INTERVIEW_THRESHOLD))
+        max_rounds = int(config.get("interview_max_rounds", INTERVIEW_MAX_ROUNDS))
+    except (TypeError, ValueError):
+        return fail("interview_threshold / interview_max_rounds in config.json must be numbers")
     data = read_json(path, None)
     if not isinstance(data, dict):
         data = {"rounds": [], "done": False}

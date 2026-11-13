@@ -25,7 +25,7 @@ If your first prompt says you were restarted after a crash, your earlier turns a
 type: done
 seq: <seq from your assignment>
 ---
-verdict: pass | changes
+verdict: pass | changes        (this exact line, first after ---)
 ## 요약
 ## 지적          (for changes: one line each - file:line, the problem, how to fix it)
 ## 배운 것       (or 없음)

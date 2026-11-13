@@ -47,6 +47,20 @@ class TestOutageDuringRevive(ReviveBase):
         finally:
             oke.revive = real
 
+    def test_a_revive_that_always_meets_an_outage_ends_the_wait(self):
+        real = oke.revive
+
+        def down(name):
+            raise oke.HerdrError("herdr_unavailable", "agent start hangs")
+        oke.revive = down
+        try:
+            self.fake({"agent get": [E("agent_not_found")]})
+            report = os.path.join(self.child_dir, "report.md")
+            with self.assertRaises(oke.HerdrError):
+                oke.wait_loop("fix-a-w1", report, 2, poll=0, max_polls=oke.HERDR_RETRIES + 5)
+        finally:
+            oke.revive = real
+
     def test_an_outage_does_not_count_as_a_crash(self):
         real = oke.relaunch
 
@@ -77,6 +91,11 @@ class TestPhaseGates(SpawnBase):
     def test_done_needs_merging(self):
         self.job("fix-a", "awaiting_merge")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 1)
+
+    def test_full_autonomy_still_passes_through_the_awaiting_phases(self):
+        self.job("fix-a", "planning")
+        for step in ("awaiting_approval", "working", "awaiting_merge", "merging", "done"):
+            self.assertEqual(self.cli("job", "phase", "fix-a", step), 0, self.err)
 
     def test_failed_and_a_merge_hold_are_always_allowed(self):
         self.job("fix-a", "merging")
@@ -162,6 +181,8 @@ class TestVerdict(SpawnBase):
         body_only = "type: done\nseq: 1\n---\n## 요약\nverdict: pass\n"
         self.assertIsNone(oke.review_verdict(self.report(body_only)))
         self.assertIsNone(oke.review_verdict(self.report("verdict: pass\n")))
+        self.assertEqual(oke.review_verdict(self.report("seq: 1\n---\nverdict: pass (no findings)\n")), "pass")
+        self.assertIsNone(oke.review_verdict(self.report("seq: 1\n---\nverdict: passed\n")))
 
 
 class TestReviewerPermissions(unittest.TestCase):

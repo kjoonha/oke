@@ -90,7 +90,9 @@ The PM plans from intake.md alone, so a vague request becomes a wrong plan. Meas
 4. Otherwise ask one question with `AskUserQuestion` about the `weakest` dimension. Say in one line why (for example "ambiguity 45%, success criteria are the least clear"). Give 2 to 4 concrete options, your recommended one first with "(Recommended)", and always a last option "Enough, start planning". Then score again and run step 2 with the question and the answer; when the user picked "Enough, start planning", add `--stop`.
    - `challenge: contrarian`: this once, ask instead whether a core assumption of the request is wrong (the problem may sit elsewhere).
    - `challenge: simplifier`: this once, ask what could be left out and still satisfy the user.
-   - `stalled` true: the score stopped moving. Ask whether to start planning as it is or to describe the goal differently.
+   - `stalled` true: the score stopped moving. Ask whether to start planning as it is or to describe the goal differently. When `challenge` is also set, ask the challenge first.
+   A job still in `intake` with no interview (from an older OKe version): start at round 0 now.
+   New requirements after the interview is done: write them into intake.md (and, after planning started, into the next assignment); do not run the interview again.
 5. The interview also ends by itself at the round cap (`interview_max_rounds` in config, default 10). Then name the least clear dimension in intake.md under 성공 기준 or 제약 as an open risk.
 
 Autonomy does not change the interview: it collects what only the user knows.
@@ -214,6 +216,8 @@ Merge question: summary, branch name, number of changed files. Offer: merge / ho
 ## Autonomy
 
 Read `autonomy` from `~/.oke/config.json` (default `balanced`). `agents` there picks the CLI for workers and reviewers: `{"worker": "claude", "reviewer": "claude"}` by default; `codex` and `opencode` work too. If the user asks for one in a job, write it into `intake.md` (`## 원하는 결과`); the PM then puts `kind:` into that child's assignment. The PM is always claude.
+
+With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merge`) as always, then the next phase at once. `job phase` refuses a skipped step.
 
 | Situation | conservative | balanced | full |
 |---|---|---|---|

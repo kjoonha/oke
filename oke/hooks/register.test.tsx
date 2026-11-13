@@ -108,14 +108,16 @@ test('a session that is no OKe agent ticks once a minute, a PM every 10 s', asyn
   tickRole = null as any
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const first = ticks()
+  await clock.advance(60_000)  // the first minute: every 10 s
+  expect(ticks()).toBe(first + 6)
   await clock.advance(50_000)
-  expect(ticks()).toBe(first)
+  expect(ticks()).toBe(first + 6)
   await clock.advance(10_000)
-  expect(ticks()).toBe(first + 1)
+  expect(ticks()).toBe(first + 7)
   tickRole = 'pm'  // spawn recorded it: from the next look on it is a PM
   await clock.advance(60_000)
   await clock.advance(10_000)
-  expect(ticks()).toBe(first + 3)
+  expect(ticks()).toBe(first + 9)
   tickRole = 'worker'
 })
 
