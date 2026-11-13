@@ -357,6 +357,27 @@ class TestPmWait(InboxBase):
         self.assertEqual(self.wait(), "idle_no_report again fix-a")
         self.assertIsNone(self.wait(8))  # the user was told; no endless wake-ups
 
+    def test_two_waits_at_once_return_a_report_only_once(self):
+        self.pm_job("fix-a", 2, REPORT("done", 2))
+        self.fake({"agent get": [AGENT("working")]})
+        original = oke.load_state
+
+        def other_wait_marks_it_meanwhile():
+            # the first unlocked read sees the report fresh; the other wait then marks it
+            s = original()
+            if not calls:
+                calls.append(1)
+                marked = original()
+                marked["jobs"]["fix-a"]["seen"] = "done:2"
+                oke.save_state(marked)
+            return s
+        calls = []
+        oke.load_state = other_wait_marks_it_meanwhile
+        try:
+            self.assertIsNone(oke.check_pm_once("pm-toy", self.key))
+        finally:
+            oke.load_state = original
+
     def test_a_nudge_for_the_same_seq_keeps_the_count(self):
         # the orchestrator's nudge uses send --job too: it must not reset the count
         self.pm_job("fix-a", 3, REPORT("waiting", 2))
@@ -460,6 +481,15 @@ class TestPendingUnsent(InboxBase):
         self.cli("pending")
         items = json.loads(self.out)["items"]
         self.assertEqual([(i["job"], i["kind"]) for i in items], [("fix-a", "unsent")])
+
+    def test_a_report_of_unknown_type_after_two_warnings_is_pending(self):
+        self.pm_job("fix-a", 3, REPORT("progress", 3))
+        self.fake({"agent get": [AGENT("idle")]})
+        oke.wait_loop("pm-toy", None, None, poll=0, max_polls=5, jobs_key=self.key)
+        oke.wait_loop("pm-toy", None, None, poll=0, max_polls=5, jobs_key=self.key)
+        self.cli("pending")
+        items = json.loads(self.out)["items"]
+        self.assertEqual([(i["job"], i["kind"]) for i in items], [("fix-a", "silent")])
 
     def test_a_silent_job_after_two_warnings_is_pending(self):
         self.pm_job("fix-a", 3, REPORT("waiting", 2))

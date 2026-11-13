@@ -159,6 +159,10 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
 7. Close the worker and reviewer panes: `herdr pane close <pane>`.
 8. Report `done` for the job. If a merge waited for this one, start it now.
 
+### kind: cancel
+
+The user gave the job up. Stop its children's waits by not starting them again, close its worker and reviewer panes (`herdr pane close <pane>`), and leave its worktree and branch as they are (say so on the board). Write no report: the job is closed. If a merge waited for this job, start it now.
+
 ### kind: answer
 
 The user's answer to your question about that job. Continue from where you stopped. If a child of that job is still at a dialog you reported before, report `blocked` again for it (with the new seq) and do not start its wait.

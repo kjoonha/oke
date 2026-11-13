@@ -47,7 +47,7 @@
 ```
 
 - 고정 배정 본문: "이 저장소의 PM 이다. job 별 지시는 `~/.oke/jobs/<job>/pm/assignment.md` 에 있고, 새 지시는 수신함 메시지로 알린다."
-- job 지시 (`jobs/<job>/pm/assignment.md`) 의 머리말: `agent`, `role: pm`, `job`, `seq`. 본문의 `이번 지시` 에 `kind:` 가 있다: `plan | execute | merge | answer | dialog`. `dialog` 는 하위 창에 대한 사용자의 답 ("Dialog answered for <child>" 또는 "denied") 이다.
+- job 지시 (`jobs/<job>/pm/assignment.md`) 의 머리말: `agent`, `role: pm`, `job`, `seq`. 본문의 `이번 지시` 에 `kind:` 가 있다: `plan | execute | merge | answer | dialog | cancel`. `cancel` 은 사용자가 그 job 을 포기했다는 뜻이다 (PM 은 그 job 의 pane 을 닫고, 그 job 을 기다리던 merge 를 시작한다). `dialog` 는 하위 창에 대한 사용자의 답 ("Dialog answered for <child>" 또는 "denied") 이다.
 - orchestrator 가 PM 에게 job 에 대해 무엇이든 알릴 때는 같은 절차다: job 지시를 고치고 seq + 1, 그다음 `oke send <pm> "Job <job>: assignment updated (seq <n>). Re-read <path>."`. 창 답도 seq 를 올린다. 그래서 옛 `blocked` 보고가 새 대기를 바로 끝내지 않는다.
 - PM 은 턴을 끝내기 전에, 아직 끝나지 않은 각 job 의 보고를 그 job 의 현재 seq 로 써 둔다 (최종 보고 또는 `waiting`).
 

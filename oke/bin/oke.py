@@ -698,9 +698,10 @@ def check_pm_once(agent, key):
         name, seq, header, _ = min(fresh, key=lambda j: j[3] or 0)
         with locked():
             current = load_state()
-            if name in current["jobs"]:
-                current["jobs"][name]["seen"] = seen_mark(header)
-                save_state(current)
+            if name not in current["jobs"] or current["jobs"][name].get("seen") == seen_mark(header):
+                return None  # another wait returned it a moment ago
+            current["jobs"][name]["seen"] = seen_mark(header)
+            save_state(current)
         return "report %s %s" % (header["type"], name)
     look = look_at(agent, pm_dir(key))
     if look != "idle":
@@ -1648,7 +1649,7 @@ def pending_item(name, job):
         kind, since, mark = "unsent", job.get("phase_at"), seq  # written, never sent
     elif rtype in ("question", "blocked", "failed"):
         kind, since, mark = rtype, mtime, seq
-    elif rtype is None and is_silent(job, seq):
+    elif rtype not in REPORT_TYPES and is_silent(job, seq):
         kind, since, mark = "silent", mtime, seq
     elif rtype == "done" and phase in ASKING_PHASES:
         kind, since, mark = "report_done", mtime, seq

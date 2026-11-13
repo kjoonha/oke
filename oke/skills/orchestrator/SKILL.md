@@ -105,7 +105,7 @@ seq: <n>
 ---
 ## 목표
 ## 이번 지시
-kind: plan | execute | merge | answer | dialog
+kind: plan | execute | merge | answer | dialog | cancel
 <details: for plan, the path of intake.md; for answer, the user's answer; for dialog, see "Queue">
 ```
 
@@ -157,14 +157,18 @@ Run the queue after every wait result, after the start procedure, and after each
    - `question`: read the report. Ask the user with `AskUserQuestion`. Before you give the answer to the PM (`kind: answer`), read the report again: if it now says `blocked`, ask about the dialog too, and give both in one assignment: `kind: dialog` with the dialog line, then a line `Answer: <the user's answer>`. Never write two assignments for one job before the PM has reported on the first: the second overwrites the first.
    - `blocked`: the report names a child agent and shows its screen. Ask: approve once / deny / go to that pane. Send the key to that child yourself (`herdr agent send-keys <child> enter` or `esc`). For "go to that pane": `herdr agent focus <child>`, `$OKE job defer <job>`, and continue that item only after the user says they are done. Then give the PM `kind: dialog` with "Dialog answered for <child>." or "Dialog denied for <child>: <what was refused>." Never send a second key for the same report.
    - `unsent`: you wrote that job's assignment but never sent the message (you were compacted in between). Read the assignment's `kind` and do steps 3 to 6 of "Give the job to the PM" now: set the phase that kind belongs to (see "Flow"), make sure the PM runs, send, wait. No question.
-   - `silent`: the PM did not report on that job even after a nudge. Ask: go to the PM pane (`herdr agent focus <pm>`, then `$OKE job defer <job>`) / send the same step again (step 5 of "Give the job to the PM") / give up (`$OKE job phase <job> failed`).
-   - `failed`: show the summary (an "API error" summary means automatic retries ran out). Ask: retry (give the PM the same step again) / give up (`$OKE job phase <job> failed`) / hold.
+   - `silent`: the PM did not report on that job even after a nudge. Ask: go to the PM pane (`herdr agent focus <pm>`, then `$OKE job defer <job>`) / send the same step again (steps 2 to 6 of "Give the job to the PM" with the same 이번 지시: the new seq gives the PM a fresh start) / give up (see "Giving up").
+   - `failed`: show the summary (an "API error" summary means automatic retries ran out). Ask: retry (give the PM the same step again) / give up (see "Giving up") / hold.
    - `plan`: the plan approval question (see "Flow").
    - `merge`: the merge question (see "Flow").
 4. When the user picks hold, "look myself" or "discuss in the PM pane": `$OKE job defer <job>`. Do not ask a deferred item again unless the user brings it up. It stops being deferred by itself when its job moves on.
 5. Repeat until no item is left whose `deferred` is false. Then make sure each PM with open jobs has a wait running.
 
 "Give the PM" always means the steps in "Give the job to the PM": a new `seq`, then `$OKE send`, then the wait.
+
+## Giving up
+
+When the user gives a job up: give the PM `kind: cancel` (steps 2, 4 and 5 of "Give the job to the PM"; skip step 3), then `$OKE job phase <job> failed`. The PM must hear it: its other jobs may wait on this one, and the job's agents still run.
 
 ## Flow
 
