@@ -667,7 +667,7 @@ def warn_job(result):
         save_state(state)
     if count >= SILENT_AFTER:
         word, rest = result.split(" ", 1)
-        return "%s again %s" % (word, rest) if " " in rest else "%s again" % result
+        return "%s again %s" % (word, rest)
     return result
 
 
@@ -1561,8 +1561,10 @@ def cmd_send(args):
             current = load_state()
             if args.job not in current["jobs"]:
                 return fail("unknown job: %s" % args.job)
-            current["jobs"][args.job]["sent_seq"] = pm_job_report(args.job)[0]
-            current["jobs"][args.job].pop("warned", None)
+            seq = pm_job_report(args.job)[0]
+            if current["jobs"][args.job].get("sent_seq") != seq:
+                current["jobs"][args.job].pop("warned", None)  # a nudge keeps the count
+            current["jobs"][args.job]["sent_seq"] = seq
             save_state(current)
     d = inbox_dir(found[1])
     if not os.path.isdir(d):

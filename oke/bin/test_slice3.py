@@ -354,16 +354,28 @@ class TestPmWait(InboxBase):
         self.pm_job("fix-a", 3, REPORT("waiting", 2))
         self.fake({"agent get": [AGENT("idle")]})
         self.assertEqual(self.wait(), "idle_no_report fix-a")
-        self.assertEqual(self.wait(), "idle_no_report fix-a again")
+        self.assertEqual(self.wait(), "idle_no_report again fix-a")
         self.assertIsNone(self.wait(8))  # the user was told; no endless wake-ups
+
+    def test_a_nudge_for_the_same_seq_keeps_the_count(self):
+        # the orchestrator's nudge uses send --job too: it must not reset the count
+        self.pm_job("fix-a", 3, REPORT("waiting", 2))
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertEqual(self.wait(), "idle_no_report fix-a")
+        self.fake({})
+        self.cli("send", "pm-toy", "--job", "fix-a", "Job fix-a: re-read your assignment")
+        self.fake({"agent get": [AGENT("idle")], "agent prompt": [J({"type": "agent_prompted"})]})
+        oke.deliver("pm-toy")
+        self.assertEqual(self.wait(), "idle_no_report again fix-a")
 
     def test_a_new_send_for_the_job_clears_the_warnings(self):
         self.pm_job("fix-a", 3, REPORT("waiting", 2))
         self.fake({"agent get": [AGENT("idle")]})
         self.wait()
         self.wait()
+        self.pm_job("fix-a", 4, REPORT("waiting", 2), sent=False)
         self.fake({})
-        self.cli("send", "pm-toy", "--job", "fix-a", "Job fix-a: re-read your assignment")
+        self.cli("send", "pm-toy", "--job", "fix-a", "Job fix-a: assignment updated (seq 4)")
         self.fake({"agent get": [AGENT("idle")], "agent prompt": [J({"type": "agent_prompted"})]})
         oke.deliver("pm-toy")
         self.assertEqual(self.wait(), "idle_no_report fix-a")
