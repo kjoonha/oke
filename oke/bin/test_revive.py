@@ -62,6 +62,7 @@ class ReviveBase(SpawnBase):
              "pane get": [PANE_OK()],
              "pane process-info": [PINFO("bash")],
              "pane split": [J({"pane": {"pane_id": "w1:p8"}})],
+             "pane close": [J({"type": "ok"})],
              "agent start": [AGENT()],
              "agent prompt": [J({"type": "agent_prompted"})],
              "agent get": [AGENT("working", name="fix-a-w1", pane="w1:p5", session="s-w2")]}
@@ -70,21 +71,34 @@ class ReviveBase(SpawnBase):
 
 
 class TestRevive(ReviveBase):
-    def test_restarts_in_the_old_shell_pane_with_resume(self):
+    def test_closes_the_old_pane_and_starts_next_to_the_parent_with_resume(self):
+        # live: a force-killed claude leaves terminal modes set and the next start command
+        # typed into that shell arrives garbled, so the old pane is never reused
         self.revive_scenario()
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
+        self.assertEqual(self.argv_of("pane", "close"), [["pane", "close", "w1:p5"]])
+        self.assertIn("w1:p3", self.argv_of("pane", "split")[0])
         start = started(self.calls())
         self.assertEqual(len(start), 1)
-        self.assertIn("w1:p5", start[0])
+        self.assertIn("w1:p8", start[0])
         self.assertEqual(start[0][start[0].index("--resume") + 1], "s-w")
-        self.assertEqual(self.argv_of("pane", "split"), [])
-        self.assertEqual(self.argv_of("pane", "close"), [])
         prompt = self.argv_of("agent", "prompt")[0]
         self.assertIn("restarted", prompt[3])
         self.assertIn("fix-a-w1/assignment.md", prompt[3])
         rec = self.child()
-        self.assertEqual((rec["revives"], rec["session"], rec["pane"]), (1, "s-w2", "w1:p5"))
+        self.assertEqual((rec["revives"], rec["session"]), (1, "s-w2"))
         self.assertIn("revived fix-a-w1", self.events())
+
+    def test_a_pane_that_refuses_to_close_is_left(self):
+        self.revive_scenario(**{"pane close": [E("confirmation_required")]})
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")
+        self.assertIn("w1:p8", started(self.calls())[0])
+
+    def test_the_orchestrator_pane_is_never_closed(self):
+        self.revive_scenario(**{
+                                "agent get": [AGENT("working", name="oke-orch", pane="w1:p8", session="s-o2")]})
+        self.assertEqual(oke.revive("orchestrator"), "revived")
+        self.assertEqual(self.argv_of("pane", "close"), [])
 
     def test_final_report_means_not_needed(self):
         # a worker closed after merge has its done report
@@ -176,6 +190,13 @@ class TestRevive(ReviveBase):
         self.assertEqual(self.child()["revives"], 1)
         self.assertIn("revive_failed fix-a-w1", self.events())
         self.assertTrue(oke.try_lock("revive-fix-a-w1"))
+
+    def test_failed_start_closes_its_new_pane(self):
+        # live: a timed-out start left the name registered on a dead shell, which a
+        # watcher would read as alive
+        self.revive_scenario(**{"agent start": [E("timeout")]})
+        self.assertEqual(oke.revive("fix-a-w1"), "failed")
+        self.assertIn(["pane", "close", "w1:p8"], self.calls())
 
     def test_reset_lets_the_user_resume_after_give_up(self):
         children = oke.read_children(self.key)

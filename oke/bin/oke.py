@@ -830,12 +830,28 @@ def relaunch(state, role, key, name, record, folder):
         args = launch_args(role, load_config(), oke_home(), plugin_root())
     if record.get("session"):
         args = args + ["--resume", record["session"]]
-    # A dead claude leaves its shell behind: start in place so the layout stays.
-    pane = record.get("pane")
-    if not (pane and pane_exists(pane)):
-        pane = new_pane(state, role, key, cwd)
+    # Never start in the old pane: a force-killed claude leaves terminal modes set, and
+    # the start command herdr types into that shell arrives garbled (seen live).
+    # The orchestrator's pane is the user's own, so it stays.
+    old = record.get("pane")
+    if old and role != "orchestrator" and pane_exists(old):
+        try:
+            herdr("pane", "close", old)
+        except HerdrError as e:
+            if e.code == "herdr_unavailable":
+                raise  # a worktree group root refuses to close: leave it
+    pane = new_pane(state, role, key, cwd)
     # The folder was trusted when the agent first started; a trust dialog now is unexpected.
-    return start_agent(agent, pane, args, prompt, lambda: False)
+    try:
+        return start_agent(agent, pane, args, prompt, lambda: False)
+    except (HerdrError, DialogError):
+        # herdr keeps the name of a start that failed; with the pane closed it is
+        # gone again, so the next watcher round does not read it as alive.
+        try:
+            herdr("pane", "close", pane)
+        except HerdrError:
+            pass
+        raise
 
 
 def revive(name):
