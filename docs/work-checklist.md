@@ -74,7 +74,7 @@ orchestrator 에게 지시: `~/oke-toy 저장소에 sub(a, b) 함수와 unittest
 5장이 끝난 저장소에 job 두 개를 연달아 준다: `mul(a, b)` 추가, `div(a, b)` 추가 (같은 `calc.py` 를 고치므로 merge 충돌이 날 수 있다).
 
 - [ ] PM 은 `pm-oke-toy-...` 한 명만 뜨고, worktree 가 job 마다 하나씩 생긴다
-- [ ] 계획 승인 팝업이 한 번에 하나씩 뜨고, 남은 건 수를 한 줄로 알린다
+- [ ] 계획 승인은 팝업 하나에 job 마다 탭 하나로 묶여 뜨고 (최대 4개), job 하나만 보류할 수 있다. 남은 건 수를 한 줄로 알린다
 - [ ] 두 merge 를 승인하면 PM 이 하나씩 merge 한다. 두 번째가 충돌하면 worker 가 rebase 하고 다시 리뷰받은 뒤 merge 된다
 - [ ] `~/.oke/inbox/<agent>/read/` 에 배달된 메시지가 남아 있다 (수신함 배달은 `oke wait` 가 한다. mod 가 없어도 된다)
 - [ ] 한 job 의 "보류" 를 고르면 그 job 은 다시 묻지 않고, 다른 job 은 계속 묻는다

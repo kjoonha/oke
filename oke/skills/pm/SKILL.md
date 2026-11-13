@@ -150,13 +150,13 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
    - the changes belong to another open OKe job that works without a worktree: do not merge. Write this job's report as `waiting` (`on: <that job>`), and merge after that job is done.
    - nobody's job owns them: report `question` with the file list.
 2. If the work in the worktree is uncommitted (`commit: no` with a worktree, autonomy `conservative`): commit it now in the worker's `cwd` (`git add -A`, `git commit`).
-3. Merge: in the main checkout, `git merge --no-ff oke/<job>`. No conflict: go to step 5.
-4. Conflict: `git merge --abort`. Never resolve conflicts yourself. Climb this ladder:
+3. Merge: `$OKE job merge <job>` (never `git merge` yourself). It merges `oke/<job>` into the main checkout only when the job is in phase `merging` and the last review passed after the last worker report. Exit 0: merged, go to step 5. Exit 1: refused; the message says why (for example the worker reported after the review: give the reviewer a new instruction to review it, then run it again).
+4. Exit 2: conflict; the merge is already aborted and the output lists the files. Never resolve conflicts yourself. Climb this ladder:
    1. Give the worker a new instruction, with `commit: yes` in its header from now on: "Rebase `oke/<job>` onto `<base branch>`. Resolve the conflicts so that both changes keep their purpose. Run the 검증 명령 again, commit, and report." Write this job's report as `waiting` and wait. A dead worker is revived by the wait.
-   2. Worker `done`: give the reviewer a new instruction to review what the rebase changed. `verdict: pass`: back to step 3. `changes`: as in the review rounds.
+   2. Worker `done`: give the reviewer a new instruction to review what the rebase changed (`job merge` refuses until that review passes). `verdict: pass`: back to step 3. `changes`: as in the review rounds.
    3. Worker `question` or `failed`, or the merge conflicts again after the rebase: report `question` for the job with the conflicting files. The user decides.
 5. Update the wiki from the reports' 배운 것 (see below).
-6. Remove the worktree only when it is merged and `git status --short` there is empty: `herdr worktree remove --workspace <its workspace id>`. Otherwise leave it and say so.
+6. Remove the worktree once it is merged: `herdr worktree remove --workspace <its workspace id>`. First look at `git status --short` there. Changed tracked files: keep the worktree and say so. Untracked files: judge them. Byproducts of builds and checks (caches such as `__pycache__`, compiled files, test logs) do not stop the removal. Anything that looks like work (source, docs, data) keeps the worktree: list those files in your report.
 7. Close the worker and reviewer panes: `herdr pane close <pane>`.
 8. Report `done` for the job. If a merge waited for this one, start it now.
 
