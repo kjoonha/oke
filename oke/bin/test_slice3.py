@@ -417,6 +417,14 @@ class TestPmWait(InboxBase):
         self.assertEqual(self.wait(), "no_jobs")
         self.assertEqual(self.texts("pm-toy"), [])
 
+    def test_mail_for_a_dead_pm_with_a_legacy_job_is_kept(self):
+        # fix-a is open but has no job assignment yet: the PM must come back, not be dropped
+        self.fake({})
+        self.cli("send", "pm-toy", "hello")
+        self.fake({"agent get": [E("agent_not_found")]})
+        self.assertEqual(oke.check_pm_once("pm-toy", self.key), "gone")
+        self.assertEqual(self.texts("pm-toy"), ["user: hello"])
+
     def test_a_cancel_for_the_last_job_is_delivered_before_no_jobs(self):
         self.pm_job("fix-a", 3, REPORT("waiting", 2))
         self.fake({})

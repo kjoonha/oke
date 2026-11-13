@@ -707,7 +707,7 @@ def check_pm_once(agent, key):
             save_state(current)
         return "report %s %s" % (header["type"], name)
     look = look_at(agent, pm_dir(key))
-    if look == "gone" and not jobs:
+    if look == "gone" and not open_jobs(state, key):
         # Mail for a dead PM without open jobs (a cancel): nobody revives it, and the
         # next PM of this repository must not get it.
         done = os.path.join(inbox_dir(agent), "read")
