@@ -1592,8 +1592,59 @@ def cmd_compact_hook(args):
 # ---------------------------------------------------------------- job
 
 def cmd_job(args):
+    if args.action == "merge":
+        return merge_job(args.slug)  # git can take a while: not under the state lock
     with locked():
         return job_locked(args)
+
+
+def latest_report(job_dir, pattern):
+    """(mtime, path) of the newest report.md in the job's folders matching pattern."""
+    found = []
+    for name in os.listdir(job_dir):
+        path = os.path.join(job_dir, name, "report.md")
+        if re.search(pattern, name) and os.path.isfile(path):
+            found.append((os.path.getmtime(path), path))
+    return max(found) if found else None
+
+
+def merge_job(job):
+    """Merge oke/<job> into the main checkout, only if the user approved the merge and
+    the last review passed after the last worker report. A worker that reported again
+    (a rebase, a fix) needs a new review first (seen live: a PM skipped it)."""
+    state = load_state()
+    info = state["jobs"].get(job)
+    if not info:
+        return fail("unknown job: %s" % job)
+    if info.get("phase") != "merging":
+        return fail("job %s is in phase %s: set phase merging after the user approves the merge"
+                    % (job, info.get("phase")))
+    job_dir = os.path.join(oke_home(), "jobs", job)
+    worker = latest_report(job_dir, r"-w\d+$")
+    review = latest_report(job_dir, r"-rv\d*$")
+    if not review:
+        return fail("job %s has no review report: have the reviewer review the branch first" % job)
+    with io.open(review[1], encoding="utf-8-sig") as f:
+        verdict = re.search(r"^verdict:\s*(\S+)", f.read(), re.M)
+    if not verdict or verdict.group(1) != "pass":
+        return fail("the last review of %s did not pass: %s" % (job, review[1].replace("\\", "/")))
+    if worker and worker[0] > review[0]:
+        return fail("the worker reported after the last review (a rebase or a fix): give the reviewer "
+                    "a new instruction to review it, then merge")
+    main = native_path(os.path.dirname(info["repo"]))
+    result = subprocess.run(["git", "-C", main, "merge", "--no-ff", "--no-edit", "oke/" + job],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if result.returncode == 0:
+        print(json.dumps({"result": "merged", "job": job}))
+        return 0
+    files = subprocess.run(["git", "-C", main, "diff", "--name-only", "--diff-filter=U"],
+                           stdout=subprocess.PIPE).stdout.decode("utf-8", "replace").split()
+    subprocess.call(["git", "-C", main, "merge", "--abort"], stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL)
+    if not files:
+        return fail("git merge failed: %s" % result.stdout.decode("utf-8", "replace").strip())
+    print(json.dumps({"result": "conflict", "job": job, "files": files}))
+    return 2
 
 
 def job_locked(args):
@@ -1847,6 +1898,8 @@ def build_parser():
     archive.add_argument("slug")
     defer = job_sub.add_parser("defer")
     defer.add_argument("slug")
+    merge = job_sub.add_parser("merge")
+    merge.add_argument("slug")
     job.set_defaults(func=cmd_job)
 
     spawn = sub.add_parser("spawn")
