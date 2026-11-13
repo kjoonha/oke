@@ -105,9 +105,13 @@ def write_json_atomic(path, obj):
     with io.open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True))
         f.write(u"\n")
+    replace_file(tmp, path)
+
+
+def replace_file(src, dst):
     for attempt in range(20):
         try:
-            os.replace(tmp, path)
+            os.replace(src, dst)
             return
         except OSError:  # Windows: another process has the file open for a moment
             if attempt == 19:
@@ -645,6 +649,11 @@ def report_problem(report, header):
     return None
 
 
+def seen_mark(header):
+    """A blocked report may follow a question at the same seq: both must come through."""
+    return "%s:%s" % (header.get("type"), header.get("seq"))
+
+
 def check_pm_once(agent, key):
     """One look at a PM and every open job of its repository (read fresh each time,
     so a job added later counts). A final report is returned once: `seen` remembers it."""
@@ -655,19 +664,21 @@ def check_pm_once(agent, key):
         if seq is not None:
             jobs.append((name, seq, header, mtime))
     fresh = [j for j in jobs if j[2].get("seq") == j[1] and j[2].get("type") in FINAL_TYPES
-             and state["jobs"][j[0]].get("seen") != j[1]]
+             and state["jobs"][j[0]].get("seen") != seen_mark(j[2])]
     if fresh:
         name, seq, header, _ = min(fresh, key=lambda j: j[3] or 0)
         with locked():
             current = load_state()
             if name in current["jobs"]:
-                current["jobs"][name]["seen"] = seq
+                current["jobs"][name]["seen"] = seen_mark(header)
                 save_state(current)
         return "report %s %s" % (header["type"], name)
     look = look_at(agent, pm_dir(key))
     if look != "idle":
         return look
     for name, seq, header, _ in jobs:
+        if state["jobs"][name].get("sent_seq") != seq:
+            continue  # the orchestrator is still handing it over: the message is not sent yet
         if not (header.get("seq") == seq and header.get("type") in REPORT_TYPES):
             report = os.path.join(pm_job_dir(name), "report.md")
             problem = report_problem(report, read_header(report))
@@ -678,6 +689,7 @@ def check_pm_once(agent, key):
     return None
 
 
+DELIVER_TRIES = 3  # failed deliveries in a row before the wait says deliver_failed
 _claims = [0]
 
 
@@ -724,6 +736,7 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
     # the agent may already be at its next dialog when this wait starts.
     armed = not after_blocked
     started = time.time()
+    failed_deliveries = 0
     token = claim_wait(agent)
     while max_polls is None or polls < max_polls:
         polls += 1
@@ -740,6 +753,13 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
             if e.code != "herdr_unavailable" or outage > HERDR_RETRIES:
                 raise
             result = None
+        except (OSError, StateError):
+            # Windows holds a file open for a moment, or state.json is locked a while:
+            # the next poll reads it again. Only a lasting failure ends the wait.
+            outage += 1
+            if outage > HERDR_RETRIES:
+                raise
+            result = None
         if result is not None and result.startswith("blocked"):
             if not armed and time.time() - started < BLOCKED_GRACE:
                 result = None
@@ -753,14 +773,20 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
             idle += 1
             if idle >= IDLE_CONFIRMATIONS:
                 if result != "?deliver":
-                    return result[1:]
+                    return "superseded" if superseded(agent, token) else result[1:]
                 try:
-                    deliver(agent)  # a failed delivery keeps the mail; the next round tries again
-                except HerdrError:
-                    pass  # herdr is down for a moment: the next check_once counts the outage
+                    if deliver(agent) is False:  # the mail stays; the next round tries again
+                        failed_deliveries += 1
+                    else:
+                        failed_deliveries = 0
+                except (HerdrError, OSError):
+                    pass  # a passing outage: the next check_once counts it
+                if failed_deliveries >= DELIVER_TRIES:
+                    return "deliver_failed"  # never loop silently on mail that cannot go in
                 idle = 0
         else:
-            return result
+            # a newer wait may have started while this one looked
+            return "superseded" if superseded(agent, token) else result
         if poll:
             time.sleep(poll)
     return None
@@ -1492,7 +1518,15 @@ def cmd_send(args):
     with io.open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
         f.write(u"%s: %s\n" % (sender, text))
     os.replace(path + ".tmp", path)
-    print(json.dumps({"agent": found[1], "queued": len(inbox_messages(found[1]))}))
+    if args.job:
+        # From now on the PM owes this job a report for this seq (see check_pm_once).
+        with locked():
+            current = load_state()
+            if args.job not in current["jobs"]:
+                return fail("unknown job: %s" % args.job)
+            current["jobs"][args.job]["sent_seq"] = pm_job_report(args.job)[0]
+            save_state(current)
+    print(json.dumps({"agent": found[1], "queued": True}))
     return 0
 
 
@@ -1500,14 +1534,14 @@ def deliver(agent):
     """Type the queued messages into `agent`, which the caller saw idle. They leave the
     inbox only after herdr took them, so a failed prompt loses nothing."""
     if not inbox_messages(agent):
-        return False
+        return None
     lock = "deliver-" + agent
     if not try_lock(lock):
-        return False
+        return None  # another wait delivers right now
     try:
         msgs = inbox_messages(agent)
         if not msgs:
-            return False
+            return None
         text = "OKe inbox: " + " | ".join(t for _, t in msgs)
         try:
             herdr("agent", "prompt", agent, text, "--wait", "--until", "working",
@@ -1515,12 +1549,19 @@ def deliver(agent):
         except HerdrError as e:
             if e.code == "herdr_unavailable":
                 raise
-            return False
+            # The text may be in although the wait for "working" failed: typing it
+            # again would give the agent the same instruction twice.
+            try:
+                status = herdr("agent", "get", agent).get("agent", {}).get("agent_status")
+            except HerdrError:
+                status = None
+            if status not in ("working", "blocked"):
+                return False
         done = os.path.join(inbox_dir(agent), "read")
         if not os.path.isdir(done):
             os.makedirs(done, exist_ok=True)
         for path, _ in msgs:
-            os.replace(path, os.path.join(done, os.path.basename(path)))
+            replace_file(path, os.path.join(done, os.path.basename(path)))
         return True
     finally:
         unlock(lock)
@@ -1648,6 +1689,7 @@ def build_parser():
     send = sub.add_parser("send")
     send.add_argument("agent")
     send.add_argument("text", nargs="+")
+    send.add_argument("--job")
     send.set_defaults(func=cmd_send)
 
     hook = sub.add_parser("compact-hook")

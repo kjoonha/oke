@@ -24,11 +24,17 @@ class S3Base(SpawnBase):
             f.write(text)
         return path
 
-    def pm_job(self, job, seq, report=None):
-        """The orchestrator's assignment for `job` and, optionally, the PM's report."""
+    def pm_job(self, job, seq, report=None, sent=True):
+        """The orchestrator's assignment for `job`, sent unless `sent` is False, and
+        optionally the PM's report."""
         folder = os.path.join(self.home, "jobs", job, "pm")
         self.put(os.path.join(folder, "assignment.md"),
                  "agent: pm-toy\nrole: pm\njob: %s\nseq: %d\n---\n" % (job, seq))
+        if sent:
+            s = oke.load_state()
+            if job in s["jobs"]:
+                s["jobs"][job]["sent_seq"] = seq
+                oke.save_state(s)
         if report:
             self.put(os.path.join(folder, "report.md"), report)
         return folder
@@ -165,6 +171,51 @@ class TestWaitDelivers(InboxBase):
         self.fake({"agent get": [AGENT("idle")], "agent prompt": [E("agent_not_idle")]})
         self.assertIsNone(oke.wait_loop("fix-a-w1", r, 2, poll=0, max_polls=8))
 
+    def test_mail_that_never_goes_in_ends_the_wait(self):
+        r = self.report_path()
+        self.fake({})
+        self.cli("send", "fix-a-w1", "one")
+        self.fake({"agent get": [AGENT("idle")], "agent prompt": [E("agent_not_idle")]})
+        self.assertEqual(oke.wait_loop("fix-a-w1", r, 2, poll=0, max_polls=20), "deliver_failed")
+        self.assertEqual(self.texts("fix-a-w1"), ["user: one"])
+
+    def test_a_prompt_that_timed_out_after_typing_counts_as_delivered(self):
+        self.fake({})
+        self.cli("send", "fix-a-w1", "one")
+        self.fake({"agent prompt": [E("timeout")], "agent get": [AGENT("working")]})
+        self.assertTrue(oke.deliver("fix-a-w1"))
+        self.assertEqual(self.texts("fix-a-w1"), [])
+
+    def test_a_file_error_is_a_passing_outage(self):
+        r = self.report_path()
+        self.fake({"agent get": [AGENT("working")]})
+        original, calls = oke.check_once, []
+
+        def flaky(*a, **kw):
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError("file in use")
+            return original(*a, **kw)
+        oke.check_once = flaky
+        try:
+            self.assertIsNone(oke.wait_loop("fix-a-w1", r, 2, poll=0, max_polls=3))
+        finally:
+            oke.check_once = original
+
+    def test_a_result_found_after_a_newer_wait_started_is_dropped(self):
+        r = self.report_path()
+        self.fake({})
+        original = oke.check_once
+
+        def newer_wait_meanwhile(*a, **kw):
+            oke.claim_wait("fix-a-w1")
+            return "report done"
+        oke.check_once = newer_wait_meanwhile
+        try:
+            self.assertEqual(oke.wait_loop("fix-a-w1", r, 2, poll=0, max_polls=3), "superseded")
+        finally:
+            oke.check_once = original
+
     def test_a_working_target_gets_no_mail(self):
         r = self.report_path()
         self.fake({})
@@ -203,7 +254,7 @@ class TestPmWait(InboxBase):
         self.pm_job("fix-a", 2, REPORT("done", 2))
         self.fake({"agent get": [AGENT("working")]})
         self.assertEqual(self.wait(), "report done fix-a")
-        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["seen"], 2)
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["seen"], "done:2")
         self.assertIsNone(self.wait())
 
     def test_a_job_added_later_is_seen(self):
@@ -235,7 +286,7 @@ class TestPmWait(InboxBase):
     def test_a_seen_final_report_is_not_owed(self):
         self.pm_job("fix-a", 2, REPORT("done", 2))
         s = oke.load_state()
-        s["jobs"]["fix-a"].update(seen=2, phase="awaiting_approval")
+        s["jobs"]["fix-a"].update(seen="done:2", phase="awaiting_approval")
         oke.save_state(s)
         self.fake({"agent get": [AGENT("idle")]})
         self.assertIsNone(self.wait())
@@ -255,6 +306,26 @@ class TestPmWait(InboxBase):
         self.pm_job("fix-a", 2, REPORT("waiting", 2))
         self.fake({"agent get": [AGENT("blocked")], "agent read": [{"stdout": "Allow? 1. Yes", "exit": 0}]})
         self.assertEqual(self.wait(), "blocked" + NL + "Allow? 1. Yes")
+
+    def test_a_job_whose_message_is_not_sent_yet_is_not_owed(self):
+        # the orchestrator writes the assignment, then sets the phase, then maybe revives
+        # the PM, and only then sends: that gap is no "idle, no report"
+        self.pm_job("fix-a", 3, REPORT("waiting", 2), sent=False)
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertIsNone(self.wait())
+
+    def test_send_with_a_job_marks_its_seq_as_sent(self):
+        self.pm_job("fix-a", 3, sent=False)
+        self.fake({})
+        self.assertEqual(self.cli("send", "pm-toy", "--job", "fix-a", "Job fix-a: assignment updated"), 0)
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["sent_seq"], 3)
+
+    def test_a_blocked_report_after_a_question_at_the_same_seq_comes_through(self):
+        folder = self.pm_job("fix-a", 2, REPORT("question", 2))
+        self.fake({"agent get": [AGENT("working")]})
+        self.assertEqual(self.wait(), "report question fix-a")
+        self.put(os.path.join(folder, "report.md"), REPORT("blocked", 2))
+        self.assertEqual(self.wait(), "report blocked fix-a")
 
     def test_cli_needs_a_report_or_jobs(self):
         self.fake({})

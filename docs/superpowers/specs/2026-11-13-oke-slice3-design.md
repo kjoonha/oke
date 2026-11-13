@@ -72,7 +72,9 @@ PM 폴더를 기준으로 하던 곳을 고친다.
   2. 메시지를 오래된 순서로 이어 붙여 `herdr agent prompt <agent> "OKe inbox: <from>: <text> | <from>: <text>" --wait --until working --until blocked --timeout 20000` 로 넣는다.
   3. 성공한 뒤에만 그 파일들을 `inbox/<agent>/read/` 로 옮긴다. 실패하면 파일은 그대로 두고, 다음 확인 때 다시 시도한다.
 - 수신함에 메시지가 있으면 대기는 그 agent 를 "보고 없이 쉼" 으로 판정하지 않는다. 배달될 지시가 남아 있기 때문이다.
-- 급한 발견: worker 와 reviewer 는 일하는 도중에 `oke send <parent> "URGENT <job>: <한 줄>. See <파일>."` 를 보내고 일을 계속한다. PM 은 쉴 때 받는다. PM 은 하위에게 새 지시를 주거나, 사용자 판단이 필요하면 그 job 의 `question` 보고로 올린다.
+- 배달이 연속 3번 실패하면 대기는 `deliver_failed` 로 끝난다. 조용히 계속 돌지 않게 한다. prompt 가 시간 초과로 실패했지만 대상이 이미 `working` 이면 들어간 것으로 본다 (같은 지시를 두 번 넣지 않음).
+- orchestrator 는 PM 에게 보낼 때 `oke send <pm> --job <job>` 을 쓴다. state 에 `sent_seq` 가 적히고, 그 뒤에야 `--jobs` 대기가 그 job 의 보고를 "빚진 것" 으로 본다. 지시 파일을 쓰고 메시지를 보내기까지의 틈을 "보고 없이 쉼" 으로 읽지 않기 위함이다.
+- 급한 발견: worker 는 일하는 도중에 `oke send <parent> "URGENT <job>: <한 줄>. See <파일>."` 를 보내고 일을 계속한다. reviewer 는 읽기용 git 명령만 쓸 수 있어서 보내지 못한다. 리뷰는 짧으므로 보고에 적는다. `conservative` 의 worker 는 이 명령에 권한 창이 뜬다 (창 경로로 사용자에게 간다). PM 은 쉴 때 받는다. PM 은 하위에게 새 지시를 주거나, 사용자 판단이 필요하면 그 job 의 `question` 보고로 올린다.
 - PM 이 하위에게 새 지시를 줄 때도 같다: 배정을 고치고 seq + 1, `oke send <child> ...`, 그다음 그 하위를 기다리는 대기를 건다. 대기를 마지막에 거는 이유: 그 대기가 배달을 하기 때문이다.
 
 ## 3. 대기 바꾸기
@@ -83,7 +85,7 @@ orchestrator 는 PM 마다 대기를 1개만 건다: `oke wait <pm> --jobs`. job
 
 `--jobs` 대기는 매번 `state.json` 을 다시 읽어 그 PM 저장소의 열린 job 을 모두 본다 (새 job 도 바로 포함):
 
-- job 의 `pm/report.md` 가 `pm/assignment.md` 의 seq 와 같고, 종류가 최종 (`done`, `question`, `blocked`, `failed`) 이고, state 의 그 job 의 `seen` 이 그 seq 와 다르면: `seen` 을 그 seq 로 적고 `report <type> <job>` 을 출력하고 끝난다. 여럿이면 보고 수정 시각이 가장 이른 것부터. 그래서 같은 보고를 두 번 돌려주지 않는다.
+- job 의 `pm/report.md` 가 `pm/assignment.md` 의 seq 와 같고, 종류가 최종 (`done`, `question`, `blocked`, `failed`) 이고, state 의 그 job 의 `seen` 이 `<종류>:<seq>` 와 다르면: `seen` 을 그 값으로 적고 `report <type> <job>` 을 출력하고 끝난다. 여럿이면 보고 수정 시각이 가장 이른 것부터. 그래서 같은 보고를 두 번 돌려주지 않는다. 같은 seq 에서 `question` 뒤에 `blocked` 가 와도 종류가 달라서 다시 돌려준다.
 - agent 단위 결과 (`blocked` + 화면, `gone`, herdr 오류) 는 조각 1, 2 와 같다. 이제 PM 하나에 대기가 하나라서 한 번만 나온다.
 - 보고 없이 쉼: PM 이 쉬는 것이 확인되고, 수신함이 비었고, 재시도 대기 중이 아니고, 어떤 열린 job 의 보고가 현재 seq 의 최종 보고도 `waiting` 도 아닐 때 `idle_no_report <job>`. `bad_report` 도 job 이름을 붙인다.
 - 아직 `pm/assignment.md` 가 없는 job (접수 단계) 은 보지 않는다.

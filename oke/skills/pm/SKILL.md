@@ -57,7 +57,7 @@ on: <what you wait for, when type is waiting>
 ## 배운 것
 ```
 
-   `waiting` means "I am idle on purpose for this job". Write it whenever you end a turn with a background wait running for that job. Without it the orchestrator thinks you forgot the job. Leave a report that already has the current `seq` and a final type alone until the job's next assignment.
+   `waiting` means "I am idle on purpose for this job". Write it whenever you end a turn with a background wait running for that job. Without it the orchestrator thinks you forgot the job. Leave a report that already has the current `seq` and a final type alone until the job's next assignment, with one exception: if a child stops at a dialog while that report is an open `question`, overwrite it with `blocked` and copy the open question into its 질문 section. After the dialog's `kind: dialog`, report the question again if it is still open.
 4. Write decisions into files as you make them.
 
 ## If you were restarted or compacted
@@ -69,6 +69,8 @@ For each child in `children.json` whose `job` is an open job, decide in this ord
 1. Its `report.md` has the `seq` of its `assignment.md` and type `done`, `question` or `failed`: the child finished that step. Do not start it again. Handle that report as in the table below (a finished reviewer stays finished).
 2. It is in `herdr agent list`: it keeps its work. Write that job's report as `waiting` and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If it is at a dialog the wait says `blocked`; handle it as in the table below.
 3. Otherwise: `$OKE revive <child>` (it restarts the child in its own session and tells it to re-read its assignment), then wait as in 2. Your own watcher may have revived it already; then `revive` says `alive`.
+
+Then, for each open job whose assignment `seq` is higher than the `seq` of its `pm/report.md`: you had not acted on that instruction yet. Act on it now.
 
 Never `$OKE spawn` a name that is already in `children.json`. If `git -C <repo> worktree list` already shows `oke/<job>`, use that worktree. Never create `oke/<job>-2` for a job that already has one.
 
@@ -128,6 +130,7 @@ When a child's wait finishes, act on its first line:
 | `idle_no_report`, `bad_report` | Once: `$OKE send <child> "Re-read your assignment and write a proper report."`, then wait again. Second time: report `failed` for that job |
 | `gone` | `oke wait` already revived the child three times without a new report. Report `failed` with the agent name |
 | `superseded` | A newer wait on that child replaced this one. Do nothing |
+| `deliver_failed` | Your message to the child could not be typed in three times. Report `failed` for that job and name the child |
 | exit code 1 or 2 | herdr failed or is unreachable. Report `failed` with the stderr text. Do not treat the child as gone |
 
 **A new instruction for a child:** edit its assignment (`이번 지시`, `seq` + 1), `$OKE send <child> "Assignment updated (seq <n>). Re-read <its assignment path>."`, then start its wait with the new seq. The wait types the message in once the child is idle, so start the wait last. A message must not start with `/`.
@@ -139,12 +142,13 @@ When a child's wait finishes, act on its first line:
 
 ### kind: merge
 
-Merges go one at a time, in the order the merge assignments reached you. Finish one before you start the next.
+Merges go one at a time, in the order the merge assignments reached you. Finish one before you start the next. While a merge is still in progress (for example in its conflict ladder), write the next job's report as `waiting` (`on: <the job being merged>`) and start it when that one is done.
 
+0. A job without a worktree (`commit: no` in the main checkout): its own changes are the uncommitted files there. Commit them now (`git add -A`, `git commit`) and go to step 5.
 1. In the main checkout, `git status --short` must be empty. If it is not:
    - the changes belong to another open OKe job that works without a worktree: do not merge. Write this job's report as `waiting` (`on: <that job>`), and merge after that job is done.
    - nobody's job owns them: report `question` with the file list.
-2. If the work is uncommitted (`commit: no`): commit it now in the worker's `cwd` (`git add -A`, `git commit`). Without a worktree that commit is the result: go to step 5.
+2. If the work in the worktree is uncommitted (`commit: no` with a worktree, autonomy `conservative`): commit it now in the worker's `cwd` (`git add -A`, `git commit`).
 3. Merge: in the main checkout, `git merge --no-ff oke/<job>`. No conflict: go to step 5.
 4. Conflict: `git merge --abort`. Never resolve conflicts yourself. Climb this ladder:
    1. Give the worker a new instruction: "Rebase `oke/<job>` onto `<base branch>`. Resolve the conflicts so that both changes keep their purpose. Run the 검증 명령 again, commit, and report." Write this job's report as `waiting` and wait. A dead worker is revived by the wait.
@@ -153,7 +157,7 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
 5. Update the wiki from the reports' 배운 것 (see below).
 6. Remove the worktree only when it is merged and `git status --short` there is empty: `herdr worktree remove --workspace <its workspace id>`. Otherwise leave it and say so.
 7. Close the worker and reviewer panes: `herdr pane close <pane>`.
-8. Report `done` for the job. If a merge waited for this one (step 1), start it now.
+8. Report `done` for the job. If a merge waited for this one, start it now.
 
 ### kind: answer
 

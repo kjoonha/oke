@@ -114,7 +114,7 @@ kind: plan | execute | merge | answer | dialog
    - `alive`: nothing to do.
    - dead and recorded before: `$OKE revive <agent>`. `revived` or `alive`: go on. `gave_up`: run it again with `--reset` once, then tell the user.
    - never spawned (`revive` says `unknown`): find a pane for it. `herdr pane list`: if a pane has `cwd` equal to the repository root, use `--split-from <that pane>`. Otherwise `herdr workspace create --cwd <repo> --label <repo name> --no-focus` and use `--pane <.result.root_pane.pane_id>`. Then `$OKE spawn <pm_dir>/assignment.md --split-from <pane>` (or `--pane <pane>`). If `spawn` exits 1, show its message to the user (with the screen text when it reports a dialog).
-5. `$OKE send <pm_agent> "Job <job>: assignment updated (seq <n>). Re-read <pm_job_dir>/assignment.md."` The message waits in the PM's inbox and is typed in when the PM is idle.
+5. `$OKE send <pm_agent> --job <job> "Job <job>: assignment updated (seq <n>). Re-read <pm_job_dir>/assignment.md."` The message waits in the PM's inbox and is typed in when the PM is idle. `--job` tells the wait that the PM now owes this job a report; never leave it out.
 6. Start the PM's wait (see "Wait").
 
 A message must not start with `/`: Git Bash rewrites it into a Windows path. `$OKE send` refuses it.
@@ -133,12 +133,13 @@ When it finishes, read the first line of its output. If the user speaks before i
 
 | First line | Do |
 |---|---|
-| `report <type> <job>` | Run the queue. Then start the wait again |
+| `report <type> <job>` | Start the wait again first (it keeps delivering the PM's mail while you ask the user), then run the queue |
 | `blocked` | The PM itself is at a dialog. This comes before the queue. Ask: approve once / deny / go to that pane. Send the key yourself: `herdr agent send-keys <pm> enter` to approve, `herdr agent send-keys <pm> esc` to deny, or `herdr agent focus <pm>` (then tell the user to answer the dialog there and to tell you when done, end your turn, and continue only after the user says so). Start the wait again with `--after-blocked` added. Never send a second key for the same dialog |
 | `idle_no_report <job>` | Once per job and seq: `$OKE send <pm> "Job <job>: re-read <pm_job_dir>/assignment.md, continue, and write <pm_job_dir>/report.md when done."` and wait again. Second time: tell the user |
 | `bad_report <job> ...` | Once: send the PM a message to rewrite `<pm_job_dir>/report.md` in the required format, and wait again. Second time: tell the user |
 | `gone` | OKe already revived the PM three times without a new report, or no job needs it. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / archive |
 | `superseded` | A newer wait replaced this one. Do nothing |
+| `deliver_failed` | Messages for the PM could not be typed in three times in a row. Tell the user and offer to go to the PM pane (`herdr agent focus <pm>`); the messages stay in `~/.oke/inbox/<pm>/`. Start the wait again after the user says the pane is free |
 | exit code 1 or 2 | herdr failed or is unreachable (the message is on stderr). Tell the user. Do not treat the agent as gone |
 
 ## Queue
@@ -152,7 +153,7 @@ Run the queue after every wait result, after the start procedure, and after each
 3. Handle it by `kind`:
    - `report_done`: no question. Read `<pm_job_dir>/report.md` and act as in "Flow".
    - `question`: read the report. Ask the user with `AskUserQuestion`. Give the answer to the PM (`kind: answer`).
-   - `blocked`: the report names a child agent and shows its screen. Ask: approve once / deny / go to that pane. Send the key to that child yourself (`herdr agent send-keys <child> enter` or `esc`, or `herdr agent focus <child>` and continue after the user says they are done). Then give the PM `kind: dialog` with "Dialog answered for <child>." or "Dialog denied for <child>: <what was refused>." Never send a second key for the same report.
+   - `blocked`: the report names a child agent and shows its screen. Ask: approve once / deny / go to that pane. Send the key to that child yourself (`herdr agent send-keys <child> enter` or `esc`). For "go to that pane": `herdr agent focus <child>`, `$OKE job defer <job>`, and continue that item only after the user says they are done. Then give the PM `kind: dialog` with "Dialog answered for <child>." or "Dialog denied for <child>: <what was refused>." Never send a second key for the same report.
    - `failed`: show the summary (an "API error" summary means automatic retries ran out). Ask: retry (give the PM the same step again) / give up (`$OKE job phase <job> failed`) / hold.
    - `plan`: the plan approval question (see "Flow").
    - `merge`: the merge question (see "Flow").
