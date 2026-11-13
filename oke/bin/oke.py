@@ -358,12 +358,17 @@ DIALOG_POLL = 1.0
 START_TIMEOUT_MS = 90000
 FIRST_PROMPT = ("Use the oke:{role} skill. Your assignment file is {path}. "
                 "Read it first, then follow it.")
-KINDS = ("claude", "codex", "opencode")  # orchestrator and PM are always claude
+KINDS = ("claude", "codex", "opencode")
+READY_MARKERS = {"codex": "for shortcuts"}  # the input line's hint: no dialog left
+READY_TRIES = 10  # orchestrator and PM are always claude
 # Startup screens OKe answers by itself: (text on screen, kind or None for all, keys).
 SAFE_DIALOGS = [
     ("update now", "codex", ["esc"]),  # "Update now / Skip": esc skips
     # codex's hook review panel: esc closes it without trusting, so the hook stays off
     ("hook needs review", "codex", ["esc"]),
+    # "Review hooks / Trust all / Continue without trusting": esc skips, hooks stay off.
+    # herdr shows this screen as idle, so a first prompt's Enter would pick "Review".
+    ("continue without trusting", "codex", ["esc"]),
 ]
 
 
@@ -383,7 +388,9 @@ def agent_command(kind, role, config, home, plugin_dir, folder, resume=None):
         return kind, launch_args(role, config, home, plugin_dir, resume)
     conservative = config.get("autonomy") == "conservative"
     if kind == "codex":
-        args = ["resume", resume] if resume else []
+        # Hooks off: codex asks about untrusted hooks at a moment herdr cannot see,
+        # and a prompt typed into that question can pick "Trust all" (seen live).
+        args = ["-c", "features.hooks=false"] + (["resume", resume] if resume else [])
         if role == "reviewer":
             # Reads anywhere, writes only its own OKe folder: the sandbox enforces it.
             args += ["-C", folder, "-s", "workspace-write", "-a", "never"]
@@ -511,16 +518,7 @@ def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: No
     if kind != "claude":
         # codex can show a panel after herdr already calls it ready; a prompt typed
         # then is lost (seen live). Close such panels first.
-        for _ in range(3):
-            try:
-                screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
-            except HerdrError:
-                break  # cannot look: the prompt below reports a real outage
-            keys = startup_keys(screen, kind, lambda: False)
-            if not keys:
-                break
-            herdr("agent", "send-keys", agent, *keys)
-            time.sleep(DIALOG_POLL)
+        close_startup_panels(agent, kind, READY_MARKERS.get(kind))
 
     # Wait until the first turn starts: for a few seconds after a prompt herdr still
     # says idle, and `oke wait` would read that as "idle with no report".
@@ -532,6 +530,10 @@ def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: No
             raise
     info = herdr("agent", "get", agent).get("agent", {})
     if info.get("agent_status") in ("idle", "done"):
+        if kind != "claude":
+            # codex asks about untrusted hooks only when the first prompt is submitted;
+            # herdr shows that as idle. Skip it; the prompt text stays in the input.
+            close_startup_panels(agent, kind, ready=None)
         # Seen live: the prompt text sat in the input box with its Enter lost.
         # Enter on an empty input does nothing, so one more is safe.
         herdr("agent", "send-keys", agent, "enter")
@@ -556,6 +558,23 @@ def startup_keys(screen, kind, trusted):
         if text in low and only in (None, kind):
             return keys
     return None
+
+
+def close_startup_panels(agent, kind, ready):
+    """Skip the safe screens (update offer, hook trust) shown while herdr already
+    calls the agent ready or idle. With a `ready` marker, look until the input line
+    shows it: the next screen can take a moment to draw."""
+    for _ in range(READY_TRIES if ready else 3):
+        try:
+            screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
+        except HerdrError:
+            return  # cannot look: the prompt reports a real outage
+        keys = startup_keys(screen, kind, lambda: False)
+        if keys:
+            herdr("agent", "send-keys", agent, *keys)
+        elif not ready or ready in screen.lower():
+            return
+        time.sleep(DIALOG_POLL)
 
 
 def answer_startup_dialogs(agent, kind, trusted):

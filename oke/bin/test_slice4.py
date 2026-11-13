@@ -6,6 +6,8 @@ import unittest
 from test_oke import AGENT, E, J, PANE, SpawnBase, spawn_ok
 import oke
 
+READY = "> Ask Codex to do anything\n  ? for shortcuts\n"
+
 
 class KindBase(SpawnBase):
     def setUp(self):
@@ -50,7 +52,7 @@ class TestAgentCommand(unittest.TestCase):
 
     def test_codex_resume_goes_first(self):
         _, args = oke.agent_command("codex", "worker", self.config, "/h", "/p", "/f", resume="s-1")
-        self.assertEqual(args[:2], ["resume", "s-1"])
+        self.assertEqual(args[:4], ["-c", "features.hooks=false", "resume", "s-1"])
 
     def test_opencode_auto_approves_and_resumes_by_session(self):
         kind, args = oke.agent_command("opencode", "reviewer", self.config, "/h", "/p", "/f", resume="s-2")
@@ -141,11 +143,41 @@ class TestLiveFindings(KindBase):
         path = self.write("r/report.md", u"﻿type: done\nseq: 1\n---\n")
         self.assertEqual(oke.read_header(path), {"type": "done", "seq": 1})
 
+    def test_a_screen_still_drawing_is_looked_at_again(self):
+        s = spawn_ok()
+        s["agent read"] = [{"stdout": "\n", "exit": 0},
+                           {"stdout": "  3. Continue without trusting (hooks won't run)\n", "exit": 0},
+                           {"stdout": READY, "exit": 0}]
+        s["agent send-keys"] = [J({"type": "ok"})]
+        self.assertEqual(self.spawn(kind="codex", scenario=s), 0)
+        self.assertEqual([c[3:] for c in self.argv_of("agent", "send-keys")], [["esc"]])
+
+    def test_the_hook_trust_question_is_skipped_before_the_first_prompt(self):
+        s = spawn_ok()
+        s["agent read"] = [{"stdout": "> 1. Review hooks\n  2. Trust all and continue\n"
+                                      "  3. Continue without trusting (hooks won't run)\n", "exit": 0},
+                           {"stdout": READY, "exit": 0}]
+        s["agent send-keys"] = [J({"type": "ok"})]
+        self.assertEqual(self.spawn(kind="codex", scenario=s), 0)
+        self.assertEqual(self.argv_of("agent", "send-keys")[0][3:], ["esc"])
+
+    def test_the_hook_question_after_the_first_prompt_is_skipped(self):
+        # seen live: codex asks about hooks only when the first prompt is submitted
+        s = spawn_ok()
+        s["agent read"] = [{"stdout": READY, "exit": 0},
+                           {"stdout": "  3. Continue without trusting (hooks won't run)\n", "exit": 0},
+                           {"stdout": READY, "exit": 0}]
+        s["agent prompt"] = [E("agent_prompt_stalled")]
+        s["agent get"] = [J({"agent": {"agent_status": "idle"}}), J({"agent": {"agent_status": "working"}})]
+        s["agent send-keys"] = [J({"type": "ok"})]
+        self.spawn(kind="codex", scenario=s)
+        self.assertEqual([c[3:] for c in self.argv_of("agent", "send-keys")], [["esc"], ["enter"]])
+
     def test_the_hook_review_panel_is_closed_before_the_first_prompt(self):
         # codex showed it after herdr called the agent ready; the prompt went nowhere
         s = spawn_ok()
         s["agent read"] = [{"stdout": "  1 hook needs review before it can run.\n  t trust all, esc close\n", "exit": 0},
-                           {"stdout": "> Ask Codex to do anything\n", "exit": 0}]
+                           {"stdout": READY, "exit": 0}]
         s["agent send-keys"] = [J({"type": "ok"})]
         self.assertEqual(self.spawn(kind="codex", scenario=s), 0)
         names = [" ".join(c[:2]) for c in self.calls()]
