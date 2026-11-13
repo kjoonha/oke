@@ -34,7 +34,7 @@ Never edit `~/.oke/state.json` by hand. Use `$OKE job ...`.
 
 1. Settle three things, asking only what is unclear: the repository path, the wanted result, the success criteria.
 2. Pick a job name: lowercase letters, digits and `-`, at most 24 characters, starting with a letter.
-3. `$OKE job new <job> --repo <path>`. It prints `job_dir`, `repo`, `pm_dir`, `pm_agent`, `wiki`. Use these values as they are; do not build the paths yourself.
+3. `$OKE job new <job> --repo <path>`. It prints `job_dir`, `repo`, `pm_dir`, `pm_agent`, `wiki`. Use these values as they are; do not build the paths yourself. If it fails because the name or its branch already exists, pick another name (add `-2`).
 4. Write `<job_dir>/intake.md`:
 
 ```
@@ -88,11 +88,11 @@ When it finishes, read the first line of its output. If the user speaks before i
 |---|---|
 | `report done` | Read `<pm_dir>/report.md`, continue the flow below |
 | `report question` | Ask the user with `AskUserQuestion`, write the answer into a new assignment (`kind: answer`, seq + 1), prompt the PM, wait again |
-| `report blocked` | The report names a child agent and shows its screen. Ask: approve once / deny / go to that pane. Then send the key yourself: `herdr agent send-keys <child> enter` to approve, `herdr agent send-keys <child> esc` to deny, or `herdr agent focus <child>`. Then tell the PM and let its turn finish before you wait: `herdr agent prompt <pm> "Dialog answered for <child>. Continue." --wait --timeout 120000`. The PM rewrites its report as `waiting`; only then start the wait again. Never send a second key for the same report |
+| `report blocked` | The report names a child agent and shows its screen. Ask: approve once / deny / go to that pane. Then send the key yourself: `herdr agent send-keys <child> enter` to approve, `herdr agent send-keys <child> esc` to deny, or `herdr agent focus <child>`. For "go to that pane", tell the user to answer the dialog there and to tell you when done, end your turn, and continue only after the user says so. Then tell the PM and let its turn finish before you wait: `herdr agent prompt <pm> "Dialog answered for <child>. Continue." --wait --timeout 120000`. The PM rewrites its report as `waiting`; only then start the wait again. Never send a second key for the same report |
 | `report failed` | Show the summary. Ask how to proceed. `$OKE job phase <job> failed` if the user gives up |
-| `blocked` | The PM itself is at a dialog. Same question, same keys, target the PM. Wait again with `--after-blocked` added |
-| `idle_no_report` | Once: `herdr agent prompt <pm> "Re-read your assignment, continue, and write your report when done."` and wait again. Second time: tell the user |
-| `bad_report ...` | Once: prompt the PM to rewrite its report in the required format. Second time: tell the user |
+| `blocked` | The PM itself is at a dialog. Same question, same keys, target the PM (for "go to that pane", continue only after the user says they are done). Wait again with `--after-blocked` added |
+| `idle_no_report` | Once: `herdr agent prompt <pm> "Re-read your assignment, continue, and write your report when done." --wait --until working --until blocked --timeout 20000` and wait again. Second time: tell the user |
+| `bad_report ...` | Once: prompt the PM to rewrite its report in the required format (same prompt options as above). Second time: tell the user |
 | `gone` | Ask: resume / archive |
 | exit code 1 or 2 | herdr failed or is unreachable (the message is on stderr). Tell the user. Do not treat the agent as gone |
 

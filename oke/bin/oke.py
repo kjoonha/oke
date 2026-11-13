@@ -177,7 +177,7 @@ def repo_key(path):
     common = native_path(out.decode("utf-8", "replace").strip())
     if not os.path.isabs(common):
         common = os.path.join(cwd, common)
-    return normalize_path(os.path.abspath(common))
+    return normalize_path(os.path.realpath(common))
 
 
 def slug(text, limit=24):
@@ -280,14 +280,21 @@ def plugin_root():
 
 
 def edit_rules(path, windows=None):
-    """Permission rules that let a session write under `path` only (see docs/probe-results.md)."""
+    """Permission rules that let a session write under `path` only (see docs/probe-results.md).
+    A symlinked path also gets rules for its resolved form: which one Claude Code matches is unverified."""
     if windows is None:
         windows = os.name == "nt"
-    p = native_path(path.replace("\\", "/"), windows).rstrip("/")
-    if windows and re.match(r"^[a-zA-Z]:/", p):
-        drive, rest = p[0], p[2:]
-        return ["Edit(//%s%s/**)" % (drive.lower(), rest), "Edit(//%s:%s/**)" % (drive.upper(), rest)]
-    return ["Edit(/%s/**)" % p]
+    rules = []
+    resolved = [os.path.realpath(path)] if os.path.exists(path) else []
+    for one in [path] + resolved:
+        p = native_path(one.replace("\\", "/"), windows).rstrip("/")
+        if windows and re.match(r"^[a-zA-Z]:/", p):
+            drive, rest = p[0], p[2:]
+            new = ["Edit(//%s%s/**)" % (drive.lower(), rest), "Edit(//%s:%s/**)" % (drive.upper(), rest)]
+        else:
+            new = ["Edit(/%s/**)" % p]
+        rules += [r for r in new if r not in rules]
+    return rules
 
 
 def launch_args(role, config, home, plugin_dir, resume=None):
@@ -457,7 +464,8 @@ def cmd_spawn(args):
 FINAL_TYPES = ("done", "question", "blocked", "failed")
 REPORT_TYPES = FINAL_TYPES + ("waiting",)
 IDLE_CONFIRMATIONS = 3
-BLOCKED_GRACE = 10  # seconds
+BLOCKED_GRACE = 10
+HERDR_RETRIES = 30  # consecutive herdr_unavailable polls (about a minute) before a wait gives up  # seconds
 
 
 def check_once(agent, report, seq):
@@ -475,7 +483,12 @@ def check_once(agent, report, seq):
         raise
     status = info.get("agent_status")
     if status == "blocked":
-        return "blocked\n" + herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
+        try:
+            return "blocked\n" + herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
+        except HerdrError as e:
+            if e.code in ("agent_not_found", "pane_not_found"):
+                return "gone"
+            raise
     if status not in ("idle", "done"):
         return None
     if current and header.get("type") == "waiting":
@@ -498,6 +511,7 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
     verdict needs IDLE_CONFIRMATIONS consecutive polls."""
     idle = 0
     polls = 0
+    outage = 0
     # after_blocked: a key was just sent to a dialog the caller already reported. Do not
     # report that dialog again while herdr still shows the old state. Only a short grace:
     # the agent may already be at its next dialog when this wait starts.
@@ -505,7 +519,14 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
     started = time.time()
     while max_polls is None or polls < max_polls:
         polls += 1
-        result = check_once(agent, report, seq)
+        try:
+            result = check_once(agent, report, seq)
+            outage = 0
+        except HerdrError as e:
+            outage += 1
+            if e.code != "herdr_unavailable" or outage > HERDR_RETRIES:
+                raise
+            result = None
         if result is not None and result.startswith("blocked"):
             if not armed and time.time() - started < BLOCKED_GRACE:
                 result = None
@@ -684,6 +705,9 @@ def cmd_job(args):
             key = repo_key(args.repo)
         except ValueError as e:
             return fail(str(e))
+        branch = "refs/heads/oke/" + args.slug
+        if subprocess.call(["git", "-C", native_path(args.repo), "show-ref", "--verify", "--quiet", branch]) == 0:
+            return fail("branch oke/%s already exists (an earlier job): pick another job name" % args.slug)
         os.makedirs(job_dir)
         state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None}
         save_state(state)

@@ -35,7 +35,7 @@ updated: <ISO time>
 Before every turn ends, overwrite `report.md` in your folder:
 
 ```
-type: done | question | blocked | failed | waiting
+type: done | question | failed | waiting
 seq: <seq from your assignment>
 on: <what you wait for, when type is waiting>
 ---

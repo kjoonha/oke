@@ -105,8 +105,9 @@ When a wait finishes, act on its first line:
 |---|---|
 | worker `report done` | If 검증 출력 is missing or does not show the command passing, send it back. Otherwise start the review |
 | worker `report question` | Answer from the plan, the code or the wiki if you can (autonomy `balanced` or `full`). If it is about what the user wants, or autonomy is `conservative`, report `question` upward and wait for `kind: answer` |
-| `blocked`, `report blocked` | Report `type: blocked` upward: name the child agent and paste the screen text. End your turn without starting a wait. When you are prompted "Dialog answered for <child>", rewrite your report as `waiting` and start the child wait again with `--after-blocked` added |
-| `idle_no_report`, `bad_report` | Once: prompt the child to re-read its assignment and write a proper report. Second time: report `failed` |
+| `blocked` | Report `type: blocked` upward: name the child agent and paste the screen text. End your turn without starting a wait. When you are prompted "Dialog answered for <child>", rewrite your report as `waiting` and start the child wait again with `--after-blocked` added |
+| `report blocked` | Children do not use this type. Treat it as `report question` |
+| `idle_no_report`, `bad_report` | Once: `herdr agent prompt <child> "Re-read your assignment and write a proper report." --wait --until working --until blocked --timeout 20000`, then wait again. Second time: report `failed` |
 | `gone` | Report `failed` with the agent name |
 | exit code 1 or 2 | herdr failed or is unreachable. Report `failed` with the stderr text. Do not treat the child as gone |
 

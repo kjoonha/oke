@@ -17,6 +17,9 @@
 - [ ] herdr pane 안에서 `echo $HERDR_ENV` 가 `1`
 - [ ] 아래 7개가 모두 도움말을 출력한다 (오류 없이). 하나라도 없으면 herdr 를 올려야 한다.
   - `herdr agent start --help`, `herdr agent prompt --help`, `herdr agent wait --help`, `herdr agent read --help`, `herdr agent send-keys --help`, `herdr pane split --help`, `herdr worktree create --help`
+- [ ] `cd ~ && pwd -P` 와 `echo $HOME` 이 같은가. 다르면 home 이 symlink 다. 이때 reviewer 가 report.md 를 못 쓰면 ("보고 없이 쉼" 두 번) 그 사실을 기억해 온다.
+- [ ] `python3 -c "import sys; print(sys.getfilesystemencoding())"` 가 `utf-8` 인가. `ascii` 면 저장소 경로와 job 내용에 한글을 쓰지 않는다 (또는 `setenv LANG en_US.UTF-8`).
+- [ ] 단위 테스트에서 symlink 테스트 2개가 skip 되지 않고 통과하는가 (개인 PC Windows 에서는 skip 됨).
 
 ## 3. 시작
 

@@ -20,6 +20,7 @@ class Base(unittest.TestCase):
         self.home = os.path.join(self.tmp, "home")
         os.makedirs(self.home)
         self._env = dict(os.environ)
+        self._grace = oke.BLOCKED_GRACE
         os.environ["OKE_HOME"] = self.home
         for k in ("HERDR_ENV", "HERDR_PANE_ID", "OKE_HERDR", "FAKE_HERDR_DIR"):
             os.environ.pop(k, None)
@@ -27,6 +28,7 @@ class Base(unittest.TestCase):
         self.err = ""
 
     def tearDown(self):
+        oke.BLOCKED_GRACE = self._grace
         os.environ.clear()
         os.environ.update(self._env)
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -168,6 +170,38 @@ class TestState(Base):
         self.assertNotIn("fix-a", oke.load_state()["jobs"])
         self.assertEqual(len(os.listdir(os.path.join(self.home, "archive"))), 1)
         self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "fix-a")))
+
+    def test_job_new_refuses_a_name_whose_branch_exists(self):
+        # an archived job keeps its branch; reusing the name would review and merge the old branch
+        repo = self.git_repo("r")
+        self.git(repo, "branch", "oke/fix-a")
+        self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 1)
+        self.assertIn("oke/fix-a", self.err)
+        self.assertNotIn("fix-a", oke.load_state()["jobs"])
+
+    def symlink_or_skip(self, target, link):
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except (OSError, NotImplementedError, AttributeError):
+            self.skipTest("symlinks not available")
+
+    def test_repo_key_same_through_a_symlink(self):
+        repo = self.git_repo("real/r")
+        self.symlink_or_skip(self.path("real"), self.path("link"))
+        if os.path.realpath(self.path("link")) == self.path("link"):
+            self.skipTest("realpath does not resolve symlinks here")
+        self.assertEqual(oke.repo_key(os.path.join(self.path("link"), "r")), oke.repo_key(repo))
+
+    def test_edit_rules_cover_the_resolved_path(self):
+        os.makedirs(self.path("real"))
+        self.symlink_or_skip(self.path("real"), self.path("link"))
+        real = os.path.realpath(self.path("link"))
+        if real == self.path("link"):
+            self.skipTest("realpath does not resolve symlinks here")
+        rules = oke.edit_rules(self.path("link"))
+        for r in oke.edit_rules(real):
+            self.assertIn(r, rules)
+        self.assertIn(oke.edit_rules(self.path("link"))[0], rules)
 
     def test_job_new_rejects_bad_slug(self):
         repo = self.git_repo("r")
@@ -533,7 +567,20 @@ class TestWait(Base):
         self.fake({"agent get": [E("agent_not_found")]})
         self.assertEqual(oke.check_once("a", self.path("none.md"), 2), "gone")
 
+    def test_gone_when_agent_dies_before_read(self):
+        self.fake({"agent get": [AGENT("blocked")], "agent read": [E("agent_not_found")]})
+        self.assertEqual(oke.check_once("a", self.path("none.md"), 2), "gone")
+
+    def test_wait_survives_a_short_herdr_outage(self):
+        down = {"stdout": "connection refused", "exit": 1}
+        self.fake({"agent get": [down, down, AGENT("blocked")],
+                   "agent read": [{"stdout": "Do you want to proceed?", "exit": 0}]})
+        out = oke.wait_loop("a", self.path("none.md"), 2, poll=0, max_polls=10)
+        self.assertEqual(out.splitlines()[0], "blocked")
+
     def test_herdr_down_is_exit_2_not_gone(self):
+        self.addCleanup(setattr, oke, "HERDR_RETRIES", oke.HERDR_RETRIES)
+        oke.HERDR_RETRIES = 2
         self.fake({"agent get": [{"stdout": "connection refused", "exit": 1}]})
         code = self.cli("wait", "a", "--report", self.path("none.md"), "--seq", "2", "--poll", "0")
         self.assertEqual(code, 2)
@@ -773,10 +820,15 @@ class TestReviewFixes(SpawnBase):
 
     def test_after_blocked_reports_a_dialog_that_outlives_the_grace_period(self):
         # a second dialog can already be up when the wait starts: it must not be ignored forever
-        oke.BLOCKED_GRACE = 0.3
+        # fake clock: each time.time() call advances 1s, so the result does not depend on machine speed
+        oke.BLOCKED_GRACE = 3
+        ticks = iter(range(1000))
+        real_time = oke.time.time
+        oke.time.time = lambda: float(next(ticks))
+        self.addCleanup(setattr, oke.time, "time", real_time)
         self.fake({"agent get": [AGENT("blocked")],
                    "agent read": [{"stdout": "Do you want to proceed?", "exit": 0}]})
-        out = oke.wait_loop("a", self.path("none.md"), 2, poll=0.05, max_polls=200, after_blocked=True)
+        out = oke.wait_loop("a", self.path("none.md"), 2, poll=0, max_polls=200, after_blocked=True)
         self.assertEqual(out.splitlines()[0], "blocked")
         self.assertGreater(len(self.argv_of("agent", "get")), 1)
 
