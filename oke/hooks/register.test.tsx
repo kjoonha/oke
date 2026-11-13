@@ -98,6 +98,27 @@ test('outside herdr the mod does nothing', async ($, on) => {
   expect(runs.length).toBe(0)
 })
 
+test('a session that is no OKe agent ticks once a minute, a PM every 10 s', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  const runs: Run[] = []
+  engine(on, runs, [])
+  const ticks = () => runs.filter(r => r.argv.includes('tick')).length
+
+  tickRole = null as any
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const first = ticks()
+  await clock.advance(50_000)
+  expect(ticks()).toBe(first)
+  await clock.advance(10_000)
+  expect(ticks()).toBe(first + 1)
+  tickRole = 'pm'  // spawn recorded it: from the next look on it is a PM
+  await clock.advance(60_000)
+  await clock.advance(10_000)
+  expect(ticks()).toBe(first + 3)
+  tickRole = 'worker'
+})
+
 const PANE = {
   plugin: 'oke', component: 'Pane', requestId: 'oke-board',
   props: { title: 'OKe board', isFocused: false, bodyColumns: 30, placement: 'dock',

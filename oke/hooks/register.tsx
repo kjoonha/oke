@@ -9,6 +9,7 @@ import type { BoardNode, BoardRepo, Since } from '../types'
 
 const PANE = 'oke-board'
 const TICK_MS = 10_000
+const UNKNOWN_EVERY = 6 // ticks: a session that is not (yet) an OKe agent is checked every 60 s
 const board = atom({ plugin: 'oke', key: 'board' } as const, [] as BoardRepo[], { shape: 'board-1' })
 const expanded = atom({ plugin: 'oke', key: 'expanded' } as const, [] as string[], { shape: 'expanded-1' })
 const since = atom({ plugin: 'oke', key: 'since' } as const, {} as Record<string, Since>, { shape: 'since-1' })
@@ -121,9 +122,15 @@ export const register: Register = on => {
       const opened = await openBoard($)
       if (!opened.isPlaced) $.ui.status('OKe: /oke-board opens the board')
     }
-    // Workers and reviewers watch no one; an unknown pane may become a PM once spawn records it.
+    // Workers and reviewers watch no one. An unknown pane may become a PM once spawn
+    // records it, or the orchestrator after /oke:start: look at it only every minute,
+    // so the many non-OKe sessions inside herdr do not run python every 10 s.
+    let skipped = 0
     $.clock.every(TICK_MS, () => {
-      if (role !== 'worker' && role !== 'reviewer') void tick($)
+      if (role === 'worker' || role === 'reviewer') return
+      if (role === null && ++skipped < UNKNOWN_EVERY) return
+      skipped = 0
+      void tick($)
     })
     return r
   })

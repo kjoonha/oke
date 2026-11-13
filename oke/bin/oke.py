@@ -294,14 +294,24 @@ def herdr_argv():
     return value.split()
 
 
+HERDR_TIMEOUT = 180  # seconds; longer than any --timeout OKe passes (agent start: 90 s)
+
+
 def run_herdr(args):
-    """Return (exit code, stdout, stderr). Raises HerdrError when herdr cannot run."""
+    """Return (exit code, stdout, stderr). Raises HerdrError when herdr cannot run
+    or hangs: a hung herdr must not freeze a wait or hold a lock forever."""
     try:
         p = subprocess.Popen(herdr_argv() + list(args), stdin=subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = p.communicate()
     except (OSError, ValueError) as e:
         raise HerdrError("herdr_unavailable", str(e))
+    try:
+        out, err = p.communicate(timeout=HERDR_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.communicate()
+        raise HerdrError("herdr_unavailable", "herdr %s did not answer in %d s"
+                         % (" ".join(args[:2]), HERDR_TIMEOUT))
     return (p.returncode,
             out.decode("utf-8", "replace").replace("\r\n", "\n"),
             err.decode("utf-8", "replace").replace("\r\n", "\n"))
@@ -408,6 +418,9 @@ def agent_command(kind, role, config, home, plugin_dir, folder, resume=None):
     return kind, args
 REVIEWER_TOOLS = ["Read", "Grep", "Glob", "Skill", "Bash(git diff:*)", "Bash(git log:*)",
                   "Bash(git show:*)", "Bash(git status:*)"]
+# shortcut: relies on `*` matching anywhere in a Bash rule (not probed live, see
+# docs/probe-results.md); the PM's `git status` check after a review is the backstop.
+REVIEWER_DENIED = ["Bash(git *--output*)"]
 
 
 def plugin_root():
@@ -442,6 +455,8 @@ def launch_args(role, config, home, plugin_dir, resume=None):
         # dontAsk denies everything not listed without stopping at a dialog.
         args += ["--permission-mode", "dontAsk", "--allowedTools"] + REVIEWER_TOOLS
         args += edit_rules(home) + edit_rules(config["wiki_path"])
+        # `git diff/log/show --output=<file>` writes a file: deny rules beat allow rules
+        args += ["--disallowedTools"] + REVIEWER_DENIED
     elif config.get("autonomy") == "conservative":
         # Ask for everything except the agent's own OKe files; without this every
         # report and board write would be a dialog.
@@ -945,6 +960,12 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                     result = None  # failed counts toward the revive limit and is tried again
             except (OSError, StateError):
                 result = None  # state.json busy for a moment: look again next poll
+            except HerdrError as e:
+                # an outage during a revive is the same passing outage as during a look
+                outage += 1
+                if e.code != "herdr_unavailable" or outage > HERDR_RETRIES:
+                    raise
+                result = None
         if result is None:
             idle = 0
         elif result.startswith("?"):
@@ -1261,6 +1282,8 @@ def revive_locked(name):
         info = relaunch(state, role, key, name, record, folder)
     except (HerdrError, DialogError) as e:
         if isinstance(e, HerdrError) and e.code == "herdr_unavailable":
+            # herdr was down, the agent did not crash again: do not count this try
+            update_record(role, key, name, {"revives": revives})
             raise
         log_event("revive_failed %s: %s" % (name, (str(e).strip().splitlines() or [""])[0]))
         return "failed"
@@ -1447,8 +1470,13 @@ def find_agent(record, agents, key):
 
 
 def cmd_status(args):
+    # herdr calls are slow (seconds each): make them before taking the lock, so
+    # spawn and the waits do not time out on it
+    herdr_info = None
+    if os.environ.get("HERDR_ENV") == "1":
+        herdr_info = (missing_commands(), list_agents())
     with locked():
-        return status_locked(args)
+        return status_locked(args, herdr_info)
 
 
 def own_launch(pane, agents):
@@ -1472,7 +1500,7 @@ def own_launch(pane, agents):
     return found
 
 
-def status_locked(args):
+def status_locked(args, herdr_info):
     state = load_state(recover=True)
     home = oke_home()
     result = {"herdr": {"inside": os.environ.get("HERDR_ENV") == "1", "missing": []},
@@ -1485,8 +1513,7 @@ def status_locked(args):
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
-    result["herdr"]["missing"] = missing_commands()
-    agents = list_agents()
+    result["herdr"]["missing"], agents = herdr_info
     names = set(a.get("name") for a in agents if a.get("name"))
     changed = False
 
@@ -1524,7 +1551,12 @@ def status_locked(args):
 
     here = os.environ.get("HERDR_PANE_ID")
     recorded = state["orchestrator"].get("pane")
-    if recorded and recorded != here and any(a.get("pane_id") == recorded for a in agents):
+    there = [a for a in agents if a.get("pane_id") == recorded]
+    orch = state["orchestrator"]
+    # pane ids come back after a herdr restart: with a known name or session, the
+    # agent now in that pane must be the recorded orchestrator to count as a conflict
+    if recorded and recorded != here and there and (
+            not (orch.get("agent") or orch.get("session")) or same_agent(orch, there[0])):
         result["orchestrator_conflict"] = recorded
 
     code = 0
@@ -1608,6 +1640,22 @@ def latest_report(job_dir, pattern):
     return max(found) if found else None
 
 
+def review_verdict(path):
+    """The verdict on the first non-empty line after the header's `---`, or None.
+    Only that line counts: a finding in the body may quote `verdict: pass`."""
+    try:
+        with io.open(path, encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+    except (IOError, OSError, UnicodeDecodeError):
+        return None
+    if "---" not in [l.strip() for l in lines]:
+        return None
+    body = lines[[l.strip() for l in lines].index("---") + 1:]
+    first = next((l.strip() for l in body if l.strip()), "")
+    m = re.match(r"^verdict:\s*(\S+)$", first)
+    return m.group(1) if m else None
+
+
 def git_out(cwd, *args):
     """(exit code, stripped stdout) of one git command."""
     p = subprocess.run(["git", "-C", cwd] + list(args), stdout=subprocess.PIPE,
@@ -1633,9 +1681,7 @@ def merge_job(job):
     review = latest_report(job_dir, r"-rv\d*$")
     if not review:
         return fail("job %s has no review report: have the reviewer review the branch first" % job)
-    with io.open(review[1], encoding="utf-8-sig") as f:
-        verdict = re.search(r"^verdict:\s*(\S+)", f.read(), re.M)
-    if not verdict or verdict.group(1) != "pass":
+    if review_verdict(review[1]) != "pass":
         return fail("the last review of %s did not pass: %s" % (job, review[1].replace("\\", "/")))
     if worker and worker[0] > review[0]:
         return fail("the worker reported after the last review (a rebase or a fix): give the reviewer "
@@ -1688,6 +1734,88 @@ def merge_job(job):
     return 2
 
 
+# Phases that pass a user gate may only be entered from the phase before that gate
+# (or stay). Not proof of a user's approval, but a PM or an orchestrator slip cannot
+# skip the approval step. Phases not listed here are free.
+PHASE_FROM = {
+    "planning": ("intake", "planning", "awaiting_approval", "working", "reviewing", "awaiting_merge"),
+    "working": ("awaiting_approval", "working", "reviewing", "awaiting_merge", "merging"),
+    "merging": ("awaiting_merge", "merging"),
+    "done": ("merging", "done"),
+}
+
+
+# ---------------------------------------------------------------- interview
+
+DIMENSIONS = (("goal", 0.40), ("constraints", 0.30), ("criteria", 0.30))
+INTERVIEW_THRESHOLD = 0.2  # ambiguity at or below this ends the interview
+INTERVIEW_MAX_ROUNDS = 10
+STALL_ROUNDS, STALL_BAND = 3, 0.05
+CHALLENGES = {3: "contrarian", 5: "simplifier"}  # round -> one-time challenge question
+
+
+def interview_path(job):
+    return os.path.join(oke_home(), "jobs", job, "interview.json")
+
+
+def ambiguity(scores):
+    return round(1 - sum(scores[name] * weight for name, weight in DIMENSIONS), 3)
+
+
+def interview_problem(job):
+    """Why job `job` may not start planning yet, or None."""
+    data = read_json(interview_path(job), None)
+    if not isinstance(data, dict) or not data.get("done"):
+        return ("job %s has no finished interview: run `oke interview %s --goal .. --constraints .. "
+                "--criteria ..` until it says done" % (job, job))
+    return None
+
+
+def cmd_interview(args):
+    """One round of the intake interview: record the orchestrator's clarity scores
+    (and the question just answered), compute ambiguity, say what to ask next."""
+    path = interview_path(args.job)
+    if not os.path.isdir(os.path.dirname(path)):
+        return fail("unknown job: %s (run `oke job new` first)" % args.job)
+    scores = {}
+    for name, _ in DIMENSIONS:
+        value = getattr(args, name)
+        if not 0.0 <= value <= 1.0:
+            return fail("--%s must be between 0 and 1" % name)
+        scores[name] = value
+    config = load_config()
+    threshold = float(config.get("interview_threshold", INTERVIEW_THRESHOLD))
+    max_rounds = int(config.get("interview_max_rounds", INTERVIEW_MAX_ROUNDS))
+    data = read_json(path, None)
+    if not isinstance(data, dict):
+        data = {"rounds": [], "done": False}
+    if data.get("done"):
+        return fail("the interview of %s is already done (%s)" % (args.job, data.get("reason")))
+    number = len(data["rounds"])  # round 0 scores the user's first request, no question
+    amb = ambiguity(scores)
+    data["rounds"].append({"round": number, "scores": scores, "ambiguity": amb,
+                           "question": args.question, "answer": args.answer})
+    if amb <= threshold:
+        reason = "clear"
+    elif args.stop:
+        reason = "user_stop"
+    elif number >= max_rounds:
+        reason = "round_cap"
+    else:
+        reason = None
+    data.update(done=reason is not None, reason=reason, threshold=threshold)
+    write_json_atomic(path, data)
+    last = [r["ambiguity"] for r in data["rounds"][-STALL_ROUNDS:]]
+    out = {"job": args.job, "round": number, "ambiguity": amb, "threshold": threshold,
+           "scores": scores, "done": data["done"], "reason": reason,
+           # the weakest dimension weighs most: it is what the next question is about
+           "weakest": min(DIMENSIONS, key=lambda d: (scores[d[0]] - 1) * d[1])[0],
+           "stalled": len(last) == STALL_ROUNDS and max(last) - min(last) <= STALL_BAND,
+           "challenge": None if reason else CHALLENGES.get(number)}
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
 def job_locked(args):
     state = load_state()
     home = oke_home()
@@ -1727,6 +1855,15 @@ def job_locked(args):
     if args.action == "phase":
         if args.phase not in PHASES:
             return fail("bad phase %r: one of %s" % (args.phase, ", ".join(PHASES)))
+        now = state["jobs"][args.slug].get("phase")
+        allowed = PHASE_FROM.get(args.phase)
+        if allowed is not None and now not in allowed:
+            return fail("job %s cannot go from %s to %s: allowed only from %s"
+                        % (args.slug, now, args.phase, ", ".join(allowed)))
+        if args.phase == "planning" and now == "intake":  # a re-plan needs no new interview
+            problem = interview_problem(args.slug)
+            if problem:
+                return fail(problem)
         state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
         save_state(state)
         return 0
@@ -1796,8 +1933,8 @@ def cmd_send(args):
             me, _ = whoami(state, pane)
         except HerdrError:
             me = None
-        if me:
-            sender = me[1]
+        # a pane OKe does not know is not proof of the user: say so, never "user"
+        sender = me[1] if me else "unverified (pane %s)" % pane
     if args.job:
         # From now on the PM owes this job a report for this seq (see check_pm_once).
         # Recorded before the message: a crash in between leaves an idle_no_report
@@ -1986,6 +2123,15 @@ def build_parser():
     retry.add_argument("--error", default="")
     retry.add_argument("--clear", action="store_true")
     retry.set_defaults(func=cmd_api_retry)
+
+    interview = sub.add_parser("interview")
+    interview.add_argument("job")
+    for name, _ in DIMENSIONS:
+        interview.add_argument("--" + name, type=float, required=True)
+    interview.add_argument("--question")
+    interview.add_argument("--answer")
+    interview.add_argument("--stop", action="store_true", help="the user chose to stop asking")
+    interview.set_defaults(func=cmd_interview)
 
     pending = sub.add_parser("pending")
     pending.set_defaults(func=cmd_pending)

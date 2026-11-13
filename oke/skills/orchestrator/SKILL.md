@@ -56,20 +56,44 @@ The OKe mod in every agent does this without you:
 
 ## Intake
 
-1. Settle three things, asking only what is unclear: the repository path, the wanted result, the success criteria.
+1. Settle the repository path (ask only if it is unclear).
 2. Pick a job name: lowercase letters, digits and `-`, at most 24 characters, starting with a letter. It must differ from every open job.
 3. `$OKE job new <job> --repo <path>`. It prints `job_dir`, `repo`, `pm_dir`, `pm_job_dir`, `pm_agent`, `wiki`. Use these values as they are; do not build the paths yourself. If it fails because the name or its branch already exists, pick another name (add `-2`).
-4. Write `<job_dir>/intake.md`:
+4. Interview the user until the request is clear (see "Interview"). `$OKE job phase <job> planning` refuses a job whose interview is not done.
+5. Write `<job_dir>/intake.md`:
 
 ```
 job: <job>
 repo: <repo path>
+ambiguity: <the last ambiguity from the interview>
 ---
 ## 원하는 결과
-## 성공 기준
+## 제약          (what must not change, limits, required tools, scope boundaries)
+## 하지 않을 것
+## 성공 기준     (how the user will judge it; testable where possible)
+## 인터뷰        (one line per round: question -> answer)
 ## 사용자 원문
 <the user's words, verbatim, not summarized>
 ```
+
+### Interview
+
+The PM plans from intake.md alone, so a vague request becomes a wrong plan. Measure how clear the request is and ask only about the weakest part.
+
+1. Score what you know so far, each from 0.0 to 1.0:
+   - `goal`: what result the user wants and what changes. 1.0: you could state it in one sentence and the user would agree.
+   - `constraints`: what must not change, limits, required tools or style, what is out of scope.
+   - `criteria`: how the user will judge success; a test, a command, an observable behavior.
+   Score strictly: 0.9 or more only when a stranger could act on it without guessing. Facts the repository shows (structure, build commands, conventions) are not the user's job: the PM reads the code while planning. Never ask the user about them and do not lower a score for them.
+2. Run `$OKE interview <job> --goal <g> --constraints <c> --criteria <s>`. The first run scores the user's first request (round 0, no question). Later runs add `--question "<what you asked>" --answer "<what the user chose or wrote>"`. It prints `ambiguity` (1 - 0.40 goal - 0.30 constraints - 0.30 criteria), `threshold` (default 0.2), `weakest`, `done`, `stalled` and `challenge`.
+3. `done` true: go to step 5 of Intake. A clear request is done at round 0 with no question.
+4. Otherwise ask one question with `AskUserQuestion` about the `weakest` dimension. Say in one line why (for example "ambiguity 45%, success criteria are the least clear"). Give 2 to 4 concrete options, your recommended one first with "(Recommended)", and always a last option "Enough, start planning". Then score again and run step 2 with the question and the answer; when the user picked "Enough, start planning", add `--stop`.
+   - `challenge: contrarian`: this once, ask instead whether a core assumption of the request is wrong (the problem may sit elsewhere).
+   - `challenge: simplifier`: this once, ask what could be left out and still satisfy the user.
+   - `stalled` true: the score stopped moving. Ask whether to start planning as it is or to describe the goal differently.
+5. The interview also ends by itself at the round cap (`interview_max_rounds` in config, default 10). Then name the least clear dimension in intake.md under 성공 기준 or 제약 as an open risk.
+
+Autonomy does not change the interview: it collects what only the user knows.
 
 A new job while others run is normal: take it in at once.
 

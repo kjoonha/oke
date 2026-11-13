@@ -403,7 +403,7 @@ class TestPmWait(InboxBase):
         self.assertEqual(self.wait(), "idle_no_report fix-a")
 
     def test_a_pm_without_open_jobs_ends_the_wait(self):
-        self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0)
+        self.advance("fix-a", "done")
         self.fake({"agent get": [AGENT("idle")]})
         self.assertEqual(self.wait(), "no_jobs")
 
