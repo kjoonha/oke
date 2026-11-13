@@ -67,7 +67,7 @@ Your folder may already hold `board.md` and `children.json` from before. Read bo
 For each child in `children.json` whose `job` is an open job, decide in this order:
 
 1. Its `report.md` has the `seq` of its `assignment.md` and type `done`, `question` or `failed`: the child finished that step. Do not start it again. Handle that report as in the table below (a finished reviewer stays finished).
-2. It is in `herdr agent list`: it keeps its work. Write that job's report as `waiting` (unless it already has the current seq and type `question` or `blocked`: leave that one) and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If it is at a dialog the wait says `blocked`; handle it as in the table below.
+2. It is in `herdr agent list`: it keeps its work. Write that job's report as `waiting` (unless it already has the current seq and type `question`, `blocked` or `failed`: leave that one) and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If it is at a dialog the wait says `blocked`; handle it as in the table below.
 3. Otherwise: `$OKE revive <child>` (it restarts the child in its own session and tells it to re-read its assignment), then wait as in 2. Your own watcher may have revived it already; then `revive` says `alive`.
 
 Then, for each open job whose assignment `seq` is higher than the `seq` of its `pm/report.md`: you had not acted on that instruction yet. Act on it now. And for each job whose report is `waiting` on another job that is no longer open (a merge that waited): start it now.
@@ -135,10 +135,10 @@ When a child's wait finishes, act on its first line:
 
 **A new instruction for a child:** edit its assignment (`이번 지시`, `seq` + 1), `$OKE send <child> "Assignment updated (seq <n>). Re-read <its assignment path>."`, then start its wait with the new seq. The wait types the message in once the child is idle, so start the wait last. A message must not start with `/`.
 
-**Review.** Write `~/.oke/jobs/<job>/<job>-rv/assignment.md` (role `reviewer`, same `cwd` as the worker, 이번 지시 = the diff range `<base branch>..oke/<job>` when the worker committed, otherwise "uncommitted changes: `git diff HEAD`, and new files listed by `git status --short`"). `$OKE spawn <file> --split-from <worker pane>`. Wait for it.
+**Review.** Write `~/.oke/jobs/<job>/<job>-rv/assignment.md` (role `reviewer`, same `cwd` as the worker, 이번 지시 = the diff range `<base branch>...oke/<job>` (three dots: only this job's changes, even after other jobs merged) when the worker committed, otherwise "uncommitted changes: `git diff HEAD`, and new files listed by `git status --short`"). `$OKE spawn <file> --split-from <worker pane>`. Wait for it.
 
 - `verdict: changes`: pass the findings to the worker as a new instruction, wait, then give the reviewer a new instruction to review again. At most 3 rounds; after that report `question` with the open findings.
-- `verdict: pass`: run `git -C <cwd> status --short` and compare it with the worker's report: the reviewer must not have changed anything (with `commit: yes` it must be clean). Report `done` for the job: summary, branch, number of changed files (`git diff --stat <base>..oke/<job>`, or `git diff --stat HEAD` when uncommitted), the worktree path, and the workers' 배운 것.
+- `verdict: pass`: run `git -C <cwd> status --short` and compare it with the worker's report: the reviewer must not have changed anything (with `commit: yes` it must be clean). Report `done` for the job: summary, branch, number of changed files (`git diff --stat <base>...oke/<job>`, or `git diff --stat HEAD` when uncommitted), the worktree path, and the workers' 배운 것.
 
 ### kind: merge
 

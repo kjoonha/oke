@@ -1624,7 +1624,7 @@ def deliver(agent):
 
 # ---------------------------------------------------------------- pending
 
-PENDING_RANKS = {"unsent": 0, "report_done": 0, "silent": 1, "question": 1, "blocked": 1, "failed": 1, "plan": 2, "merge": 3}
+PENDING_RANKS = {"legacy": 0, "unsent": 0, "report_done": 0, "silent": 1, "question": 1, "blocked": 1, "failed": 1, "plan": 2, "merge": 3}
 ASKING_PHASES = ("planning", "working", "reviewing", "merging")
 
 
@@ -1648,7 +1648,9 @@ def pending_item(name, job):
         return None
     seq, report, mtime = pm_job_report(name)
     rtype = report.get("type") if seq is not None and report.get("seq") == seq else None
-    if seq is not None and job.get("sent_seq") != seq:
+    if seq is None and phase in ("planning", "working", "reviewing", "merging"):
+        kind, since, mark = "legacy", job.get("phase_at"), phase  # started before slice 3
+    elif seq is not None and job.get("sent_seq") != seq:
         kind, since, mark = "unsent", job.get("phase_at"), seq  # written, never sent
     elif rtype in ("question", "blocked", "failed"):
         kind, since, mark = rtype, mtime, seq

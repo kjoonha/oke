@@ -72,6 +72,7 @@ class TestJobState(S3Base):
 
     def test_defer_with_nothing_pending_fails(self):
         self.job("fix-a", "working")
+        self.pm_job("fix-a", 1, REPORT("waiting", 1))  # handed over, nothing asked
         self.assertEqual(self.cli("job", "defer", "fix-a"), 1)
 
 
@@ -499,6 +500,13 @@ class TestPendingUnsent(InboxBase):
         self.cli("pending")
         items = json.loads(self.out)["items"]
         self.assertEqual([(i["job"], i["kind"]) for i in items], [("fix-a", "silent")])
+
+    def test_a_job_from_before_slice3_without_a_job_assignment_is_pending(self):
+        # upgraded mid-job: no jobs/<job>/pm/assignment.md, phase already past intake
+        self.fake({})
+        self.cli("pending")
+        items = json.loads(self.out)["items"]
+        self.assertEqual([(i["job"], i["kind"]) for i in items], [("fix-a", "legacy")])
 
     def test_a_silent_job_after_two_warnings_is_pending(self):
         self.pm_job("fix-a", 3, REPORT("waiting", 2))
