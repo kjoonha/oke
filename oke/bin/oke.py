@@ -60,6 +60,7 @@ def load_config():
         "autonomy": "balanced",
         "wiki_path": os.path.join(home, "wiki"),
         "models": {"pm": "opus", "worker": "sonnet", "reviewer": "sonnet"},
+        "agents": {"worker": "claude", "reviewer": "claude"},  # which CLI runs each role
     }
     try:
         with io.open(os.path.join(home, "config.json"), encoding="utf-8") as f:
@@ -68,9 +69,12 @@ def load_config():
         user = {}
     if isinstance(user, dict):
         models = user.pop("models", None)
+        agents = user.pop("agents", None)
         config.update(user)
         if isinstance(models, dict):
             config["models"].update(models)
+        if isinstance(agents, dict):
+            config["agents"].update(agents)
     config["wiki_path"] = os.path.abspath(native_path(os.path.expanduser(config["wiki_path"])))
     return config
 
@@ -78,7 +82,7 @@ def load_config():
 def read_header(path):
     """Return the `key: value` lines above the first `---`, or None."""
     try:
-        with io.open(path, encoding="utf-8") as f:
+        with io.open(path, encoding="utf-8-sig") as f:
             lines = f.read().splitlines()
     except (IOError, OSError, UnicodeDecodeError):
         return None
@@ -354,6 +358,54 @@ DIALOG_POLL = 1.0
 START_TIMEOUT_MS = 90000
 FIRST_PROMPT = ("Use the oke:{role} skill. Your assignment file is {path}. "
                 "Read it first, then follow it.")
+KINDS = ("claude", "codex", "opencode")
+READY_MARKERS = {"codex": "for shortcuts"}  # the input line's hint: no dialog left
+READY_TRIES = 10  # orchestrator and PM are always claude
+# Startup screens OKe answers by itself: (text on screen, kind or None for all, keys).
+SAFE_DIALOGS = [
+    ("update now", "codex", ["esc"]),  # "Update now / Skip": esc skips
+    # codex's hook review panel: esc closes it without trusting, so the hook stays off
+    ("hook needs review", "codex", ["esc"]),
+    # "Review hooks / Trust all / Continue without trusting": esc skips, hooks stay off.
+    # herdr shows this screen as idle, so a first prompt's Enter would pick "Review".
+    ("continue without trusting", "codex", ["esc"]),
+]
+
+
+def first_prompt(kind, role, path):
+    if kind == "claude":
+        return FIRST_PROMPT.format(role=role, path=path)
+    # Other CLIs do not load Claude Code plugins: point them at the skill file itself.
+    plugin = plugin_root().replace("\\", "/")
+    return ("Read the OKe {role} instructions in {plugin}/skills/{role}/SKILL.md and follow them. "
+            "Where they say ${{CLAUDE_PLUGIN_ROOT}}, use {plugin}. Your assignment file is {path}. "
+            "Read it first.").format(role=role, plugin=plugin, path=path)
+
+
+def agent_command(kind, role, config, home, plugin_dir, folder, resume=None):
+    """herdr's --kind and the CLI arguments for one worker or reviewer."""
+    if kind == "claude":
+        return kind, launch_args(role, config, home, plugin_dir, resume)
+    conservative = config.get("autonomy") == "conservative"
+    if kind == "codex":
+        # Hooks off: codex asks about untrusted hooks at a moment herdr cannot see,
+        # and a prompt typed into that question can pick "Trust all" (seen live).
+        args = ["-c", "features.hooks=false"] + (["resume", resume] if resume else [])
+        if role == "reviewer":
+            # Reads anywhere, writes only its own OKe folder: the sandbox enforces it.
+            args += ["-C", folder, "-s", "workspace-write", "-a", "never"]
+        elif conservative:
+            args += ["-s", "workspace-write", "-a", "on-request",
+                     "--add-dir", home, "--add-dir", config["wiki_path"]]
+        else:
+            args += ["--dangerously-bypass-approvals-and-sandbox"]
+        return kind, args
+    # opencode has no read-only mode: a reviewer stays read-only by its instructions,
+    # and the PM checks `git status` after the review (pm skill).
+    args = ["--session", resume] if resume else []
+    if not (conservative and role == "worker"):
+        args += ["--auto"]
+    return kind, args
 REVIEWER_TOOLS = ["Read", "Grep", "Glob", "Skill", "Bash(git diff:*)", "Bash(git log:*)",
                   "Bash(git show:*)", "Bash(git status:*)"]
 
@@ -449,29 +501,24 @@ class DialogError(Exception):
     """The new agent stopped at a dialog OKe may not answer. The message is the screen."""
 
 
-def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: None):
+def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: None, kind="claude"):
     """Start claude in `pane`, answer the trust dialog only when `trusted()` allows it,
     send the first prompt and make sure the first turn started. `registered` runs once
     herdr knows the name. Returns herdr's agent info."""
     try:
         # herdr's 30 s default was too short live for a claude resuming a long session
-        herdr("agent", "start", agent, "--kind", "claude", "--pane", pane, "--timeout", str(START_TIMEOUT_MS),
+        herdr("agent", "start", agent, "--kind", kind, "--pane", pane, "--timeout", str(START_TIMEOUT_MS),
               "--", *claude_args)
     except HerdrError as e:
         if e.code != "agent_not_ready":
             raise
         registered()  # herdr keeps the name even though the agent is not ready
-        # The dialog can still be drawing when herdr reports the agent blocked.
-        for _ in range(DIALOG_TRIES):
-            screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
-            if TRUST_MARKER in screen.lower():
-                break
-            time.sleep(DIALOG_POLL)
-        if TRUST_MARKER not in screen.lower() or not trusted():
-            raise DialogError(screen)
-        herdr("agent", "send-keys", agent, "down", "enter")
-        herdr("agent", "wait", agent, "--until", "idle", "--timeout", "30000")
+        answer_startup_dialogs(agent, kind, trusted)
     registered()
+    if kind != "claude":
+        # codex can show a panel after herdr already calls it ready; a prompt typed
+        # then is lost (seen live). Close such panels first.
+        close_startup_panels(agent, kind, READY_MARKERS.get(kind))
 
     # Wait until the first turn starts: for a few seconds after a prompt herdr still
     # says idle, and `oke wait` would read that as "idle with no report".
@@ -483,6 +530,10 @@ def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: No
             raise
     info = herdr("agent", "get", agent).get("agent", {})
     if info.get("agent_status") in ("idle", "done"):
+        if kind != "claude":
+            # codex asks about untrusted hooks only when the first prompt is submitted;
+            # herdr shows that as idle. Skip it; the prompt text stays in the input.
+            close_startup_panels(agent, kind, ready=None)
         # Seen live: the prompt text sat in the input box with its Enter lost.
         # Enter on an empty input does nothing, so one more is safe.
         herdr("agent", "send-keys", agent, "enter")
@@ -493,6 +544,60 @@ def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: No
                 raise
         info = herdr("agent", "get", agent).get("agent", {})
     return info
+
+
+def startup_keys(screen, kind, trusted):
+    """Keys for a startup screen OKe may answer, or None."""
+    low = screen.lower()
+    if TRUST_MARKER in low:
+        if not trusted():
+            return None
+        # claude preselects "No, exit"; codex preselects "Trust and continue"
+        return ["down", "enter"] if kind == "claude" else ["enter"]
+    for text, only, keys in SAFE_DIALOGS:
+        if text in low and only in (None, kind):
+            return keys
+    return None
+
+
+def close_startup_panels(agent, kind, ready):
+    """Skip the safe screens (update offer, hook trust) shown while herdr already
+    calls the agent ready or idle. With a `ready` marker, look until the input line
+    shows it: the next screen can take a moment to draw."""
+    for _ in range(READY_TRIES if ready else 3):
+        try:
+            screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
+        except HerdrError:
+            return  # cannot look: the prompt reports a real outage
+        keys = startup_keys(screen, kind, lambda: False)
+        if keys:
+            herdr("agent", "send-keys", agent, *keys)
+        elif not ready or ready in screen.lower():
+            return
+        time.sleep(DIALOG_POLL)
+
+
+def answer_startup_dialogs(agent, kind, trusted):
+    """Answer the startup screens one by one (codex may offer an update, then ask for
+    trust). Anything else is the user's call: DialogError with the screen."""
+    for _ in range(3):
+        # The dialog can still be drawing when herdr reports the agent blocked.
+        for _ in range(DIALOG_TRIES):
+            screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
+            keys = startup_keys(screen, kind, trusted)
+            if keys:
+                break
+            time.sleep(DIALOG_POLL)
+        if not keys:
+            raise DialogError(screen)
+        herdr("agent", "send-keys", agent, *keys)
+        try:
+            herdr("agent", "wait", agent, "--until", "idle", "--timeout", "30000")
+            return
+        except HerdrError as e:
+            if e.code != "timeout":
+                raise  # still blocked: the next screen is another dialog
+    raise DialogError(screen)
 
 
 def cmd_spawn(args):
@@ -508,6 +613,12 @@ def cmd_spawn(args):
         return fail("bad agent name %r: must match %s" % (agent, AGENT_NAME.pattern))
     if role not in ("pm", "worker", "reviewer"):
         return fail("bad role %r" % role)
+    config = load_config()
+    kind = str(header.get("kind") or "").strip().lower() or ("claude" if role == "pm" else config["agents"].get(role, "claude"))
+    if kind not in KINDS:
+        return fail("unknown agent kind %r: use one of %s" % (kind, ", ".join(KINDS)))
+    if role == "pm" and kind != "claude":
+        return fail("a PM must be claude: it needs the OKe mod, hooks and AskUserQuestion")
 
     state = load_state()
     known_keys = set(state["repos"]) | set(j.get("repo") for j in state["jobs"].values())
@@ -540,7 +651,7 @@ def cmd_spawn(args):
         pane = herdr("pane", "split", "--pane", args.split_from, "--direction", "right",
                      "--cwd", cwd, "--no-focus")["pane"]["pane_id"]
 
-    record = {"agent": agent, "pane": pane, "session": None,
+    record = {"agent": agent, "pane": pane, "session": None, "kind": kind,
               "seq": header["seq"], "role": role, "job": header.get("job")}
 
     def save_record():
@@ -569,10 +680,11 @@ def cmd_spawn(args):
             return False
         return True
 
-    claude_args = launch_args(role, load_config(), oke_home(), plugin_root(), args.resume)
+    kind, cli_args = agent_command(kind, role, config, oke_home(), plugin_root(),
+                                   os.path.dirname(path), args.resume)
     try:
-        info = start_agent(agent, pane, claude_args, FIRST_PROMPT.format(role=role, path=path),
-                           trusted_folder, save_record)
+        info = start_agent(agent, pane, cli_args, first_prompt(kind, role, path),
+                           trusted_folder, save_record, kind)
     except DialogError as e:
         return fail("agent %s is stopped at a dialog in pane %s:\n%s" % (agent, pane, e))
     except HerdrError as e:
@@ -611,6 +723,23 @@ def check_once(agent, report, seq):
     return "?" + (report_problem(report, header) or "idle_no_report")
 
 
+_sessions = {}
+
+
+def remember_session(agent, info):
+    """codex gets its session id only after the first turn: record it when herdr
+    shows it, so a revive resumes that session."""
+    session = session_of(info)
+    if not session or _sessions.get(agent) == session:
+        return
+    found = find_target(load_state(), agent)
+    if not found or found[0] not in ("worker", "reviewer"):
+        return  # no record yet (spawn still starting): look again next time
+    if found[3].get("session") != session:
+        update_record(found[0], found[2], found[1], {"session": session})
+    _sessions[agent] = session
+
+
 def look_at(agent, folder):
     """herdr's view of an agent: 'gone', 'blocked\\n<screen>', 'idle' when it has
     nothing to do, '?deliver' when idle with mail, or None while it works."""
@@ -620,6 +749,7 @@ def look_at(agent, folder):
         if e.code in ("agent_not_found", "pane_not_found"):
             return "gone"
         raise
+    remember_session(agent, info)
     status = info.get("agent_status")
     if status == "blocked":
         try:
@@ -1038,11 +1168,18 @@ def relaunch(state, role, key, name, record, folder):
     else:
         path = os.path.join(folder, "assignment.md").replace("\\", "/")
         cwd = native_path((read_header(path) or {}).get("cwd") or oke_home())
-        agent, prompt = name, REVIVE_PROMPT.format(role=role, path=path)
+        kind = record.get("kind") or "claude"
+        agent = name
+        if kind == "claude":
+            prompt = REVIVE_PROMPT.format(role=role, path=path)
+        else:
+            prompt = "You were restarted after a crash. " + first_prompt(kind, role, path) + \
+                " Also re-read your board.md, then continue."
         if role == "pm":
             prompt += pm_jobs_note(state, key)
-        args = launch_args(role, load_config(), oke_home(), plugin_root())
-    if record.get("session"):
+        kind, args = agent_command(kind, role, load_config(), oke_home(), plugin_root(), folder,
+                                   record.get("session"))
+    if role == "orchestrator" and record.get("session"):
         args = args + ["--resume", record["session"]]
     # Never start in the old pane: a force-killed claude leaves terminal modes set, and
     # the start command herdr types into that shell arrives garbled (seen live).
@@ -1059,7 +1196,8 @@ def relaunch(state, role, key, name, record, folder):
     pane = new_pane(state, role, key, cwd)
     # The folder was trusted when the agent first started; a trust dialog now is unexpected.
     try:
-        return start_agent(agent, pane, args, prompt, lambda: False)
+        return start_agent(agent, pane, args, prompt, lambda: False,
+                           kind=kind if role != "orchestrator" else "claude")
     except (HerdrError, DialogError):
         # herdr keeps the name of a start that failed; with the pane closed it is
         # gone again, so the next watcher round does not read it as alive.
