@@ -28,14 +28,16 @@ async function oke($: any, args: string[]): Promise<any> {
   const script = `${$.plugin.root}/bin/oke.py`.replace(/\\/g, '/')
   for (const py of python ? [python] : ['python3', 'python']) {
     try {
-      const r = await $.process.run([py, script, ...args], { timeoutMs: 120_000 })
+      const r = await $.process.run([py, script, ...args], { timeoutMs: 300_000 })
       // exit 9009 or similar: a launcher stub, not Python
       if (r.exitCode > 2) continue
       python = py
       if (r.exitCode !== 0) return null
       return JSON.parse(r.stdout.trim().split('\n').pop() || 'null')
     } catch {
-      // not on PATH: try the next name
+      // not on PATH: try the next name. Once a name worked, a failure is a timeout:
+      // running the same call again with another name would only repeat it.
+      if (python) return null
     }
   }
   return null
@@ -83,8 +85,9 @@ async function clearRetry($: any) {
   pending?.cancel()
   pending = null
   if (attempt > 0) $.ui.status(undefined)
-  attempt = 0
-  if (pane) await oke($, ['api-retry', '--pane', pane, '--clear'])
+  if (!pane) return
+  // Keep the count until the marker is really gone, so the next good turn clears again.
+  if ((await oke($, ['api-retry', '--pane', pane, '--clear'])) !== null) attempt = 0
 }
 
 function nodes(tree: BoardRepo[]): BoardNode[] {

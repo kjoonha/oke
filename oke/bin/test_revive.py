@@ -39,7 +39,7 @@ class ReviveBase(SpawnBase):
         self.write_file(os.path.join(self.child_dir, "assignment.md"),
                         "agent: fix-a-w1\nrole: worker\ncwd: %s\nseq: 2\njob: fix-a\n---\n" % self.repo)
         oke.write_json_atomic(oke.children_path(self.key), {"fix-a-w1": {
-            "agent": "fix-a-w1", "pane": "w1:p5", "session": "s-w", "seq": 2,
+            "agent": "fix-a-w1", "pane": "w1:p5", "session": "s-w", "seq": 2, "terminal": "term-5",
             "role": "worker", "job": "fix-a"}})
 
     def write_pm_assignment(self):
@@ -59,7 +59,7 @@ class ReviveBase(SpawnBase):
 
     def revive_scenario(self, **over):
         s = {"agent list": [J({"agents": []})],
-             "pane get": [PANE_OK()],
+             "pane get": [J({"pane": {"pane_id": "w1:p5", "terminal_id": "term-5"}})],
              "pane process-info": [PINFO("bash")],
              "pane split": [J({"pane": {"pane_id": "w1:p8"}})],
              "pane close": [J({"type": "ok"})],
@@ -88,6 +88,58 @@ class TestRevive(ReviveBase):
         rec = self.child()
         self.assertEqual((rec["revives"], rec["session"]), (1, "s-w2"))
         self.assertIn("revived fix-a-w1", self.events())
+
+    def test_a_reused_pane_id_is_not_closed(self):
+        # after a herdr restart the recorded pane id can be a user's new shell
+        children = oke.read_children(self.key)
+        children["fix-a-w1"]["terminal"] = "term-old"
+        oke.write_json_atomic(oke.children_path(self.key), children)
+        self.revive_scenario(**{"pane get": [J({"pane": {"pane_id": "w1:p5", "terminal_id": "term-user"}})]})
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")
+        self.assertEqual(self.argv_of("pane", "close"), [])
+
+    def test_a_pane_with_no_recorded_terminal_is_not_closed(self):
+        children = oke.read_children(self.key)
+        children["fix-a-w1"].pop("terminal", None)
+        oke.write_json_atomic(oke.children_path(self.key), children)
+        self.revive_scenario()
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")
+        self.assertEqual(self.argv_of("pane", "close"), [])
+
+    def test_revive_records_the_new_terminal(self):
+        self.revive_scenario()
+        oke.revive("fix-a-w1")
+        self.assertEqual(self.child()["terminal"], "term-5")
+
+    def test_revives_are_counted_before_the_start(self):
+        # a watcher killed mid-start must not leave the count where it was
+        seen = []
+        original = oke.relaunch
+
+        def spy(*a):
+            seen.append(oke.read_children(self.key)["fix-a-w1"]["revives"])
+            return original(*a)
+        oke.relaunch = spy
+        try:
+            self.revive_scenario()
+            oke.revive("fix-a-w1")
+        finally:
+            oke.relaunch = original
+        self.assertEqual(seen, [1])
+
+    def test_a_record_gone_under_the_lock_is_unknown(self):
+        self.revive_scenario()
+        original = oke.find_target
+        calls = []
+
+        def vanishing(state, name):
+            calls.append(name)
+            return original(state, name) if len(calls) == 1 else None
+        oke.find_target = vanishing
+        try:
+            self.assertEqual(oke.revive("fix-a-w1"), "unknown")
+        finally:
+            oke.find_target = original
 
     def test_a_pane_that_refuses_to_close_is_left(self):
         self.revive_scenario(**{"pane close": [E("confirmation_required")]})
@@ -141,11 +193,10 @@ class TestRevive(ReviveBase):
         self.assertEqual(oke.revive("fix-a-w1"), "alive")
         self.assertEqual(started(self.calls()), [])
 
-    def test_claude_still_in_the_pane_is_alive(self):
-        # herdr lost track of it, but a claude process still runs there: never start a second one
-        self.revive_scenario(**{"pane process-info": [PINFO("claude.exe")]})
-        self.assertEqual(oke.revive("fix-a-w1"), "alive")
-        self.assertEqual(started(self.calls()), [])
+    def test_another_claude_in_the_recorded_pane_is_not_this_agent(self):
+        # a pane id alone is no identity: oke wait would otherwise loop on "alive" forever
+        self.revive_scenario(**{"agent list": [J({"agents": [AG(None, pane="w1:p5", session=None)]})]})
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")
 
     def test_gives_up_after_three_deaths(self):
         children = oke.read_children(self.key)
@@ -330,7 +381,9 @@ class TestTick(ReviveBase):
     def test_pm_revives_the_orchestrator_and_its_children(self):
         out = self.tick("w1:p3", [AG("pm-toy", pane="w1:p3", session="s-pm")])
         self.assertEqual(out["role"], "pm")
-        self.assertEqual(sorted(self.revived), ["fix-a-w1", "orchestrator"])
+        # one per tick: the next tick sees the orchestrator back and takes the child
+        self.tick("w1:p3", [AG("pm-toy", pane="w1:p3", session="s-pm"), AG(None, pane="w7:p1", session="s-o")])
+        self.assertEqual(self.revived, ["orchestrator", "fix-a-w1"])
 
     def test_pm_skips_a_child_with_its_final_report(self):
         self.write_file(os.path.join(self.child_dir, "report.md"), "type: done\nseq: 2\n---\n")
@@ -343,6 +396,17 @@ class TestTick(ReviveBase):
         out = self.tick("w7:p1", [AG(None, pane="w7:p1", session="someone-else")])
         self.assertIsNone(out["role"])
         self.assertEqual(self.revived, [])
+
+    def test_a_pane_whose_session_herdr_does_not_know_is_not_the_orchestrator(self):
+        out = self.tick("w7:p1", [AG(None, pane="w7:p1", session=None)])
+        self.assertIsNone(out["role"])
+
+    def test_one_revive_per_tick(self):
+        # a long revive must finish inside the mod's process timeout
+        self.write_file(os.path.join(self.child_dir, "report.md"), "type: waiting\nseq: 2\n---\n")
+        out = self.tick("w1:p3", [AG("pm-toy", pane="w1:p3", session="s-pm")])
+        self.assertEqual(len(self.revived), 1)
+        self.assertEqual(len(out["revived"]), 1)
 
     def test_all_alive_writes_nothing(self):
         before = (io.open(oke.state_path(), encoding="utf-8").read(),
@@ -464,6 +528,51 @@ class TestClaimRecordsLaunch(ReviveBase):
         self.assertEqual(orch["session"], "s-o9")
         self.assertEqual(orch["cwd"], "C:\\r\\")
         self.assertEqual(orch["revives"], 0)
+
+
+class TestClaimAfterRevive(ReviveBase):
+    def test_claim_by_a_revived_orchestrator_keeps_the_count(self):
+        s = oke.load_state()
+        s["orchestrator"].update(pane="w7:p9", revives=2, agent="oke-orch")
+        oke.save_state(s)
+        os.environ["HERDR_PANE_ID"] = "w7:p9"
+        sc = help_ok()
+        sc["agent list"] = [J({"agents": [AG("oke-orch", pane="w7:p9", session="s-o")]})]
+        sc["pane process-info"] = [PINFO("claude.exe")]
+        self.fake(sc)
+        self.assertEqual(self.cli("status", "--claim"), 0)
+        self.assertEqual(oke.load_state()["orchestrator"]["revives"], 2)
+
+    def test_a_revived_orchestrator_pane_is_closed_on_the_next_revive(self):
+        s = oke.load_state()
+        s["orchestrator"].update(agent="oke-orch", terminal="term-5", pane="w1:p5")
+        oke.save_state(s)
+        self.revive_scenario(**{"agent get": [AGENT("working", name="oke-orch", pane="w1:p8", session="s-o2")]})
+        self.assertEqual(oke.revive("orchestrator"), "revived")
+        self.assertEqual(self.argv_of("pane", "close"), [["pane", "close", "w1:p5"]])
+
+
+class TestStaleRetryMarker(ReviveBase):
+    def test_an_old_marker_no_longer_holds_the_wait(self):
+        marker = os.path.join(self.child_dir, "api-retry.json")
+        self.write_file(marker, '{"attempt": 1, "delay": 30}')
+        old = time.time() - 30 - oke.RETRY_MARKER_GRACE - 5
+        os.utime(marker, (old, old))
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertEqual(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
+                                       poll=0, max_polls=6), "idle_no_report")
+
+
+class TestSpawnTerminal(ReviveBase):
+    def test_spawn_records_the_terminal_of_its_pane(self):
+        a = self.assignment("fix-a-w2", "worker", "fix-a")
+        sc = {"agent list": [J({"agents": []})], "pane split": [J({"pane": {"pane_id": "w1:p9"}})],
+              "agent start": [AGENT()], "agent prompt": [J({"type": "agent_prompted"})],
+              "agent get": [AGENT("working", pane="w1:p9")],
+              "pane get": [J({"pane": {"pane_id": "w1:p9", "terminal_id": "term-9"}})]}
+        self.fake(sc)
+        self.assertEqual(self.cli("spawn", a, "--split-from", "w1:p3"), 0)
+        self.assertEqual(oke.read_children(self.key)["fix-a-w2"]["terminal"], "term-9")
 
 
 class TestLock(ReviveBase):

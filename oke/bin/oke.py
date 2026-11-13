@@ -165,7 +165,7 @@ def save_state(state):
 
 # A lock older than this is left over from a crashed holder. A revive takes about a
 # minute; this is not a rule about whether an agent is alive.
-LOCK_STALE = 120
+LOCK_STALE = 300
 
 
 def lock_path(name):
@@ -569,6 +569,7 @@ def cmd_spawn(args):
         return fail("spawn of %s failed in pane %s: %s" % (agent, pane, e))
     record["pane"] = info.get("pane_id", pane)
     record["session"] = session_of(info)
+    record["terminal"] = terminal_of(record["pane"])  # lets a revive close this pane safely
     save_record()
     print(json.dumps({"agent": agent, "pane": record["pane"], "session": record["session"]}))
     return 0
@@ -608,7 +609,7 @@ def check_once(agent, report, seq):
         return None
     if current and header.get("type") == "waiting":
         return None
-    if os.path.exists(os.path.join(os.path.dirname(report), "api-retry.json")):
+    if retry_pending(os.path.join(os.path.dirname(report), "api-retry.json")):
         return None  # its mod resubmits the turn after an API error
     if os.path.exists(report):
         if header is None:
@@ -620,6 +621,19 @@ def check_once(agent, report, seq):
         if not isinstance(header["seq"], int):
             return "?bad_report seq is not a number"
     return "?idle_no_report"
+
+
+RETRY_MARKER_GRACE = 120  # seconds past the marker's own delay
+
+
+def retry_pending(marker):
+    """A marker its mod failed to clear stops counting once its delay is long past."""
+    try:
+        age = time.time() - os.path.getmtime(marker)
+    except OSError:
+        return False
+    delay = (read_json(marker, {}) or {}).get("delay") or 300
+    return age < delay + RETRY_MARKER_GRACE
 
 
 def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
@@ -732,12 +746,12 @@ def should_be_alive(state, role, key, name, record):
 
 
 def same_agent(record, a):
+    """Pane ids come back after a herdr restart and herdr may not know a fresh
+    session yet, so only the OKe name or an equal known session identify an agent."""
     if record.get("agent") and a.get("name") == record["agent"]:
         return True
-    mine, theirs = record.get("session"), session_of(a)
-    if record.get("pane") and a.get("pane_id") == record["pane"]:
-        return not (mine and theirs and mine != theirs)
-    return bool(mine and theirs == mine)
+    mine = record.get("session")
+    return bool(mine and session_of(a) == mine)
 
 
 def live_agent(record, agents):
@@ -755,6 +769,14 @@ def pane_has_claude(pane):
             raise
         return False
     return any("claude" in (p.get("name") or "").lower() for p in info.get("foreground_processes") or [])
+
+
+def terminal_of(pane):
+    """herdr's id of the terminal in `pane`; unlike the pane id it is never reused."""
+    try:
+        return herdr("pane", "get", pane).get("pane", {}).get("terminal_id")
+    except HerdrError:
+        return None
 
 
 def pane_exists(pane):
@@ -835,14 +857,16 @@ def relaunch(state, role, key, name, record, folder):
         args = args + ["--resume", record["session"]]
     # Never start in the old pane: a force-killed claude leaves terminal modes set, and
     # the start command herdr types into that shell arrives garbled (seen live).
-    # The orchestrator's pane is the user's own, so it stays.
+    # Close it only while it is still that agent's terminal: after a herdr restart the
+    # same pane id can be a user's shell. The user's own orchestrator pane stays.
     old = record.get("pane")
-    if old and role != "orchestrator" and pane_exists(old):
-        try:
-            herdr("pane", "close", old)
-        except HerdrError as e:
-            if e.code == "herdr_unavailable":
-                raise  # a worktree group root refuses to close: leave it
+    if old and (role != "orchestrator" or record.get("agent") == ORCH_NAME):
+        if record.get("terminal") and terminal_of(old) == record["terminal"]:
+            try:
+                herdr("pane", "close", old)
+            except HerdrError as e:
+                if e.code == "herdr_unavailable":
+                    raise  # a worktree group root refuses to close: leave it
     pane = new_pane(state, role, key, cwd)
     # The folder was trusted when the agent first started; a trust dialog now is unexpected.
     try:
@@ -875,10 +899,13 @@ def revive(name):
 
 def revive_locked(name):
     state = load_state()  # again, under the lock: another watcher may have revived it
-    role, name, key, record = find_target(state, name)
+    found = find_target(state, name)
+    if found is None:
+        return "unknown"
+    role, name, key, record = found
     if not should_be_alive(state, role, key, name, record):
         return "not_needed"
-    if live_agent(record, list_agents()) or (record.get("pane") and pane_has_claude(record["pane"])):
+    if live_agent(record, list_agents()):
         return "alive"
     folder = agent_folder(role, name, key, record)
     mtime = report_mtime(folder) if folder else None
@@ -895,16 +922,19 @@ def revive_locked(name):
             os.remove(os.path.join(folder, "api-retry.json"))  # the dead process's retry
         except OSError:
             pass
-    fields = {"revives": revives + 1, "report_mtime": mtime, "gave_up": False}
+    # Counted before the start: a watcher killed during a slow start must not leave
+    # the count unchanged and retry forever.
+    update_record(role, key, name, {"revives": revives + 1, "report_mtime": mtime, "gave_up": False})
+    fields = {}
     try:
         info = relaunch(state, role, key, name, record, folder)
     except (HerdrError, DialogError) as e:
         if isinstance(e, HerdrError) and e.code == "herdr_unavailable":
             raise
-        update_record(role, key, name, fields)
         log_event("revive_failed %s: %s" % (name, (str(e).strip().splitlines() or [""])[0]))
         return "failed"
     fields.update(pane=info.get("pane_id"), session=session_of(info) or record.get("session"))
+    fields["terminal"] = terminal_of(fields["pane"]) if fields["pane"] else None
     if role == "orchestrator":
         fields["agent"] = ORCH_NAME
     update_record(role, key, name, fields)
@@ -940,9 +970,8 @@ def whoami(state, pane):
     here = [a for a in agents if a.get("pane_id") == pane]
     if not here:
         return None, agents
-    session = session_of(here[0])
     for r in mine:
-        if not (r[3].get("session") and session and r[3]["session"] != session):
+        if same_agent(r[3], here[0]):
             return r, agents
     return None, agents
 
@@ -1001,7 +1030,8 @@ def cmd_tick(args):
             if a:
                 if not t_rec.get("session") and session_of(a):  # spawn could not see it yet
                     update_record(t_role, t_key, t_name, {"session": session_of(a)})
-            elif should_be_alive(state, t_role, t_key, t_name, t_rec):
+            elif not out["revived"] and should_be_alive(state, t_role, t_key, t_name, t_rec):
+                # one per tick: a revive can take two minutes and the mod's call has a timeout
                 out["revived"][t_name] = revive(t_name)
         if args.board and role in ("orchestrator", "pm"):
             out["board"] = board_tree(state, agents, key if role == "pm" else None)
@@ -1162,7 +1192,8 @@ def status_locked(args):
         elif here:
             state["orchestrator"]["pane"] = here
             state["orchestrator"].update(own_launch(here, agents))
-            state["orchestrator"].update(revives=0, gave_up=False)
+            if not any(a.get("pane_id") == here and a.get("name") == ORCH_NAME for a in agents):
+                state["orchestrator"].update(revives=0, gave_up=False, agent=None)
             changed = True
     if changed or state.get("_recovered"):
         save_state(state)
