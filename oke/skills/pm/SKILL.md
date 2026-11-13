@@ -67,10 +67,10 @@ Your folder may already hold `board.md` and `children.json` from before. Read bo
 For each child in `children.json` whose `job` is an open job, decide in this order:
 
 1. Its `report.md` has the `seq` of its `assignment.md` and type `done`, `question` or `failed`: the child finished that step. Do not start it again. Handle that report as in the table below (a finished reviewer stays finished).
-2. It is in `herdr agent list`: it keeps its work. Write that job's report as `waiting` and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If it is at a dialog the wait says `blocked`; handle it as in the table below.
+2. It is in `herdr agent list`: it keeps its work. Write that job's report as `waiting` (unless it already has the current seq and type `question` or `blocked`: leave that one) and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If it is at a dialog the wait says `blocked`; handle it as in the table below.
 3. Otherwise: `$OKE revive <child>` (it restarts the child in its own session and tells it to re-read its assignment), then wait as in 2. Your own watcher may have revived it already; then `revive` says `alive`.
 
-Then, for each open job whose assignment `seq` is higher than the `seq` of its `pm/report.md`: you had not acted on that instruction yet. Act on it now.
+Then, for each open job whose assignment `seq` is higher than the `seq` of its `pm/report.md`: you had not acted on that instruction yet. Act on it now. And for each job whose report is `waiting` on another job that is no longer open (a merge that waited): start it now.
 
 Never `$OKE spawn` a name that is already in `children.json`. If `git -C <repo> worktree list` already shows `oke/<job>`, use that worktree. Never create `oke/<job>-2` for a job that already has one.
 
@@ -151,7 +151,7 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
 2. If the work in the worktree is uncommitted (`commit: no` with a worktree, autonomy `conservative`): commit it now in the worker's `cwd` (`git add -A`, `git commit`).
 3. Merge: in the main checkout, `git merge --no-ff oke/<job>`. No conflict: go to step 5.
 4. Conflict: `git merge --abort`. Never resolve conflicts yourself. Climb this ladder:
-   1. Give the worker a new instruction: "Rebase `oke/<job>` onto `<base branch>`. Resolve the conflicts so that both changes keep their purpose. Run the 검증 명령 again, commit, and report." Write this job's report as `waiting` and wait. A dead worker is revived by the wait.
+   1. Give the worker a new instruction, with `commit: yes` in its header from now on: "Rebase `oke/<job>` onto `<base branch>`. Resolve the conflicts so that both changes keep their purpose. Run the 검증 명령 again, commit, and report." Write this job's report as `waiting` and wait. A dead worker is revived by the wait.
    2. Worker `done`: give the reviewer a new instruction to review what the rebase changed. `verdict: pass`: back to step 3. `changes`: as in the review rounds.
    3. Worker `question` or `failed`, or the merge conflicts again after the rebase: report `question` for the job with the conflicting files. The user decides.
 5. Update the wiki from the reports' 배운 것 (see below).

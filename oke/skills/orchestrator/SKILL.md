@@ -77,7 +77,7 @@ A new job while others run is normal: take it in at once.
 
 Every instruction to a PM about a job follows these steps, also an answer or a dialog decision.
 
-1. If `<pm_dir>/assignment.md` does not exist, write the PM's standing assignment:
+1. If `<pm_dir>/assignment.md` does not exist, or its header has a `job:` line (an old per-job file from before), write the PM's standing assignment:
 
 ```
 agent: <pm_agent>
@@ -154,9 +154,9 @@ Run the queue after every wait result, after the start procedure, and after each
 2. Take the first item whose `deferred` is false. Before you ask the user, say in one line how many other items wait (and how many are deferred).
 3. Handle it by `kind`:
    - `report_done`: no question. Read `<pm_job_dir>/report.md` and act as in "Flow".
-   - `question`: read the report. Ask the user with `AskUserQuestion`. Before you give the answer to the PM (`kind: answer`), read the report again: if it now says `blocked`, ask about the dialog too, and give both in one assignment: `kind: dialog` with the dialog line, then a line `Answer: <the user's answer>`. Never write two assignments for one job before the PM has reported on the first: the second overwrites the first.
+   - `question`: read the report. Ask the user with `AskUserQuestion`. Before you give the answer to the PM (`kind: answer`), read the report again: if it now says `blocked`, ask about the dialog too, and give both in one assignment: `kind: dialog` with the dialog line, then a line `Answer: <the user's answer>`. Write it, send the key to the child as for `blocked`, then steps 3 to 6. Never write two assignments for one job before the PM has reported on the first: the second overwrites the first.
    - `blocked`: the report names a child agent and shows its screen. Ask: approve once / deny / go to that pane. For "go to that pane": `herdr agent focus <child>`, `$OKE job defer <job>`, and continue that item only after the user says they are done. Then, in this order: write the PM's `kind: dialog` assignment ("Dialog answered for <child>." or "Dialog denied for <child>: <what was refused>."; step 2 of "Give the job to the PM"), send the key to that child yourself (`herdr agent send-keys <child> enter` or `esc`; none after "go to that pane"), then steps 3 to 6. Writing first means a compaction in between shows the item as `unsent`, never as the same dialog again. Never send a second key for the same report.
-   - `unsent`: you wrote that job's assignment but never sent the message (you were compacted in between). Read the assignment's `kind` and do steps 3 to 6 of "Give the job to the PM" now: set the phase that kind belongs to (see "Flow"), make sure the PM runs, send, wait. For `kind: cancel`, send first and then set `failed` (see "Giving up"). For `kind: dialog`, the key may not have gone to the child yet: look at the child (`herdr agent get <child>`); if it is still `blocked`, send the key first. No question.
+   - `unsent`: you wrote that job's assignment but never sent the message (you were compacted in between). Read the assignment's `kind` and do steps 3 to 6 of "Give the job to the PM" now: set the phase that kind belongs to (see "Flow"), make sure the PM runs, send, wait. For `kind: cancel`, send first and then set `failed` (see "Giving up"). For `kind: dialog`, the key may not have gone to the child yet: read the child's screen (`herdr agent read <child>`). Send the key only if it still shows the same dialog as the PM's report; a different dialog is a new one the user has not seen, so send nothing and let the PM report it. No question.
    - `silent`: the PM did not report on that job even after a nudge. Ask: go to the PM pane (`herdr agent focus <pm>`, then `$OKE job defer <job>`) / send the same step again (steps 2 to 6 of "Give the job to the PM" with the same 이번 지시: the new seq gives the PM a fresh start) / give up (see "Giving up").
    - `failed`: show the summary (an "API error" summary means automatic retries ran out). Ask: retry (give the PM the same step again) / give up (see "Giving up") / hold.
    - `plan`: the plan approval question (see "Flow").
@@ -168,7 +168,7 @@ Run the queue after every wait result, after the start procedure, and after each
 
 ## Giving up
 
-When the user gives a job up: give the PM `kind: cancel` (steps 2, 4 and 5 of "Give the job to the PM"; skip step 3), then `$OKE job phase <job> failed`. The PM must hear it: its other jobs may wait on this one, and the job's agents still run.
+When the user gives a job up: give the PM `kind: cancel` (steps 2, 4, 5 and 6 of "Give the job to the PM"; skip step 3), then `$OKE job phase <job> failed`. The wait types the cancel in, then ends with `no_jobs` if that was the PM's last job. The PM must hear it: its other jobs may wait on this one, and the job's agents still run.
 
 ## Flow
 

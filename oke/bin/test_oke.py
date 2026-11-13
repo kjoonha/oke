@@ -373,6 +373,13 @@ class TestSpawn(SpawnBase):
         pm = oke.load_state()["repos"][oke.repo_key(self.repo)]["pm"]
         self.assertEqual((pm["agent"], pm["pane"], pm["session"]), ("pm-toy", "w1:p9", "s-1"))
 
+    def test_spawn_pm_refuses_an_old_per_job_assignment(self):
+        # before slice 3 the PM folder held one job's instruction; it is no standing assignment
+        a = self.assignment("pm-toy", "pm", job="fix-a")
+        self.fake(spawn_ok())
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 1)
+        self.assertEqual(self.argv_of("agent", "start"), [])
+
     def test_spawn_name_in_use(self):
         self.job("fix-a", "working")
         a = self.assignment("fix-a-w1", "worker", "fix-a")

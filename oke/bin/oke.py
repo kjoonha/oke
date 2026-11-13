@@ -512,6 +512,9 @@ def cmd_spawn(args):
     state = load_state()
     known_keys = set(state["repos"]) | set(j.get("repo") for j in state["jobs"].values())
     if role == "pm":
+        if "job" in header:
+            # a pre-slice-3 PM folder held one job's instruction here
+            return fail("%s is an old per-job PM assignment; rewrite it as the standing assignment" % path)
         try:
             key = repo_key(cwd)
         except ValueError as e:
