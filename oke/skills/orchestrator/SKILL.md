@@ -135,8 +135,10 @@ When it finishes, read the first line of its output. If the user speaks before i
 |---|---|
 | `report <type> <job>` | Start the wait again first (it keeps delivering the PM's mail while you ask the user), then run the queue |
 | `blocked` | The PM itself is at a dialog. This comes before the queue. Ask: approve once / deny / go to that pane. Send the key yourself: `herdr agent send-keys <pm> enter` to approve, `herdr agent send-keys <pm> esc` to deny, or `herdr agent focus <pm>` (then tell the user to answer the dialog there and to tell you when done, end your turn, and continue only after the user says so). Start the wait again with `--after-blocked` added. Never send a second key for the same dialog |
-| `idle_no_report <job>` | Once per job and seq: `$OKE send <pm> "Job <job>: re-read <pm_job_dir>/assignment.md, continue, and write <pm_job_dir>/report.md when done."` and wait again. Second time: tell the user |
-| `bad_report <job> ...` | Once: send the PM a message to rewrite `<pm_job_dir>/report.md` in the required format, and wait again. Second time: tell the user |
+| `idle_no_report <job>` | `$OKE send <pm> --job <job> "Job <job>: re-read <pm_job_dir>/assignment.md, continue, and write <pm_job_dir>/report.md when done."` and wait again |
+| `bad_report <job> ...` | `$OKE send <pm> --job <job> "Job <job>: rewrite <pm_job_dir>/report.md in the required format."` and wait again |
+| `idle_no_report again <job>`, `bad_report again <job> ...` | The nudge did not help. Do not nudge again: the wait now leaves that job alone and `pending` lists it as `silent`. Wait again (for the other jobs), then run the queue |
+| `no_jobs` | The PM has no open job left. Do not start its wait again |
 | `gone` | OKe already revived the PM three times without a new report, or no job needs it. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / archive |
 | `superseded` | A newer wait replaced this one. Do nothing |
 | `deliver_failed` | Messages for the PM could not be typed in three times in a row. Tell the user and offer to go to the PM pane (`herdr agent focus <pm>`); the messages stay in `~/.oke/inbox/<pm>/`. Start the wait again after the user says the pane is free |
@@ -152,8 +154,10 @@ Run the queue after every wait result, after the start procedure, and after each
 2. Take the first item whose `deferred` is false. Before you ask the user, say in one line how many other items wait (and how many are deferred).
 3. Handle it by `kind`:
    - `report_done`: no question. Read `<pm_job_dir>/report.md` and act as in "Flow".
-   - `question`: read the report. Ask the user with `AskUserQuestion`. Give the answer to the PM (`kind: answer`).
+   - `question`: read the report. Ask the user with `AskUserQuestion`. Before you give the answer to the PM (`kind: answer`), read the report again: if it now says `blocked`, handle that first and give the answer after the dialog.
    - `blocked`: the report names a child agent and shows its screen. Ask: approve once / deny / go to that pane. Send the key to that child yourself (`herdr agent send-keys <child> enter` or `esc`). For "go to that pane": `herdr agent focus <child>`, `$OKE job defer <job>`, and continue that item only after the user says they are done. Then give the PM `kind: dialog` with "Dialog answered for <child>." or "Dialog denied for <child>: <what was refused>." Never send a second key for the same report.
+   - `unsent`: you wrote that job's assignment but never sent the message (you were compacted in between). Do step 5 and 6 of "Give the job to the PM" now. No question.
+   - `silent`: the PM did not report on that job even after a nudge. Ask: go to the PM pane (`herdr agent focus <pm>`, then `$OKE job defer <job>`) / send the same step again (step 5 of "Give the job to the PM") / give up (`$OKE job phase <job> failed`).
    - `failed`: show the summary (an "API error" summary means automatic retries ran out). Ask: retry (give the PM the same step again) / give up (`$OKE job phase <job> failed`) / hold.
    - `plan`: the plan approval question (see "Flow").
    - `merge`: the merge question (see "Flow").

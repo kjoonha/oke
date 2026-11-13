@@ -186,6 +186,13 @@ class TestWaitDelivers(InboxBase):
         self.assertTrue(oke.deliver("fix-a-w1"))
         self.assertEqual(self.texts("fix-a-w1"), [])
 
+    def test_a_refused_prompt_to_a_busy_target_keeps_the_mail(self):
+        self.fake({})
+        self.cli("send", "fix-a-w1", "one")
+        self.fake({"agent prompt": [E("agent_not_idle")], "agent get": [AGENT("working")]})
+        self.assertFalse(oke.deliver("fix-a-w1"))
+        self.assertEqual(self.texts("fix-a-w1"), ["user: one"])
+
     def test_a_file_error_is_a_passing_outage(self):
         r = self.report_path()
         self.fake({"agent get": [AGENT("working")]})
@@ -327,6 +334,50 @@ class TestPmWait(InboxBase):
         self.put(os.path.join(folder, "report.md"), REPORT("blocked", 2))
         self.assertEqual(self.wait(), "report blocked fix-a")
 
+    def test_a_report_found_by_a_superseded_jobs_wait_is_still_returned(self):
+        # it already marked the report seen: the newer wait would never return it
+        self.pm_job("fix-a", 2, REPORT("done", 2))
+        self.fake({"agent get": [AGENT("working")]})
+        original = oke.check_pm_once
+
+        def newer_wait_meanwhile(*a, **kw):
+            result = original(*a, **kw)
+            oke.claim_wait("pm-toy")
+            return result
+        oke.check_pm_once = newer_wait_meanwhile
+        try:
+            self.assertEqual(self.wait(), "report done fix-a")
+        finally:
+            oke.check_pm_once = original
+
+    def test_a_job_still_silent_after_a_nudge_is_reported_again_then_left(self):
+        self.pm_job("fix-a", 3, REPORT("waiting", 2))
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertEqual(self.wait(), "idle_no_report fix-a")
+        self.assertEqual(self.wait(), "idle_no_report fix-a again")
+        self.assertIsNone(self.wait(8))  # the user was told; no endless wake-ups
+
+    def test_a_new_send_for_the_job_clears_the_warnings(self):
+        self.pm_job("fix-a", 3, REPORT("waiting", 2))
+        self.fake({"agent get": [AGENT("idle")]})
+        self.wait()
+        self.wait()
+        self.fake({})
+        self.cli("send", "pm-toy", "--job", "fix-a", "Job fix-a: re-read your assignment")
+        self.fake({"agent get": [AGENT("idle")], "agent prompt": [J({"type": "agent_prompted"})]})
+        oke.deliver("pm-toy")
+        self.assertEqual(self.wait(), "idle_no_report fix-a")
+
+    def test_a_pm_without_open_jobs_ends_the_wait(self):
+        self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0)
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertEqual(self.wait(), "no_jobs")
+
+    def test_send_to_an_unknown_job_queues_nothing(self):
+        self.fake({})
+        self.assertEqual(self.cli("send", "pm-toy", "--job", "nope", "hello"), 1)
+        self.assertEqual(self.texts("pm-toy"), [])
+
     def test_cli_needs_a_report_or_jobs(self):
         self.fake({})
         self.assertEqual(self.cli("wait", "pm-toy"), 1)
@@ -387,6 +438,25 @@ class TestPmFolderUsers(ReviveBase):
         self.assertEqual(out["jobs"]["fix-a"]["pm_seq"], 4)
         self.assertTrue(out["jobs"]["fix-a"]["pm_job_dir"].endswith("/jobs/fix-a/pm"))
         self.assertNotIn("seq", out["repos"][self.key])
+
+
+class TestPendingUnsent(InboxBase):
+    def test_an_assignment_written_but_not_sent_is_pending(self):
+        # the orchestrator was compacted between writing seq 3 and oke send --job
+        self.pm_job("fix-a", 3, REPORT("waiting", 2), sent=False)
+        self.fake({})
+        self.cli("pending")
+        items = json.loads(self.out)["items"]
+        self.assertEqual([(i["job"], i["kind"]) for i in items], [("fix-a", "unsent")])
+
+    def test_a_silent_job_after_two_warnings_is_pending(self):
+        self.pm_job("fix-a", 3, REPORT("waiting", 2))
+        self.fake({"agent get": [AGENT("idle")]})
+        oke.wait_loop("pm-toy", None, None, poll=0, max_polls=5, jobs_key=self.key)
+        oke.wait_loop("pm-toy", None, None, poll=0, max_polls=5, jobs_key=self.key)
+        self.cli("pending")
+        items = json.loads(self.out)["items"]
+        self.assertEqual([(i["job"], i["kind"]) for i in items], [("fix-a", "silent")])
 
 
 class TestPending(S3Base):

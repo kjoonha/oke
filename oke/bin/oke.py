@@ -101,7 +101,7 @@ def write_json_atomic(path, obj):
     directory = os.path.dirname(path)
     if not os.path.isdir(directory):
         os.makedirs(directory)
-    tmp = path + ".tmp"
+    tmp = "%s.%d.tmp" % (path, os.getpid())  # two processes may write the same file
     with io.open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True))
         f.write(u"\n")
@@ -649,6 +649,33 @@ def report_problem(report, header):
     return None
 
 
+SILENT_AFTER = 2  # warnings for one job and seq before the wait stops raising it
+
+
+def warn_job(result):
+    """Count an idle_no_report/bad_report of a job. The second one says "again"; after
+    that the shared PM wait skips the job, and `pending` lists it as silent."""
+    name = result.split(" ")[1]
+    with locked():
+        state = load_state()
+        job = state["jobs"].get(name)
+        if job is None:
+            return result
+        seq = pm_job_report(name)[0]
+        count = job["warned"][1] + 1 if (job.get("warned") or [None])[0] == seq else 1
+        job["warned"] = [seq, count]
+        save_state(state)
+    if count >= SILENT_AFTER:
+        word, rest = result.split(" ", 1)
+        return "%s again %s" % (word, rest) if " " in rest else "%s again" % result
+    return result
+
+
+def is_silent(job, seq):
+    warned = job.get("warned") or [None, 0]
+    return warned[0] == seq and warned[1] >= SILENT_AFTER
+
+
 def seen_mark(header):
     """A blocked report may follow a question at the same seq: both must come through."""
     return "%s:%s" % (header.get("type"), header.get("seq"))
@@ -658,6 +685,8 @@ def check_pm_once(agent, key):
     """One look at a PM and every open job of its repository (read fresh each time,
     so a job added later counts). A final report is returned once: `seen` remembers it."""
     state = load_state()
+    if not open_jobs(state, key):
+        return "no_jobs"  # nothing left to watch: do not poll herdr forever
     jobs = []
     for name in sorted(open_jobs(state, key)):
         seq, header, mtime = pm_job_report(name)
@@ -679,6 +708,8 @@ def check_pm_once(agent, key):
     for name, seq, header, _ in jobs:
         if state["jobs"][name].get("sent_seq") != seq:
             continue  # the orchestrator is still handing it over: the message is not sent yet
+        if is_silent(state["jobs"][name], seq):
+            continue  # the user was told twice; `pending` keeps it in view
         if not (header.get("seq") == seq and header.get("type") in REPORT_TYPES):
             report = os.path.join(pm_job_dir(name), "report.md")
             problem = report_problem(report, read_header(report))
@@ -765,15 +796,23 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                 result = None
         else:
             armed = True
-        if result == "gone" and revive(agent) in ("revived", "alive", "busy", "failed"):
-            result = None  # failed counts toward the revive limit and is tried again
+        if result == "gone":
+            try:
+                if revive(agent) in ("revived", "alive", "busy", "failed"):
+                    result = None  # failed counts toward the revive limit and is tried again
+            except (OSError, StateError):
+                result = None  # state.json busy for a moment: look again next poll
         if result is None:
             idle = 0
         elif result.startswith("?"):
             idle += 1
             if idle >= IDLE_CONFIRMATIONS:
                 if result != "?deliver":
-                    return "superseded" if superseded(agent, token) else result[1:]
+                    if superseded(agent, token):
+                        return "superseded"
+                    if jobs_key is not None:
+                        return warn_job(result[1:])
+                    return result[1:]
                 try:
                     if deliver(agent) is False:  # the mail stays; the next round tries again
                         failed_deliveries += 1
@@ -785,7 +824,10 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                     return "deliver_failed"  # never loop silently on mail that cannot go in
                 idle = 0
         else:
-            # a newer wait may have started while this one looked
+            # A newer wait may have started while this one looked. A --jobs report is
+            # already marked seen, so the newer wait would never return it: keep it.
+            if jobs_key is not None and result.startswith("report "):
+                return result
             return "superseded" if superseded(agent, token) else result
         if poll:
             time.sleep(poll)
@@ -1117,7 +1159,8 @@ def whoami(state, pane):
 def board_node(role, name, key, record, agents):
     folder = agent_folder(role, name, key, record)
     a = live_agent(record, agents)
-    report = read_header(os.path.join(folder, "report.md")) if folder else None
+    # a PM reports per job; an old pm/report.md from before is not its state
+    report = read_header(os.path.join(folder, "report.md")) if folder and role != "pm" else None
     try:
         with io.open(os.path.join(folder, "board.md"), encoding="utf-8") as f:
             board = f.read()
@@ -1510,6 +1553,17 @@ def cmd_send(args):
             me = None
         if me:
             sender = me[1]
+    if args.job:
+        # From now on the PM owes this job a report for this seq (see check_pm_once).
+        # Recorded before the message: a crash in between leaves an idle_no_report
+        # nudge, never a job nobody waits for.
+        with locked():
+            current = load_state()
+            if args.job not in current["jobs"]:
+                return fail("unknown job: %s" % args.job)
+            current["jobs"][args.job]["sent_seq"] = pm_job_report(args.job)[0]
+            current["jobs"][args.job].pop("warned", None)
+            save_state(current)
     d = inbox_dir(found[1])
     if not os.path.isdir(d):
         os.makedirs(d, exist_ok=True)
@@ -1518,14 +1572,6 @@ def cmd_send(args):
     with io.open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
         f.write(u"%s: %s\n" % (sender, text))
     os.replace(path + ".tmp", path)
-    if args.job:
-        # From now on the PM owes this job a report for this seq (see check_pm_once).
-        with locked():
-            current = load_state()
-            if args.job not in current["jobs"]:
-                return fail("unknown job: %s" % args.job)
-            current["jobs"][args.job]["sent_seq"] = pm_job_report(args.job)[0]
-            save_state(current)
     print(json.dumps({"agent": found[1], "queued": True}))
     return 0
 
@@ -1549,8 +1595,11 @@ def deliver(agent):
         except HerdrError as e:
             if e.code == "herdr_unavailable":
                 raise
-            # The text may be in although the wait for "working" failed: typing it
-            # again would give the agent the same instruction twice.
+            # After a stall or timeout the text may be in although the wait for
+            # "working" failed: typing it again would give the same instruction twice.
+            # Any other error (a refusal) typed nothing.
+            if e.code not in ("agent_prompt_stalled", "timeout"):
+                return False
             try:
                 status = herdr("agent", "get", agent).get("agent", {}).get("agent_status")
             except HerdrError:
@@ -1569,7 +1618,7 @@ def deliver(agent):
 
 # ---------------------------------------------------------------- pending
 
-PENDING_RANKS = {"report_done": 0, "question": 1, "blocked": 1, "failed": 1, "plan": 2, "merge": 3}
+PENDING_RANKS = {"unsent": 0, "report_done": 0, "silent": 1, "question": 1, "blocked": 1, "failed": 1, "plan": 2, "merge": 3}
 ASKING_PHASES = ("planning", "working", "reviewing", "merging")
 
 
@@ -1593,8 +1642,12 @@ def pending_item(name, job):
         return None
     seq, report, mtime = pm_job_report(name)
     rtype = report.get("type") if seq is not None and report.get("seq") == seq else None
-    if rtype in ("question", "blocked", "failed"):
+    if seq is not None and job.get("sent_seq") != seq:
+        kind, since, mark = "unsent", job.get("phase_at"), seq  # written, never sent
+    elif rtype in ("question", "blocked", "failed"):
         kind, since, mark = rtype, mtime, seq
+    elif rtype is None and is_silent(job, seq):
+        kind, since, mark = "silent", mtime, seq
     elif rtype == "done" and phase in ASKING_PHASES:
         kind, since, mark = "report_done", mtime, seq
     elif phase == "awaiting_approval":

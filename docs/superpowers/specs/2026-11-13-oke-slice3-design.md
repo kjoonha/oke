@@ -87,7 +87,7 @@ orchestrator 는 PM 마다 대기를 1개만 건다: `oke wait <pm> --jobs`. job
 
 - job 의 `pm/report.md` 가 `pm/assignment.md` 의 seq 와 같고, 종류가 최종 (`done`, `question`, `blocked`, `failed`) 이고, state 의 그 job 의 `seen` 이 `<종류>:<seq>` 와 다르면: `seen` 을 그 값으로 적고 `report <type> <job>` 을 출력하고 끝난다. 여럿이면 보고 수정 시각이 가장 이른 것부터. 그래서 같은 보고를 두 번 돌려주지 않는다. 같은 seq 에서 `question` 뒤에 `blocked` 가 와도 종류가 달라서 다시 돌려준다.
 - agent 단위 결과 (`blocked` + 화면, `gone`, herdr 오류) 는 조각 1, 2 와 같다. 이제 PM 하나에 대기가 하나라서 한 번만 나온다.
-- 보고 없이 쉼: PM 이 쉬는 것이 확인되고, 수신함이 비었고, 재시도 대기 중이 아니고, 어떤 열린 job 의 보고가 현재 seq 의 최종 보고도 `waiting` 도 아닐 때 `idle_no_report <job>`. `bad_report` 도 job 이름을 붙인다.
+- 보고 없이 쉼: PM 이 쉬는 것이 확인되고, 수신함이 비었고, 재시도 대기 중이 아니고, 어떤 열린 job 의 보고가 현재 seq 의 최종 보고도 `waiting` 도 아닐 때 `idle_no_report <job>`. `bad_report` 도 job 이름을 붙인다. 같은 job 과 seq 에 두 번째 경고면 `idle_no_report again <job>` 이고, 그 뒤로 대기는 그 job 을 건너뛴다 (`pending` 에 `silent` 로 남는다). 새 `oke send --job` 이 경고 횟수를 지운다. 열린 job 이 없으면 대기는 `no_jobs` 로 끝난다. 지시 파일의 seq 가 `sent_seq` 와 다르면 (보내기 전에 orchestrator 가 compact 됨) `pending` 이 `unsent` 로 보여 준다.
 - 아직 `pm/assignment.md` 가 없는 job (접수 단계) 은 보지 않는다.
 
 하위를 기다리는 PM 의 대기 (`oke wait <child> --report <file> --seq <n>`) 는 그대로다. 수신함 배달과 아래의 "새 대기가 옛 대기를 대신함" 만 더한다.

@@ -161,14 +161,14 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
 
 ### kind: answer
 
-The user's answer to your question about that job. Continue from where you stopped.
+The user's answer to your question about that job. Continue from where you stopped. If a child of that job is still at a dialog you reported before, report `blocked` again for it (with the new seq) and do not start its wait.
 
 ### kind: dialog
 
 The orchestrator answered a child's dialog.
 
-- "Dialog answered for <child>": rewrite the job's report as `waiting` with the new seq and start that child's wait again with `--after-blocked` added.
-- "Dialog denied for <child>": the user refused that action. Give the child a new instruction saying "The user denied <the action>. Do not try it again. If you cannot finish without it, report `question` and say what you need.", write the job's report as `waiting` with the new seq, then wait with the child's new seq.
+- "Dialog answered for <child>": start that child's wait again with `--after-blocked` added. Rewrite the job's report with the new seq: `question` if the job still has an open question (copy it), otherwise `waiting`.
+- "Dialog denied for <child>": the user refused that action. Give the child a new instruction saying "The user denied <the action>. Do not try it again. If you cannot finish without it, report `question` and say what you need.", rewrite the job's report with the new seq as above, then wait with the child's new seq.
 
 ## Urgent findings
 
