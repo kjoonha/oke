@@ -612,10 +612,12 @@ def check_once(agent, report, seq):
             raise
     if status not in ("idle", "done"):
         return None
-    if current and header.get("type") == "waiting":
-        return None
     if retry_pending(os.path.join(os.path.dirname(report), "api-retry.json")):
         return None  # its mod resubmits the turn after an API error
+    if inbox_messages(agent):
+        return "?deliver"  # idle with mail: deliver it, never call that "no report"
+    if current and header.get("type") == "waiting":
+        return None
     if os.path.exists(report):
         if header is None:
             return "?bad_report no header (expected key: value lines, then ---)"
@@ -626,6 +628,27 @@ def check_once(agent, report, seq):
         if not isinstance(header["seq"], int):
             return "?bad_report seq is not a number"
     return "?idle_no_report"
+
+
+_claims = [0]
+
+
+def wait_mark(agent):
+    return os.path.join(oke_home(), "waits", agent)
+
+
+def claim_wait(agent):
+    """The newest wait on an agent is the only one: two would report one dialog twice
+    and deliver one message twice. Older waits see a foreign token and stop."""
+    _claims[0] += 1
+    token = "%.6f-%d-%d" % (time.time(), os.getpid(), _claims[0])
+    write_json_atomic(wait_mark(agent), {"token": token})
+    return token
+
+
+def superseded(agent, token):
+    mark = read_json(wait_mark(agent), None)
+    return isinstance(mark, dict) and mark.get("token") not in (None, token)
 
 
 RETRY_MARKER_GRACE = 120  # seconds past the marker's own delay
@@ -653,8 +676,11 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
     # the agent may already be at its next dialog when this wait starts.
     armed = not after_blocked
     started = time.time()
+    token = claim_wait(agent)
     while max_polls is None or polls < max_polls:
         polls += 1
+        if superseded(agent, token):
+            return "superseded"
         try:
             result = check_once(agent, report, seq)
             outage = 0
@@ -675,7 +701,13 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False):
         elif result.startswith("?"):
             idle += 1
             if idle >= IDLE_CONFIRMATIONS:
-                return result[1:]
+                if result != "?deliver":
+                    return result[1:]
+                try:
+                    deliver(agent)  # a failed delivery keeps the mail; the next round tries again
+                except HerdrError:
+                    pass  # herdr is down for a moment: the next check_once counts the outage
+                idle = 0
         else:
             return result
         if poll:
@@ -1318,6 +1350,95 @@ def job_locked(args):
     return fail("unknown action")
 
 
+# ---------------------------------------------------------------- inbox
+
+_sent = [0]
+
+
+def inbox_dir(agent):
+    return os.path.join(oke_home(), "inbox", agent)
+
+
+def inbox_messages(agent):
+    """[(path, text)] oldest first. Names start with a fixed-width time, so they sort."""
+    d = inbox_dir(agent)
+    try:
+        names = sorted(n for n in os.listdir(d) if n.endswith(".txt"))
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        try:
+            with io.open(os.path.join(d, n), encoding="utf-8") as f:
+                out.append((os.path.join(d, n), f.read().strip()))
+        except (IOError, OSError, UnicodeDecodeError):
+            pass  # moved away by a delivery in another process
+    return out
+
+
+def cmd_send(args):
+    text = " ".join(" ".join(args.text).split())
+    if not text:
+        return fail("empty message")
+    if text.startswith("/"):
+        return fail("a message must not start with '/': Git Bash rewrites it into a Windows path")
+    state = load_state()
+    found = find_target(state, args.agent)
+    if found is None:
+        return fail("unknown agent: %s" % args.agent)
+    if found[0] == "orchestrator":
+        return fail("the orchestrator has no inbox: a PM reports to it instead")
+    sender = "user"
+    pane = os.environ.get("HERDR_PANE_ID")
+    if pane:
+        try:
+            me, _ = whoami(state, pane)
+        except HerdrError:
+            me = None
+        if me:
+            sender = me[1]
+    d = inbox_dir(found[1])
+    if not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    _sent[0] += 1
+    path = os.path.join(d, "%.6f-%d-%d.txt" % (time.time(), os.getpid(), _sent[0]))
+    with io.open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
+        f.write(u"%s: %s\n" % (sender, text))
+    os.replace(path + ".tmp", path)
+    print(json.dumps({"agent": found[1], "queued": len(inbox_messages(found[1]))}))
+    return 0
+
+
+def deliver(agent):
+    """Type the queued messages into `agent`, which the caller saw idle. They leave the
+    inbox only after herdr took them, so a failed prompt loses nothing."""
+    if not inbox_messages(agent):
+        return False
+    lock = "deliver-" + agent
+    if not try_lock(lock):
+        return False
+    try:
+        msgs = inbox_messages(agent)
+        if not msgs:
+            return False
+        text = "OKe inbox: " + " | ".join(t for _, t in msgs)
+        try:
+            herdr("agent", "prompt", agent, text, "--wait", "--until", "working",
+                  "--until", "blocked", "--timeout", "20000")
+        except HerdrError as e:
+            if e.code == "herdr_unavailable":
+                raise
+            return False
+        done = os.path.join(inbox_dir(agent), "read")
+        if not os.path.isdir(done):
+            os.makedirs(done, exist_ok=True)
+        for path, _ in msgs:
+            os.replace(path, os.path.join(done, os.path.basename(path)))
+        return True
+    finally:
+        unlock(lock)
+
+
 # ---------------------------------------------------------------- pending
 
 PENDING_RANKS = {"report_done": 0, "question": 1, "blocked": 1, "failed": 1, "plan": 2, "merge": 3}
@@ -1421,6 +1542,11 @@ def build_parser():
     retry.add_argument("--error", default="")
     retry.add_argument("--clear", action="store_true")
     retry.set_defaults(func=cmd_api_retry)
+
+    send = sub.add_parser("send")
+    send.add_argument("agent")
+    send.add_argument("text", nargs="+")
+    send.set_defaults(func=cmd_send)
 
     hook = sub.add_parser("compact-hook")
     hook.set_defaults(func=cmd_compact_hook)

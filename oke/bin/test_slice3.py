@@ -68,5 +68,198 @@ class TestJobState(S3Base):
         self.assertEqual(self.cli("job", "defer", "fix-a"), 1)
 
 
+class InboxBase(S3Base):
+    def setUp(self):
+        S3Base.setUp(self)
+        self.job("fix-a", "working")
+        s = oke.load_state()
+        s["repos"][self.key] = {"pm": {"agent": "pm-toy", "pane": "w1:p3", "session": "s-pm"}}
+        s["orchestrator"] = {"pane": "w7:p1"}
+        oke.save_state(s)
+        oke.write_json_atomic(oke.children_path(self.key), {"fix-a-w1": {
+            "agent": "fix-a-w1", "pane": "w1:p5", "session": "s-w", "role": "worker", "job": "fix-a"}})
+
+    def texts(self, agent):
+        return [t for _, t in oke.inbox_messages(agent)]
+
+
+class TestSend(InboxBase):
+    def test_messages_keep_their_order(self):
+        self.fake({})
+        for word in ("one", "two", "three"):
+            self.assertEqual(self.cli("send", "pm-toy", word), 0)
+        self.assertEqual(self.texts("pm-toy"), ["user: one", "user: two", "user: three"])
+
+    def test_unknown_agent_is_refused(self):
+        self.fake({})
+        self.assertEqual(self.cli("send", "nobody", "hi"), 1)
+
+    def test_the_orchestrator_has_no_inbox(self):
+        self.fake({})
+        self.assertEqual(self.cli("send", "orchestrator", "hi"), 1)
+
+    def test_a_leading_slash_is_refused(self):
+        # Git Bash rewrites such an argument into a Windows path before python sees it
+        self.fake({})
+        self.assertEqual(self.cli("send", "pm-toy", "/tmp/x"), 1)
+        self.assertEqual(self.texts("pm-toy"), [])
+
+    def test_newlines_become_spaces(self):
+        self.fake({})
+        self.cli("send", "pm-toy", "a\nb")
+        self.assertEqual(self.texts("pm-toy"), ["user: a b"])
+
+    def test_the_sender_is_the_agent_in_this_pane(self):
+        os.environ["HERDR_PANE_ID"] = "w1:p5"
+        self.fake({"agent list": [J({"agents": [AG("fix-a-w1", pane="w1:p5", session="s-w")]})]})
+        self.cli("send", "pm-toy", "URGENT fix-a: the plan misses a file")
+        self.assertEqual(self.texts("pm-toy"), ["fix-a-w1: URGENT fix-a: the plan misses a file"])
+
+
+class TestDeliver(InboxBase):
+    def test_delivery_prompts_once_and_moves_the_messages(self):
+        self.fake({})
+        self.cli("send", "fix-a-w1", "one")
+        self.cli("send", "fix-a-w1", "two")
+        self.fake({"agent prompt": [J({"type": "agent_prompted"})]})
+        self.assertTrue(oke.deliver("fix-a-w1"))
+        self.assertEqual(self.calls(), [["agent", "prompt", "fix-a-w1", "OKe inbox: user: one | user: two",
+                                         "--wait", "--until", "working", "--until", "blocked",
+                                         "--timeout", "20000"]])
+        self.assertEqual(self.texts("fix-a-w1"), [])
+        self.assertEqual(len(os.listdir(os.path.join(oke.inbox_dir("fix-a-w1"), "read"))), 2)
+
+    def test_a_failed_prompt_keeps_the_messages(self):
+        self.fake({})
+        self.cli("send", "fix-a-w1", "one")
+        self.fake({"agent prompt": [E("agent_not_found")]})
+        self.assertFalse(oke.deliver("fix-a-w1"))
+        self.assertEqual(self.texts("fix-a-w1"), ["user: one"])
+
+    def test_nothing_to_deliver(self):
+        self.fake({})
+        self.assertFalse(oke.deliver("fix-a-w1"))
+        self.assertEqual(self.calls(), [])
+
+
+class TestWaitDelivers(InboxBase):
+    def report_path(self):
+        return self.put(os.path.join(self.home, "jobs", "fix-a", "fix-a-w1", "report.md"),
+                        "type: waiting\nseq: 2\n---\n")
+
+    def test_an_idle_target_gets_its_mail_and_the_wait_goes_on(self):
+        r = self.report_path()
+        self.fake({})
+        self.cli("send", "fix-a-w1", "one")
+        self.fake({"agent get": [AGENT("idle")], "agent prompt": [J({"type": "agent_prompted"})]})
+        self.assertIsNone(oke.wait_loop("fix-a-w1", r, 2, poll=0, max_polls=5))
+        self.assertEqual(len(self.argv_of("agent", "prompt")), 1)
+        self.assertEqual(self.texts("fix-a-w1"), [])
+
+    def test_mail_holds_an_idle_verdict(self):
+        # a message still on its way means the target has work: not "idle, no report"
+        r = self.put(os.path.join(self.home, "jobs", "fix-a", "fix-a-w1", "report.md"), "type: done\nseq: 1\n---\n")
+        self.fake({})
+        self.cli("send", "fix-a-w1", "one")
+        self.fake({"agent get": [AGENT("idle")], "agent prompt": [E("agent_not_idle")]})
+        self.assertIsNone(oke.wait_loop("fix-a-w1", r, 2, poll=0, max_polls=8))
+
+    def test_a_working_target_gets_no_mail(self):
+        r = self.report_path()
+        self.fake({})
+        self.cli("send", "fix-a-w1", "one")
+        self.fake({"agent get": [AGENT("working")]})
+        self.assertIsNone(oke.wait_loop("fix-a-w1", r, 2, poll=0, max_polls=5))
+        self.assertEqual(self.argv_of("agent", "prompt"), [])
+
+    def test_a_newer_wait_supersedes_an_older_one(self):
+        r = self.report_path()
+        self.fake({"agent get": [AGENT("working")]})
+        original = oke.check_once
+
+        def newer_wait_starts(*a, **kw):
+            oke.claim_wait("fix-a-w1")
+            return original(*a, **kw)
+        oke.check_once = newer_wait_starts
+        try:
+            self.assertEqual(oke.wait_loop("fix-a-w1", r, 2, poll=0, max_polls=5), "superseded")
+        finally:
+            oke.check_once = original
+
+
+NL = chr(10)
+
+
+def REPORT(kind, seq):
+    return "type: %s%sseq: %d%s---%s" % (kind, NL, seq, NL, NL)
+
+
+class TestPmWait(InboxBase):
+    def wait(self, polls=5):
+        return oke.wait_loop("pm-toy", None, None, poll=0, max_polls=polls, jobs_key=self.key)
+
+    def test_a_final_report_names_its_job_and_is_returned_once(self):
+        self.pm_job("fix-a", 2, REPORT("done", 2))
+        self.fake({"agent get": [AGENT("working")]})
+        self.assertEqual(self.wait(), "report done fix-a")
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["seen"], 2)
+        self.assertIsNone(self.wait())
+
+    def test_a_job_added_later_is_seen(self):
+        self.fake({"agent get": [AGENT("working")]})
+        self.assertIsNone(oke.check_pm_once("pm-toy", self.key))
+        self.job("fix-b", "planning")
+        self.pm_job("fix-b", 1, REPORT("question", 1))
+        self.assertEqual(oke.check_pm_once("pm-toy", self.key), "report question fix-b")
+
+    def test_the_oldest_report_comes_first(self):
+        self.job("fix-b", "planning")
+        old = self.pm_job("fix-b", 1, REPORT("done", 1))
+        self.pm_job("fix-a", 1, REPORT("done", 1))
+        os.utime(os.path.join(old, "report.md"), (1, 1))
+        self.fake({"agent get": [AGENT("working")]})
+        self.assertEqual(self.wait(), "report done fix-b")
+
+    def test_an_idle_pm_owing_a_report_names_the_job(self):
+        self.pm_job("fix-a", 3, REPORT("waiting", 2))
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertEqual(self.wait(), "idle_no_report fix-a")
+
+    def test_a_job_without_a_pm_assignment_is_not_owed(self):
+        self.job("fix-b", "intake")
+        self.pm_job("fix-a", 2, REPORT("waiting", 2))
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertIsNone(self.wait())
+
+    def test_a_seen_final_report_is_not_owed(self):
+        self.pm_job("fix-a", 2, REPORT("done", 2))
+        s = oke.load_state()
+        s["jobs"]["fix-a"].update(seen=2, phase="awaiting_approval")
+        oke.save_state(s)
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertIsNone(self.wait())
+
+    def test_a_bad_report_names_the_job(self):
+        self.pm_job("fix-a", 2, "garbage")
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertTrue(self.wait().startswith("bad_report fix-a "))
+
+    def test_the_pm_retry_marker_holds_the_wait(self):
+        self.pm_job("fix-a", 3, REPORT("waiting", 2))
+        oke.write_json_atomic(os.path.join(oke.pm_dir(self.key), "api-retry.json"), {"attempt": 1, "delay": 30})
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertIsNone(self.wait())
+
+    def test_a_pm_at_a_dialog_is_blocked(self):
+        self.pm_job("fix-a", 2, REPORT("waiting", 2))
+        self.fake({"agent get": [AGENT("blocked")], "agent read": [{"stdout": "Allow? 1. Yes", "exit": 0}]})
+        self.assertEqual(self.wait(), "blocked" + NL + "Allow? 1. Yes")
+
+    def test_cli_needs_a_report_or_jobs(self):
+        self.fake({})
+        self.assertEqual(self.cli("wait", "pm-toy"), 1)
+        self.assertEqual(self.cli("wait", "fix-a-w1", "--jobs"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
