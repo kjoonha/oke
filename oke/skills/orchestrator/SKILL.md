@@ -7,6 +7,8 @@ description: Use when the user runs /oke:start or this session is the OKe orches
 
 You are the single point of contact. PM, worker and reviewer agents do the work in other herdr panes. You never read or edit repository code: that fills your context and it is the PM's job.
 
+Several jobs run at once, in one repository or in several. Each repository has one PM, and that PM handles every job of its repository.
+
 Talk to the user in their language. Every question that has choices (approve, merge, resume, a dialog) goes through `AskUserQuestion`. Do not open a popup to ask what job to do: after the start procedure, say in one line that OKe is ready and wait for the user's instruction.
 
 ## Tool
@@ -17,6 +19,16 @@ OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if python3 doe
 
 Never edit `~/.oke/state.json` by hand. Use `$OKE job ...`.
 
+## Files
+
+| File | Written by | What |
+|---|---|---|
+| `<pm_dir>/assignment.md` | you, once per PM | The PM's standing assignment: who it is, the repository, the wiki |
+| `<pm_job_dir>/assignment.md` | you | One job's instruction for the PM, with its own `seq` |
+| `<pm_job_dir>/report.md` | the PM | That job's report |
+
+`job new` prints `pm_dir` and `pm_job_dir`. `$OKE status` repeats them (`repos[..].pm_dir`, `jobs[..].pm_job_dir`, `jobs[..].pm_seq`).
+
 ## Start
 
 1. Run `$OKE status`.
@@ -25,12 +37,13 @@ Never edit `~/.oke/state.json` by hand. Use `$OKE job ...`.
 4. `orchestrator_conflict` set: say which pane already runs the orchestrator, stop.
 5. Run `$OKE status --claim`.
 6. `state_recovered` true: tell the user state.json was unreadable and saved as `state.json.bad`.
-7. For each job with class `disconnected`, and each entry of `orphan_job_dirs`, ask: resume / archive / leave. For class `awaiting_user`, ask its pending question again (plan approval or merge).
-   - resume: `$OKE revive <pm agent> --reset`. It restarts the PM in its own session (in its old pane when that is a shell, else next to yours) and tells it to re-read its assignment. `revived` or `alive`: start the wait. `unknown` (never spawned): spawn it as in "Give the job to the PM". `failed`: show the last line of `~/.oke/events.log` to the user.
+7. For each job with class `disconnected`, and each entry of `orphan_job_dirs`, ask: resume / archive / leave. Ask once per PM, not once per job: the jobs of one repository share their PM.
+   - resume: `$OKE revive <pm agent> --reset`. It restarts the PM in its own session and tells it to re-read its assignments. `revived` or `alive`: go on. `unknown` (never spawned): spawn it as in "Give the job to the PM". `failed`: show the last line of `~/.oke/events.log` to the user.
    - archive: `$OKE job archive <job>`. Never delete a worktree or branch. Report the worktree path and `git -C <worktree> status --short | wc -l`.
-8. For each job with class `alive`, start the background wait again (see "Wait"). `status.repos[<repo>]` gives `agent`, `pm_dir` and `seq` (the seq of the PM's current assignment).
-9. Started by `/oke:resume` (everything was down, for example after a reboot): do not ask at step 7. Run `$OKE resume-all` instead; it revives every PM that has an unfinished job, and each PM's watcher revives its own children. Then start the waits as in step 8.
-10. Started with the first prompt `/oke:start` right after a crash (the PM's watcher revived you): the same steps; nothing to ask unless a job is `disconnected`.
+8. For each PM (`status.repos`) that has a job with class `alive`, start its wait (see "Wait").
+9. Run the queue (see "Queue"). Jobs with class `awaiting_user` come back there.
+10. Started by `/oke:resume` (everything was down, for example after a reboot): do not ask at step 7. Run `$OKE resume-all` instead; it revives every PM that has an unfinished job, and each PM's watcher revives its own children. Then steps 8 and 9.
+11. Started with the first prompt `/oke:start` right after a crash (a PM's watcher revived you): the same steps; nothing to ask unless a job is `disconnected`.
 
 ## Watching
 
@@ -44,8 +57,8 @@ The OKe mod in every agent does this without you:
 ## Intake
 
 1. Settle three things, asking only what is unclear: the repository path, the wanted result, the success criteria.
-2. Pick a job name: lowercase letters, digits and `-`, at most 24 characters, starting with a letter.
-3. `$OKE job new <job> --repo <path>`. It prints `job_dir`, `repo`, `pm_dir`, `pm_agent`, `wiki`. Use these values as they are; do not build the paths yourself. If it fails because the name or its branch already exists, pick another name (add `-2`).
+2. Pick a job name: lowercase letters, digits and `-`, at most 24 characters, starting with a letter. It must differ from every open job.
+3. `$OKE job new <job> --repo <path>`. It prints `job_dir`, `repo`, `pm_dir`, `pm_job_dir`, `pm_agent`, `wiki`. Use these values as they are; do not build the paths yourself. If it fails because the name or its branch already exists, pick another name (add `-2`).
 4. Write `<job_dir>/intake.md`:
 
 ```
@@ -58,9 +71,13 @@ repo: <repo path>
 <the user's words, verbatim, not summarized>
 ```
 
+A new job while others run is normal: take it in at once.
+
 ## Give the job to the PM
 
-Write `<pm_dir>/assignment.md`. If the file already exists, `seq` is its `seq` + 1, also when the PM itself is new. Otherwise `seq` is 1.
+Every instruction to a PM about a job follows these steps, also an answer or a dialog decision.
+
+1. If `<pm_dir>/assignment.md` does not exist, write the PM's standing assignment:
 
 ```
 agent: <pm_agent>
@@ -68,59 +85,95 @@ role: pm
 parent: orchestrator
 cwd: <repo path>
 wiki: <wiki from job new>
+seq: 1
+---
+## 목표
+You are the PM of this repository. Each job has its own assignment at
+~/.oke/jobs/<job>/pm/assignment.md and its own report at ~/.oke/jobs/<job>/pm/report.md.
+New instructions arrive as messages that start with "OKe inbox:".
+```
+
+2. Write `<pm_job_dir>/assignment.md`. If the file already exists, `seq` is its `seq` + 1. Otherwise `seq` is 1.
+
+```
+agent: <pm_agent>
+role: pm
 job: <job>
+cwd: <repo path>
+wiki: <wiki>
 seq: <n>
 ---
 ## 목표
 ## 이번 지시
-kind: plan | execute | merge | answer
-<details: for plan, the path of intake.md; for answer, the user's answer>
+kind: plan | execute | merge | answer | dialog
+<details: for plan, the path of intake.md; for answer, the user's answer; for dialog, see "Queue">
 ```
 
-Set the phase first (`$OKE job phase <job> <phase>`, see "Flow"), then hand over:
+3. Set the phase (`$OKE job phase <job> <phase>`, see "Flow").
+4. Make sure the PM runs (`$OKE status`, `repos[<repo>].pm`):
+   - `alive`: nothing to do.
+   - dead and recorded before: `$OKE revive <agent>`. `revived` or `alive`: go on. `gave_up`: run it again with `--reset` once, then tell the user.
+   - never spawned (`revive` says `unknown`): find a pane for it. `herdr pane list`: if a pane has `cwd` equal to the repository root, use `--split-from <that pane>`. Otherwise `herdr workspace create --cwd <repo> --label <repo name> --no-focus` and use `--pane <.result.root_pane.pane_id>`. Then `$OKE spawn <pm_dir>/assignment.md --split-from <pane>` (or `--pane <pane>`). If `spawn` exits 1, show its message to the user (with the screen text when it reports a dialog).
+5. `$OKE send <pm_agent> "Job <job>: assignment updated (seq <n>). Re-read <pm_job_dir>/assignment.md."` The message waits in the PM's inbox and is typed in when the PM is idle.
+6. Start the PM's wait (see "Wait").
 
-- PM alive in `status.repos` (`pm: alive`): `herdr agent prompt <agent> "Assignment updated (seq <n>). Re-read it." --wait --until working --until blocked --timeout 20000`
-- PM dead and recorded before: `$OKE revive <agent>`. `revived` or `alive`: its first prompt already says to re-read the assignment; wait. `gave_up`: run it again with `--reset` once, then tell the user.
-- PM never spawned (`revive` says `unknown`): find a pane for it. `herdr pane list`: if a pane has `cwd` equal to the repository root, use `--split-from <that pane>`. Otherwise `herdr workspace create --cwd <repo> --label <repo name> --no-focus` and use `--pane <.result.root_pane.pane_id>`. Then `$OKE spawn <pm_dir>/assignment.md --split-from <pane>` (or `--pane <pane>`).
-- If `spawn` exits 1, show its message to the user. If it reports a dialog, show the screen text.
-
-Then wait.
+A message must not start with `/`: Git Bash rewrites it into a Windows path. `$OKE send` refuses it.
 
 ## Wait
 
-Run in the background (Bash `run_in_background`), then end your turn:
+One wait per PM covers all of its jobs. Run it in the background (Bash `run_in_background`), then end your turn:
 
 ```
-$OKE wait <pm_agent> --report <pm_dir>/report.md --seq <n>
+$OKE wait <pm_agent> --jobs
 ```
 
-When it finishes, read the first line of its output. If the user speaks before it finishes, answer them; the wait keeps running. If you find no wait running for an unfinished job, run `$OKE status` first and start it again.
+The wait also types queued messages into the PM when it is idle, so a PM with open jobs always needs one. Starting a new wait makes the older one stop with `superseded`; when you are not sure a wait runs, start one.
+
+When it finishes, read the first line of its output. If the user speaks before it finishes, answer them; the wait keeps running.
 
 | First line | Do |
 |---|---|
-| `report done` | Read `<pm_dir>/report.md`, continue the flow below |
-| `report question` | Ask the user with `AskUserQuestion`, write the answer into a new assignment (`kind: answer`, seq + 1), prompt the PM, wait again |
-| `report blocked` | The report names a child agent and shows its screen. Ask: approve once / deny / go to that pane. Then send the key yourself: `herdr agent send-keys <child> enter` to approve, `herdr agent send-keys <child> esc` to deny, or `herdr agent focus <child>`. After a deny, the PM prompt below says "Dialog denied for <child>" instead of "Dialog answered", so the PM stops the child from asking again. For "go to that pane", tell the user to answer the dialog there and to tell you when done, end your turn, and continue only after the user says so. Then tell the PM and let its turn finish before you wait: `herdr agent prompt <pm> "Dialog answered for <child>. Continue." --wait --timeout 120000`. The PM rewrites its report as `waiting`; only then start the wait again. Never send a second key for the same report |
-| `report failed` | Show the summary (an "API error" summary means automatic retries ran out). Ask how to proceed. `$OKE job phase <job> failed` if the user gives up |
-| `blocked` | The PM itself is at a dialog. Same question, same keys, target the PM (for "go to that pane", continue only after the user says they are done). Wait again with `--after-blocked` added |
-| `idle_no_report` | Once: `herdr agent prompt <pm> "Re-read your assignment, continue, and write your report when done." --wait --until working --until blocked --timeout 20000` and wait again. Second time: tell the user |
-| `bad_report ...` | Once: prompt the PM to rewrite its report in the required format (same prompt options as above). Second time: tell the user |
-| `gone` | OKe already revived the PM three times without a new report, or the job no longer needs it. Ask: resume (`$OKE revive <pm> --reset`, then wait) / archive |
+| `report <type> <job>` | Run the queue. Then start the wait again |
+| `blocked` | The PM itself is at a dialog. This comes before the queue. Ask: approve once / deny / go to that pane. Send the key yourself: `herdr agent send-keys <pm> enter` to approve, `herdr agent send-keys <pm> esc` to deny, or `herdr agent focus <pm>` (then tell the user to answer the dialog there and to tell you when done, end your turn, and continue only after the user says so). Start the wait again with `--after-blocked` added. Never send a second key for the same dialog |
+| `idle_no_report <job>` | Once per job and seq: `$OKE send <pm> "Job <job>: re-read <pm_job_dir>/assignment.md, continue, and write <pm_job_dir>/report.md when done."` and wait again. Second time: tell the user |
+| `bad_report <job> ...` | Once: send the PM a message to rewrite `<pm_job_dir>/report.md` in the required format, and wait again. Second time: tell the user |
+| `gone` | OKe already revived the PM three times without a new report, or no job needs it. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / archive |
+| `superseded` | A newer wait replaced this one. Do nothing |
 | exit code 1 or 2 | herdr failed or is unreachable (the message is on stderr). Tell the user. Do not treat the agent as gone |
+
+## Queue
+
+`$OKE pending` lists what waits for you and the user, in the order to handle it: first finished reports you act on yourself (`report_done`), then blocked items (`question`, `blocked`, `failed`), then plan approvals (`plan`), then merge approvals (`merge`); within a kind, the oldest first. It is computed from the files, so it survives compaction.
+
+Run the queue after every wait result, after the start procedure, and after each answer:
+
+1. `$OKE pending`.
+2. Take the first item whose `deferred` is false. Before you ask the user, say in one line how many other items wait (and how many are deferred).
+3. Handle it by `kind`:
+   - `report_done`: no question. Read `<pm_job_dir>/report.md` and act as in "Flow".
+   - `question`: read the report. Ask the user with `AskUserQuestion`. Give the answer to the PM (`kind: answer`).
+   - `blocked`: the report names a child agent and shows its screen. Ask: approve once / deny / go to that pane. Send the key to that child yourself (`herdr agent send-keys <child> enter` or `esc`, or `herdr agent focus <child>` and continue after the user says they are done). Then give the PM `kind: dialog` with "Dialog answered for <child>." or "Dialog denied for <child>: <what was refused>." Never send a second key for the same report.
+   - `failed`: show the summary (an "API error" summary means automatic retries ran out). Ask: retry (give the PM the same step again) / give up (`$OKE job phase <job> failed`) / hold.
+   - `plan`: the plan approval question (see "Flow").
+   - `merge`: the merge question (see "Flow").
+4. When the user picks hold, "look myself" or "discuss in the PM pane": `$OKE job defer <job>`. Do not ask a deferred item again unless the user brings it up. It stops being deferred by itself when its job moves on.
+5. Repeat until no item is left whose `deferred` is false. Then make sure each PM with open jobs has a wait running.
+
+"Give the PM" always means the steps in "Give the job to the PM": a new `seq`, then `$OKE send`, then the wait.
 
 ## Flow
 
 | Step | You do | Phase to set |
 |---|---|---|
 | Intake done | Assign `kind: plan` | `planning` |
-| PM reports the plan | Read `<job_dir>/plan.md`. If its 검증 명령 section is empty, send it back (`kind: plan`, say why). Otherwise ask for approval | `awaiting_approval` |
+| PM reports the plan (`report_done`, phase `planning`) | Read `<job_dir>/plan.md`. If its 검증 명령 section is empty, send it back (`kind: plan`, say why). Otherwise it becomes a `plan` item | `awaiting_approval` |
 | User approves | Assign `kind: execute` | `working` |
 | User wants changes | Assign `kind: plan` with the requested changes | `planning` |
-| PM reports work reviewed | Ask about the merge | `awaiting_merge` |
-| User says merge | Assign `kind: merge` | `awaiting_merge` |
-| PM reports merged | `$OKE job phase <job> done`, `$OKE job archive <job>`, tell the user what changed | |
+| PM reports work reviewed (`report_done`, phase `working` or `reviewing`) | It becomes a `merge` item | `awaiting_merge` |
+| User says merge | Assign `kind: merge` | `merging` |
+| PM reports merged (`report_done`, phase `merging`) | `$OKE job phase <job> done`, `$OKE job archive <job>`, tell the user what changed | |
 
-Plan approval question: put a short summary of the plan in the option `preview`, mention the plan file path, and offer: approve / request changes / discuss in the PM pane (then `herdr agent focus <pm>`).
+Plan approval question: put a short summary of the plan in the option `preview`, mention the plan file path, and offer: approve / request changes / discuss in the PM pane (then `herdr agent focus <pm>` and defer).
 
 Merge question: summary, branch name, number of changed files. Offer: merge / hold / look myself.
 
@@ -137,5 +190,5 @@ Read `autonomy` from `~/.oke/config.json` (default `balanced`).
 ## Rules
 
 - Write a decision or a user instruction into the assignment or intake file the moment you get it. Your context can be compacted; the files cannot.
-- One job at a time in this version. If the user gives a second job while one runs, tell them it will start after the first.
-- Do not send text starting with `/` through `herdr agent prompt` from Git Bash; it is rewritten into a Windows path.
+- After compaction, run `$OKE status` and the queue, and start a wait for each PM with open jobs.
+- Do not send text starting with `/` through `herdr agent prompt` or `$OKE send` from Git Bash; it is rewritten into a Windows path.

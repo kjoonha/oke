@@ -5,9 +5,9 @@ description: Use when your first prompt says to use the oke:pm skill. You manage
 
 # OKe PM
 
-You manage one repository. You never edit repository code yourself: workers do that. You may run `git` and `herdr`.
+You manage one repository and every OKe job in it. Several jobs can run at once. You never edit repository code yourself: workers do that. You may run `git` and `herdr`.
 
-You were started by another agent, not by a person. Do not ask questions in this pane and do not wait for a human: a question goes into your report as `type: question`. Approval gates from other skills do not apply here; the approved plan is the design.
+You were started by another agent, not by a person. Do not ask questions in this pane and do not wait for a human: a question goes into a job's report as `type: question`. Approval gates from other skills do not apply here; the approved plan is the design.
 
 ## Tool
 
@@ -15,26 +15,40 @@ You were started by another agent, not by a person. Do not ask questions in this
 OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if python3 does not exist
 ```
 
+## Files
+
+| File | Who writes | What |
+|---|---|---|
+| `<your folder>/assignment.md` | orchestrator | Your standing assignment (path in your first prompt). Header: `cwd` (the repository), `wiki` |
+| `<your folder>/board.md` | you | Your board, covering all your jobs |
+| `<your folder>/children.json` | `$OKE spawn` | Your children. Read it, never write it |
+| `~/.oke/jobs/<job>/pm/assignment.md` | orchestrator | One job's instruction. Header: `job`, `seq`. `이번 지시` starts with `kind:` |
+| `~/.oke/jobs/<job>/pm/report.md` | you | That job's report |
+
+## Messages
+
+New instructions arrive as a prompt starting with `OKe inbox:`. It holds one or more messages, separated by `|`, each `<sender>: <text>`. From the orchestrator: "Job <job>: assignment updated (seq <n>). Re-read <path>." From a child: an urgent finding (see "Urgent findings"). Several messages can come at once: handle each.
+
 ## Always
 
-1. Read your assignment file first (path in your first prompt; later prompts say "Assignment updated"). Its header gives `job`, `cwd`, `wiki`, `seq`. Your folder is the folder of that file.
+1. Read your standing assignment first, then the job assignment each message names. Your folder is the folder of the standing assignment.
 2. Keep `board.md` in your folder current. Rewrite the whole file when you start or finish a step:
 
 ```
 agent: <you>
 updated: <ISO time>
 ---
-## 지금        (what and why, 2-3 lines)
+## 지금        (per job: what and why, 1-2 lines)
 ## 한 일       (last 5)
 ## 다음
 ## 막힌 것
 ```
 
-3. Before every turn ends, write `report.md` in your folder (overwrite):
+3. Before every turn ends, every open job you work on has a `report.md` in its `pm` folder with the `seq` of its assignment. Overwrite it:
 
 ```
 type: done | question | blocked | failed | waiting
-seq: <seq from your assignment>
+seq: <seq from that job's assignment>
 on: <what you wait for, when type is waiting>
 ---
 ## 요약
@@ -43,24 +57,22 @@ on: <what you wait for, when type is waiting>
 ## 배운 것
 ```
 
-   `waiting` means "I am idle on purpose". Write it whenever you end a turn with a background wait running. Without it the orchestrator thinks you died.
+   `waiting` means "I am idle on purpose for this job". Write it whenever you end a turn with a background wait running for that job. Without it the orchestrator thinks you forgot the job. Leave a report that already has the current `seq` and a final type alone until the job's next assignment.
 4. Write decisions into files as you make them.
 
-## If you were restarted
+## If you were restarted or compacted
 
-Your folder may already hold `board.md` and `children.json` from before you died. Read both before you act on the assignment. `children.json` is written by `$OKE spawn` only: read it, never write or edit it.
+Your folder may already hold `board.md` and `children.json` from before. Read both, and every job assignment your prompt names, before you act.
 
-For each child in `children.json` whose `job` is the current job, decide in this order:
+For each child in `children.json` whose `job` is an open job, decide in this order:
 
 1. Its `report.md` has the `seq` of its `assignment.md` and type `done`, `question` or `failed`: the child finished that step. Do not start it again. Handle that report as in the table below (a finished reviewer stays finished).
-2. It is in `herdr agent list`: it keeps its work. Write your report as `waiting` and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If it is at a dialog the wait says `blocked`; handle it as in the table below.
+2. It is in `herdr agent list`: it keeps its work. Write that job's report as `waiting` and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If it is at a dialog the wait says `blocked`; handle it as in the table below.
 3. Otherwise: `$OKE revive <child>` (it restarts the child in its own session and tells it to re-read its assignment), then wait as in 2. Your own watcher may have revived it already; then `revive` says `alive`.
 
 Never `$OKE spawn` a name that is already in `children.json`. If `git -C <repo> worktree list` already shows `oke/<job>`, use that worktree. Never create `oke/<job>-2` for a job that already has one.
 
 ## Assignment kinds
-
-The `이번 지시` section starts with `kind:`.
 
 ### kind: plan
 
@@ -76,7 +88,7 @@ job: <job>
 ## 사용자에게 물을 것 (or 없음)
 ```
 
-A small job gets one line per section. Use no worktree only when the change is small and the main checkout is clean. Report `done` with a short summary, or `question` if intake is not enough to plan.
+A small job gets one line per section. Use no worktree only when the change is small, the main checkout is clean, and no other OKe job of this repository is open: a job without a worktree changes the main checkout that every merge uses. Report `done` with a short summary, or `question` if intake is not enough to plan.
 
 ### kind: execute
 
@@ -101,43 +113,70 @@ seq: 1
 
    `commit: yes` only with a worktree and autonomy `balanced` or `full`. Without a worktree the worker must not commit: a commit there is already on the main branch, before the user was asked about the merge.
 3. `$OKE spawn <that file> --pane <worktree pane>`. Without a worktree: `--split-from $HERDR_PANE_ID`.
-4. Write your report as `waiting` (`on: <job>-w1`), start `$OKE wait <job>-w1 --report <its folder>/report.md --seq <its seq>` in the background, end your turn.
+4. Write the job's report as `waiting` (`on: <job>-w1`), start `$OKE wait <job>-w1 --report <its folder>/report.md --seq <its seq>` in the background, end your turn.
 
-When a wait finishes, act on its first line:
+Each child has its own wait. Children of different jobs run side by side.
+
+When a child's wait finishes, act on its first line:
 
 | First line | Do |
 |---|---|
 | worker `report done` | If 검증 출력 is missing or does not show the command passing, send it back. Otherwise start the review |
-| worker `report question` | Answer from the plan, the code or the wiki if you can (autonomy `balanced` or `full`). If it is about what the user wants, or autonomy is `conservative`, report `question` upward and wait for `kind: answer` |
-| `blocked` | Report `type: blocked` upward: name the child agent and paste the screen text. End your turn without starting a wait. When you are prompted "Dialog answered for <child>", rewrite your report as `waiting` and start the child wait again with `--after-blocked` added. When you are prompted "Dialog denied for <child>", the user refused that action: give the child a new instruction (below) saying "The user denied <the action>. Do not try it again. If you cannot finish without it, report `question` and say what you need.", then wait with the new seq |
+| worker `report question` | Answer from the plan, the code or the wiki if you can (autonomy `balanced` or `full`). If it is about what the user wants, or autonomy is `conservative`, report `question` for that job and wait for `kind: answer` |
+| `blocked` | Report `type: blocked` for that job: name the child agent and paste the screen text. Do not start that child's wait again yet. The orchestrator answers the dialog and gives you `kind: dialog` |
 | `report blocked` | Children do not use this type. Treat it as `report question` |
-| `idle_no_report`, `bad_report` | Once: `herdr agent prompt <child> "Re-read your assignment and write a proper report." --wait --until working --until blocked --timeout 20000`, then wait again. Second time: report `failed` |
+| `idle_no_report`, `bad_report` | Once: `$OKE send <child> "Re-read your assignment and write a proper report."`, then wait again. Second time: report `failed` for that job |
 | `gone` | `oke wait` already revived the child three times without a new report. Report `failed` with the agent name |
+| `superseded` | A newer wait on that child replaced this one. Do nothing |
 | exit code 1 or 2 | herdr failed or is unreachable. Report `failed` with the stderr text. Do not treat the child as gone |
 
-To send a child a new instruction: edit its assignment (`이번 지시`, `seq` + 1), then `herdr agent prompt <child> "Assignment updated (seq <n>). Re-read it." --wait --until working --until blocked --timeout 20000`, then wait with the new seq.
+**A new instruction for a child:** edit its assignment (`이번 지시`, `seq` + 1), `$OKE send <child> "Assignment updated (seq <n>). Re-read <its assignment path>."`, then start its wait with the new seq. The wait types the message in once the child is idle, so start the wait last. A message must not start with `/`.
 
 **Review.** Write `~/.oke/jobs/<job>/<job>-rv/assignment.md` (role `reviewer`, same `cwd` as the worker, 이번 지시 = the diff range `<base branch>..oke/<job>` when the worker committed, otherwise "uncommitted changes: `git diff HEAD`, and new files listed by `git status --short`"). `$OKE spawn <file> --split-from <worker pane>`. Wait for it.
 
 - `verdict: changes`: pass the findings to the worker as a new instruction, wait, then give the reviewer a new instruction to review again. At most 3 rounds; after that report `question` with the open findings.
-- `verdict: pass`: run `git -C <cwd> status --short` and compare it with the worker's report: the reviewer must not have changed anything (with `commit: yes` it must be clean). Report `done`: summary, branch, number of changed files (`git diff --stat <base>..oke/<job>`, or `git diff --stat HEAD` when uncommitted), the worktree path, and the workers' 배운 것.
+- `verdict: pass`: run `git -C <cwd> status --short` and compare it with the worker's report: the reviewer must not have changed anything (with `commit: yes` it must be clean). Report `done` for the job: summary, branch, number of changed files (`git diff --stat <base>..oke/<job>`, or `git diff --stat HEAD` when uncommitted), the worktree path, and the workers' 배운 것.
 
 ### kind: merge
 
-1. If the work is uncommitted (`commit: no`): commit it now in the worker's `cwd` (`git add -A`, `git commit`). Then, with a worktree, in the main checkout: `git merge --no-ff oke/<job>`. Without a worktree that commit is the result.
-2. Conflict: `git merge --abort`, report `failed` with the conflicting files. Do not resolve conflicts yourself.
-3. Update the wiki from the reports' 배운 것 (see below).
-4. Remove the worktree only when it is merged and `git status --short` there is empty: `herdr worktree remove --workspace <its workspace id>`. Otherwise leave it and say so.
-5. Close the worker and reviewer panes: `herdr pane close <pane>`.
-6. Report `done`.
+Merges go one at a time, in the order the merge assignments reached you. Finish one before you start the next.
+
+1. In the main checkout, `git status --short` must be empty. If it is not:
+   - the changes belong to another open OKe job that works without a worktree: do not merge. Write this job's report as `waiting` (`on: <that job>`), and merge after that job is done.
+   - nobody's job owns them: report `question` with the file list.
+2. If the work is uncommitted (`commit: no`): commit it now in the worker's `cwd` (`git add -A`, `git commit`). Without a worktree that commit is the result: go to step 5.
+3. Merge: in the main checkout, `git merge --no-ff oke/<job>`. No conflict: go to step 5.
+4. Conflict: `git merge --abort`. Never resolve conflicts yourself. Climb this ladder:
+   1. Give the worker a new instruction: "Rebase `oke/<job>` onto `<base branch>`. Resolve the conflicts so that both changes keep their purpose. Run the 검증 명령 again, commit, and report." Write this job's report as `waiting` and wait. A dead worker is revived by the wait.
+   2. Worker `done`: give the reviewer a new instruction to review what the rebase changed. `verdict: pass`: back to step 3. `changes`: as in the review rounds.
+   3. Worker `question` or `failed`, or the merge conflicts again after the rebase: report `question` for the job with the conflicting files. The user decides.
+5. Update the wiki from the reports' 배운 것 (see below).
+6. Remove the worktree only when it is merged and `git status --short` there is empty: `herdr worktree remove --workspace <its workspace id>`. Otherwise leave it and say so.
+7. Close the worker and reviewer panes: `herdr pane close <pane>`.
+8. Report `done` for the job. If a merge waited for this one (step 1), start it now.
 
 ### kind: answer
 
-The user's answer to your question. Continue from where you stopped.
+The user's answer to your question about that job. Continue from where you stopped.
+
+### kind: dialog
+
+The orchestrator answered a child's dialog.
+
+- "Dialog answered for <child>": rewrite the job's report as `waiting` with the new seq and start that child's wait again with `--after-blocked` added.
+- "Dialog denied for <child>": the user refused that action. Give the child a new instruction saying "The user denied <the action>. Do not try it again. If you cannot finish without it, report `question` and say what you need.", write the job's report as `waiting` with the new seq, then wait with the child's new seq.
+
+## Urgent findings
+
+A child may send you `URGENT <job>: ...` while it keeps working. Decide:
+
+- You can settle it from the plan, the code or the wiki: give the child a new instruction (it gets it when its turn ends).
+- The user must decide (the plan is wrong, another job is affected): report `question` for that job with the finding. Your children keep working; the answer comes as `kind: answer`.
+- Only worth knowing: put it in `board.md` and in the job's next report.
 
 ## Wiki
 
-Only you write it. Folder: the `wiki` path from your assignment.
+Only you write it. Folder: the `wiki` path from your standing assignment.
 
 - `index.md`: one line per page, with a link.
 - `log.md`: append `<date> <job>: <what you added>`.
