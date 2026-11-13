@@ -6,6 +6,7 @@ import subprocess
 import time
 import unittest
 
+import oke
 from test_oke import SpawnBase
 
 
@@ -253,13 +254,14 @@ class TestLedgerAndVerify(MergeBase):
     def test_a_failing_check_rolls_the_merge_back(self):
         pre = self.git_out(self.repo, "rev-parse", "HEAD").strip()
         self.merge()
-        # the check also dirties a tracked file before it fails
-        self.assertEqual(self.cli("job", "verify", "fix-a", "echo broken > a.txt; echo boom; exit 4"), 3)
+        # untracked byproducts of the check stay; the merge is undone
+        self.assertEqual(self.cli("job", "verify", "fix-a", "echo log > out.log; echo boom; exit 4"), 3)
         out = json.loads(self.out)
         self.assertEqual((out["result"], out["exit"], out["rolled_back_to"]), ("verify_failed", 4, pre))
         self.assertIn("boom", out["tail"])
         self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), pre)
-        self.assertEqual(self.git_out(self.repo, "status", "--porcelain").strip(), "")
+        self.assertEqual(self.git_out(self.repo, "status", "--porcelain").strip(), "?? out.log")
+        os.remove(os.path.join(self.repo, "out.log"))
         self.assertEqual(self.ledger()["merge"], "rolled_back")
         # fixed and reviewed again: the job may merge once more
         self.order(self.report("fix-a-w1", 2), self.review(2))
@@ -294,12 +296,64 @@ class TestLedgerAndVerify(MergeBase):
 
     def test_a_worker_records_its_check(self):
         self.assertEqual(self.cli("ledger", "add", "fix-a", "--by", "fix-a-w1", "--commit", "abc1234",
-                                  "--check", "verify", "--result", "pass", "--detail", "pytest -q\tall"), 0)
+                                  "--check", "worker-verify", "--result", "pass", "--detail", "pytest -q\tall"), 0)
         row = self.ledger()["rows"][0]
         self.assertEqual((row["by"], row["check"], row["result"], row["detail"]),
-                         ("fix-a-w1", "verify", "pass", "pytest -q all"))
+                         ("fix-a-w1", "worker-verify", "pass", "pytest -q all"))
         self.assertEqual(self.cli("ledger", "add", "nope", "--by", "x", "--commit", "x",
-                                  "--check", "verify", "--result", "pass"), 1)
+                                  "--check", "worker-verify", "--result", "pass"), 1)
+
+    def test_nobody_forges_an_oke_row(self):
+        self.merge()
+        for check in ("verify", "merge", "rollback", "review"):
+            self.assertEqual(self.cli("ledger", "add", "fix-a", "--by", "w", "--commit", "x",
+                                      "--check", check, "--result", "pass"), 1)
+        self.assertEqual(self.ledger()["merge"], "unverified")
+
+    def test_others_work_on_main_is_never_reset(self):
+        self.merge()
+        # during the check somebody commits on main (a job without a worktree, the user)
+        cmd = "echo z > z.txt && git add z.txt && git -c user.name=t -c user.email=t@t commit -qm other; exit 1"
+        self.assertEqual(self.cli("job", "verify", "fix-a", cmd), 1)
+        self.assertIn("NOT undone", self.err)
+        self.assertIn("other", self.git_out(self.repo, "log", "-1", "--format=%s"))
+        self.assertEqual(self.ledger()["merge"], "unverified")
+
+    def test_local_edits_in_merged_files_are_kept(self):
+        self.merge()
+        self.assertEqual(self.cli("job", "verify", "fix-a", "echo users edit > a.txt; exit 1"), 1)
+        self.assertIn("NOT undone", self.err)
+        with open(os.path.join(self.repo, "a.txt")) as f:
+            self.assertEqual(f.read().strip(), "users edit")
+
+    def test_a_command_that_cannot_run_is_no_verdict(self):
+        self.merge()
+        self.assertEqual(self.cli("job", "verify", "fix-a", "no-such-command-oke-xyz"), 1)
+        self.assertIn("could not run", self.err)
+        led = self.ledger()
+        self.assertEqual(led["merge"], "unverified")
+        self.assertNotIn("verify", [r["check"] for r in led["rows"]])
+
+    def test_the_user_may_accept_a_merge(self):
+        self.merge()
+        self.assertEqual(self.cli("job", "verify", "fix-a"), 1)  # neither a command nor --accept
+        self.assertEqual(self.cli("job", "verify", "fix-a", "--accept", "main moved, checked by hand"), 0)
+        self.assertEqual(self.ledger()["merge"], "verified")
+        self.assertEqual(self.ledger()["rows"][-1]["by"], "user")
+
+    def test_a_torn_last_line_does_not_swallow_the_next_row(self):
+        self.merge()
+        with open(oke.ledger_path("fix-a"), "a") as f:
+            f.write("2026-01-01T00:00:00\tw\tabc")  # a writer died here
+        self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 0, self.err)
+        self.assertEqual(self.ledger()["merge"], "verified")
+
+    def test_a_failed_job_with_an_unverified_merge_still_holds_the_next(self):
+        self.merge()
+        self.cli("job", "phase", "fix-a", "failed")
+        self.job("fix-b", "merging")
+        self.assertEqual(self.cli("job", "merge", "fix-b"), 1)
+        self.assertIn("not verified", self.err)
 
 
 if __name__ == "__main__":

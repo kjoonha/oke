@@ -1636,7 +1636,9 @@ def cmd_job(args):
     if args.action == "merge":
         return merge_job(args.slug)  # git can take a while: not under the state lock
     if args.action == "verify":
-        return verify_job(args.slug, args.command)  # can take hours
+        if bool(args.command) == bool(args.accept):
+            return fail("give the 검증 명령, or --accept \"<why>\" when the user accepts the merge as it is")
+        return verify_job(args.slug, args.command, args.accept)  # can take hours
     with locked():
         return job_locked(args)
 
@@ -1691,7 +1693,8 @@ def merge_job(job):
     if already in ("unverified", "verified"):
         return fail("job %s is already merged (%s): run `oke job verify %s`, not a second merge"
                     % (job, already, job))
-    for other in open_jobs(state, info["repo"]):
+    # every job of this repository, a failed or cancelled one too: its merge is still in main
+    for other in [n for n, j in state["jobs"].items() if j.get("repo") == info["repo"]]:
         if other != job and merge_state(other)[0] == "unverified":
             return fail("the merge of %s is not verified yet: run `oke job verify %s` first"
                         % (other, other))
@@ -1771,8 +1774,15 @@ def ledger_add(job, by, commit, check, result, detail=""):
     """Append one row. Rows are never rewritten: a later row supersedes an earlier one."""
     values = [time.strftime("%Y-%m-%dT%H:%M:%S"), by, commit, check, result, detail]
     line = "\t".join(" ".join(str(v or "-").split()) for v in values)
-    with io.open(ledger_path(job), "a", encoding="utf-8", newline="\n") as f:
-        f.write(line + u"\n")
+    path = ledger_path(job)
+    try:
+        with io.open(path, "rb") as f:
+            f.seek(-1, os.SEEK_END)
+            torn = f.read(1) != b"\n"  # a writer died mid-line: do not glue this row onto it
+    except (IOError, OSError):
+        torn = False
+    with io.open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write((u"\n" if torn else u"") + line + u"\n")
 
 
 def ledger_rows(job):
@@ -1782,6 +1792,10 @@ def ledger_rows(job):
     except (IOError, OSError, UnicodeDecodeError):
         return []
     return [dict(zip(LEDGER_FIELDS, l.split("\t"))) for l in lines if l.count("\t") == 5]
+
+
+# Rows only OKe itself writes; `oke ledger add` refuses them so nobody forges a verdict.
+OKE_CHECKS = ("review", "merge", "verify", "rollback")
 
 
 def merge_state(job):
@@ -1798,37 +1812,80 @@ def merge_state(job):
     return "unverified", rows[merges[-1]]
 
 
-def shell_argv(command):
-    """Run the plan's 검증 명령 as the PM wrote it: in bash where there is one.
-    shortcut: on Windows `bash` must be Git Bash (first on PATH when OKe runs from it), not WSL."""
+def find_bash():
+    """bash for the plan's 검증 명령. On Windows only Git Bash: the `bash` on PATH may be
+    the WSL launcher (System32, WindowsApps), which has no Windows python or tools."""
+    if os.name != "nt":
+        return shutil.which("bash")
+    code, path = git_out(oke_home(), "--exec-path")  # <git>/mingw64/libexec/git-core
+    if code == 0:
+        bash = os.path.normpath(os.path.join(native_path(path), "..", "..", "..", "bin", "bash.exe"))
+        if os.path.isfile(bash):
+            return bash
     bash = shutil.which("bash")
-    return [bash, "-c", command] if bash else command
+    if bash and not re.search(r"system32|windowsapps", bash, re.I):
+        return bash
+    return None
 
 
-def verify_job(job, command):
-    """Run the 검증 명령 on the merged main checkout. A failure resets the main branch to
-    where it was before the merge: the merge was clean, so nothing else is lost.
-    No time limit: a long simulation is a normal check. Run it in the background."""
-    state = load_state()
-    info = state["jobs"].get(job)
+VERIFY_LOCK_TOUCH = 60  # seconds: keeps the lock fresh during a check of any length
+
+
+def run_check(command, cwd, log, lock):
+    """Exit code of `command` in bash (else the platform shell), output to `log`. No time
+    limit; the lock's mtime is refreshed so it never looks stale while the check runs."""
+    bash = find_bash()
+    argv = [bash, "-c", command] if bash else command
+    with io.open(log, "wb") as f:
+        p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=f,
+                             stderr=subprocess.STDOUT, shell=bash is None)
+        while True:
+            try:
+                return p.wait(timeout=VERIFY_LOCK_TOUCH)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.utime(lock_path(lock), None)
+                except OSError:
+                    pass
+
+
+def verify_job(job, command, accept=None):
+    """Run the 검증 명령 on the merged main checkout. A failure undoes the merge, but never
+    anybody else's work: only while HEAD is still the merge, and with `reset --keep`,
+    which keeps local edits and refuses when they would be lost.
+    No time limit: a long simulation is a normal check. Run it in the background.
+    A second run (a restarted PM) waits for the first and then sees its result."""
+    info = load_state()["jobs"].get(job)
     if not info:
         return fail("unknown job: %s" % job)
+    lock = "verify-" + job
+    while not try_lock(lock):
+        time.sleep(5)
+    try:
+        return verify_locked(job, command, accept, info, lock)
+    finally:
+        unlock(lock)
+
+
+def verify_locked(job, command, accept, info, lock):
     status, row = merge_state(job)
     if status == "verified":
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "already": True}))
         return 0
     if status != "unverified":
         return fail("job %s has no merge to verify (%s): run `oke job merge %s` first" % (job, status, job))
+    if accept:
+        # the user's call, e.g. after the main branch moved on: recorded as such
+        ledger_add(job, "user", row["commit"], "verify", "pass", "accepted: " + accept)
+        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "accepted": True}))
+        return 0
     main = native_path(os.path.dirname(info["repo"]))
     if git_out(main, "rev-parse", "HEAD")[1] != row["commit"]:
-        return fail("the main checkout moved past the merge of %s (%s): ask the user"
-                    % (job, row["commit"][:12]))
+        return fail("the main checkout moved past the merge of %s (%s): ask the user; if they accept "
+                    "the merge as it is, `oke job verify %s --accept \"<why>\"`" % (job, row["commit"][:12], job))
     n = len([r for r in ledger_rows(job) if r["check"] == "verify"]) + 1
     log = os.path.join(oke_home(), "jobs", job, "verify-%d.log" % n)
-    argv = shell_argv(command)
-    with io.open(log, "wb") as f:
-        code = subprocess.call(argv, cwd=main, stdin=subprocess.DEVNULL, stdout=f,
-                               stderr=subprocess.STDOUT, shell=isinstance(argv, str))
+    code = run_check(command, main, log, lock)
     with io.open(log, encoding="utf-8", errors="replace") as f:
         tail = f.read().splitlines()[-40:]
     log = log.replace("\\", "/")
@@ -1836,15 +1893,21 @@ def verify_job(job, command):
         ledger_add(job, "oke", row["commit"], "verify", "pass", command)
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "log": log}))
         return 0
+    if code in (126, 127):  # the shell could not run the command: not a verdict on the merge
+        return fail("the 검증 명령 could not run (exit %d, see %s): fix the command; the merge stays"
+                    % (code, log))
     ledger_add(job, "oke", row["commit"], "verify", "fail", "exit %d: %s" % (code, command))
     pre = row["detail"][len("pre="):] if row["detail"].startswith("pre=") else None
-    # only tracked files are reset: the test run's untracked byproducts stay
-    if not pre or subprocess.call(["git", "-C", main, "reset", "-q", "--hard", pre]) != 0:
-        return fail("the 검증 명령 failed on the merge of %s and the reset to %s failed: ask the user (log %s)"
-                    % (job, pre, log))
+    head = git_out(main, "rev-parse", "HEAD")[1]
+    if not pre or head != row["commit"] or subprocess.call(
+            ["git", "-C", main, "reset", "-q", "--keep", pre],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+        return fail("the 검증 명령 failed on the merge of %s (log %s), and the merge was NOT undone: "
+                    "the main checkout moved on or has local edits in the merged files. Ask the user."
+                    % (job, log))
     ledger_add(job, "oke", pre, "rollback", "ok", "after verify fail")
     print(json.dumps({"result": "verify_failed", "job": job, "exit": code, "log": log,
-                      "rolled_back_to": pre, "tail": tail}, ensure_ascii=False))
+                      "rolled_back_to": pre, "tail": tail}))
     return 3
 
 
@@ -1852,11 +1915,12 @@ def cmd_ledger(args):
     if args.action == "add":
         if not os.path.isdir(os.path.dirname(ledger_path(args.job))):
             return fail("unknown job: %s" % args.job)
+        if args.check in OKE_CHECKS:
+            return fail("check %r is written by OKe itself; use a name like worker-verify" % args.check)
         ledger_add(args.job, args.by, args.commit, args.check, args.result, args.detail)
         return 0
     status, _ = merge_state(args.job)
-    print(json.dumps({"job": args.job, "merge": status, "rows": ledger_rows(args.job)},
-                     ensure_ascii=False, indent=2))
+    print(json.dumps({"job": args.job, "merge": status, "rows": ledger_rows(args.job)}, indent=2))
     return 0
 
 
@@ -2215,7 +2279,8 @@ def build_parser():
     merge.add_argument("slug")
     verify = job_sub.add_parser("verify")
     verify.add_argument("slug")
-    verify.add_argument("command", help="the plan's 검증 명령, as one quoted string")
+    verify.add_argument("command", nargs="?", help="the plan's 검증 명령, as one quoted string")
+    verify.add_argument("--accept", help="the user accepts the merge without (another) check: why")
     job.set_defaults(func=cmd_job)
 
     ledger = sub.add_parser("ledger")
