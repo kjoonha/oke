@@ -8,7 +8,15 @@ export type BoardNode = {
   revives: number
 }
 
-export type BoardJob = { job: string; phase: string; agents: BoardNode[] }
+export type BoardJob = {
+  job: string
+  phase: string
+  agents: BoardNode[]
+  /** The ledger: none, unverified, verified or rolled_back. */
+  merge: string
+  /** What the job waits on the user for (`oke pending` kind), null when nothing or deferred. */
+  pending: string | null
+}
 
 export type BoardRepo = { repo: string; key: string; pm: BoardNode | null; jobs: BoardJob[] }
 

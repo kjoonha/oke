@@ -1363,7 +1363,11 @@ def board_tree(state, agents, only_key=None):
         for job in sorted(n for n, j in state["jobs"].items() if j.get("repo") == key):
             nodes = [board_node(rec.get("role") or "worker", name, key, rec, agents)
                      for name, rec in sorted(children.items()) if rec.get("job") == job]
-            jobs.append({"job": job, "phase": state["jobs"][job].get("phase"), "agents": nodes})
+            info = state["jobs"][job]
+            waiting = pending_item(job, info)
+            jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
+                         "merge": merge_state(job)[0],
+                         "pending": waiting["kind"] if waiting and not waiting["deferred"] else None})
         tree.append({"repo": repo_name(key), "key": key, "jobs": jobs,
                      "pm": board_node("pm", pm["agent"], key, pm, agents) if pm and pm.get("agent") else None})
     return tree
