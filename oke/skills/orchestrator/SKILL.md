@@ -142,7 +142,7 @@ kind: plan | execute | merge | answer | dialog | cancel
 4. Make sure the PM runs (`$OKE status`, `repos[<repo>].pm`):
    - `alive`: nothing to do.
    - dead and recorded before: `$OKE revive <agent>`. `revived` or `alive`: go on. `gave_up`: run it again with `--reset` once, then tell the user.
-   - never spawned (`revive` says `unknown`): `$OKE place <repo>` prints a `place` for it; then `$OKE spawn <pm_dir>/assignment.md --pane <place>`. If `spawn` exits 1, show its message to the user (with the screen text when it reports a dialog).
+   - never spawned (`revive` says `unknown`): `$OKE place <repo path>` (the path, not the repo id) prints a `place` for it; then `$OKE spawn <pm_dir>/assignment.md --pane <place>`. If `spawn` exits 1, show its message to the user (with the screen text when it reports a dialog).
 5. `$OKE send <pm_agent> --job <job> "Job <job>: assignment updated (seq <n>). Re-read <pm_job_dir>/assignment.md."` The message waits in the PM's inbox and is typed in when the PM is idle. `--job` tells the wait that the PM now owes this job a report; never leave it out.
 6. Start the PM's wait (see "Wait").
 

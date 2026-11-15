@@ -473,6 +473,8 @@ def cmd_rt(args):
         out = {"closed": args.place}
     elif args.rt == "place":
         repo = native_path(args.repo)
+        if not os.path.isdir(repo):  # herdr opens a missing --cwd in the home folder
+            return fail("place needs the repository's path, not its id: %s is no directory" % args.repo)
         out = {"place": rt.place_for_repo(repo, os.path.basename(repo.rstrip("/\\")))}
     elif args.rt == "worktree":
         if args.remove:
@@ -481,6 +483,8 @@ def cmd_rt(args):
         else:
             if not args.job or not args.repo:
                 return fail("worktree needs <job> and --repo (or --remove <id>)")
+            if not os.path.isdir(native_path(args.repo)):
+                return fail("worktree --repo needs the repository's path: %s is no directory" % args.repo)
             # shortcut: `oke job merge` merges only oke/<job>, so the branch name is fixed here
             out = rt.worktree_create(native_path(args.repo), "oke/" + args.job, args.job)
     print(json.dumps(out, ensure_ascii=False))
@@ -500,7 +504,8 @@ def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header
     if settings:
         args += ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", settings]
         tools = ROLE_TOOLS.get(role, ROLE_TOOLS["worker"])
-        args += ["--tools", ",".join(tools + [t for t in header_list(header, "tools") if t not in tools])]
+        tools = tools + [t for t in header_list(header, "tools") if t not in tools]
+        args += ["--tools", ",".join(tools)]
         known = user_mcp_servers()
         servers = dict((n, known[n]) for n in header_list(header, "mcp") if n in known)
         if servers:
@@ -528,6 +533,11 @@ def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header
             # shortcut: the PM's coordination commands are allowed wholesale (python
             # included, for oke.py); narrow to exact commands if a PM ever misuses them.
             args += ["Bash(herdr:*)", "Bash(git:*)", "Bash(python3:*)", "Bash(python:*)"]
+    elif settings:
+        # A lean child does not read the user's bypass acceptance, so bypassPermissions
+        # stops at its warning dialog on every start (seen live). dontAsk with the
+        # agent's own tools allowed runs the same without it; --allowedTools goes last.
+        args += ["--permission-mode", "dontAsk", "--allowedTools"] + tools
     else:
         args += ["--permission-mode", "bypassPermissions"]
     return args
@@ -650,6 +660,10 @@ def cmd_spawn(args):
         info = runtime().start(agent, pane, cli_args, first_prompt(kind, role, path),
                            trusted_folder, save_record, kind)
     except DialogError as e:
+        # The record stays (the user may answer the dialog); a revive closes the old
+        # pane only when it knows this terminal.
+        record["terminal"] = runtime().place_id(pane)
+        save_record()
         return fail("agent %s is stopped at a dialog in pane %s:\n%s" % (agent, pane, e))
     except HerdrError as e:
         if e.code == "herdr_unavailable":
@@ -2424,7 +2438,7 @@ def build_parser():
         if name == "close":
             p.add_argument("place")
         if name == "place":
-            p.add_argument("repo")
+            p.add_argument("repo", help="the repository's path")
         if name == "worktree":
             p.add_argument("job", nargs="?")
             p.add_argument("--repo")

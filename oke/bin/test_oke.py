@@ -481,10 +481,13 @@ class TestSpawn(SpawnBase):
         s = spawn_ok()
         s["agent start"] = [E("agent_not_ready")]
         s["agent read"] = [{"stdout": "Select login method\n", "exit": 0}]
+        s["pane get"] = [J({"pane": {"terminal_id": "t-9"}})]
         self.fake(s)
         self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 1)
         self.assertIn("Select login method", self.err)
         self.assertEqual(self.argv_of("agent", "send-keys"), [])
+        # the user may answer it: a revive must be able to close this pane
+        self.assertEqual(self.children()["fix-a-w1"]["terminal"], "t-9")
 
     def test_spawn_reports_herdr_error_as_exit_1(self):
         self.job("fix-a", "working")
@@ -543,6 +546,12 @@ class TestSpawn(SpawnBase):
             self.assertTrue({"WebFetch", "WebSearch"} <= set(tools[tools.index("--tools") + 1].split(",")))
         w = oke.launch_args("worker", c, self.home, "/p")
         self.assertIn("Agent", w[w.index("--tools") + 1].split(","))
+        # a lean child does not see the user's bypass acceptance: no warning dialog
+        self.assertNotIn("bypassPermissions", w)
+        self.assertEqual(w[w.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(w[w.index("--allowedTools") + 1:], w[w.index("--tools") + 1].split(","))
+        full = oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p")
+        self.assertIn("bypassPermissions", full)
 
     def test_assignment_header_switches_on_tools_mcp_and_plugins(self):
         conf = os.path.join(self.home, "claude-conf")
