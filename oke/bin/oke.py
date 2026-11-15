@@ -504,11 +504,14 @@ def write_lean_settings(folder, plugins=()):
 # full built-in set is about 28k tokens of a 41k start, this set about 3k.
 ROLE_TOOLS = {
     "pm": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "TaskStop",
-           "TaskCreate", "TaskUpdate", "TaskList"],
-    "worker": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "TaskStop",
-               "TaskCreate", "TaskUpdate", "TaskList"],
-    "reviewer": ["Bash", "Read", "Glob", "Grep", "Skill", "TaskCreate", "TaskUpdate", "TaskList"],
+           "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch"],
+    "worker": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "TaskStop",
+               "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch"],
+    "reviewer": ["Bash", "Read", "Glob", "Grep", "Skill", "TaskCreate", "TaskUpdate", "TaskList",
+                 "WebFetch", "WebSearch"],
 }
+# Always on, whatever the PM writes: built-in tools only (user's choice). MCP servers
+# and plugins come only from the assignment header.
 
 
 def cmd_extras(args):

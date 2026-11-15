@@ -114,7 +114,7 @@ seq: 1
 ```
 
    Add `kind: codex` or `kind: opencode` to the header only when the intake asks for that agent; otherwise leave `kind` out and `~/.oke/config.json` (`agents`) decides. The reviewer's assignment takes a `kind` the same way.
-   A claude child starts lean: none of the user's plugins or MCP servers, and only the core tools (`$OKE extras` lists them per role, plus the MCP servers and plugins the user has). Each costs tokens on every turn of that child, so add only what this job needs, as comma-separated header lines: `tools: WebFetch` (a built-in tool), `mcp: codegraph` (an MCP server), `plugins: <name@marketplace>`. Leave them out when the job needs nothing extra. The reviewer's assignment takes them the same way.
+   A claude child starts lean: none of the user's plugins or MCP servers, and only the core built-in tools, always on whatever you write (`$OKE extras` lists them per role, plus the MCP servers and plugins the user has). Each costs tokens on every turn of that child, so add only what this job needs, as comma-separated header lines: `tools: WebFetch` (a built-in tool), `mcp: codegraph` (an MCP server), `plugins: <name@marketplace>`. Leave them out when the job needs nothing extra. The reviewer's assignment takes them the same way.
    `commit: yes` only with a worktree and autonomy `balanced` or `full`. Without a worktree the worker must not commit: a commit there is already on the main branch, before the user was asked about the merge.
 3. `$OKE spawn <that file> --pane <worktree pane>`. Without a worktree: `--split-from $HERDR_PANE_ID`.
 4. Write the job's report as `waiting` (`on: <job>-w1`), start `$OKE wait <job>-w1 --report <its folder>/report.md --seq <its seq>` in the background, end your turn.

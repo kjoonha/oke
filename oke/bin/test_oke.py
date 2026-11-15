@@ -534,6 +534,11 @@ class TestSpawn(SpawnBase):
         self.assertEqual(lean["env"], {"PYTHONUTF8": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"})
         self.assertNotIn("--setting-sources", oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p"))
         self.assertNotIn("Edit", args[args.index("--tools") + 1].split(","))
+        for role in ("pm", "worker", "reviewer"):
+            tools = oke.launch_args(role, c, self.home, "/p")
+            self.assertTrue({"WebFetch", "WebSearch"} <= set(tools[tools.index("--tools") + 1].split(",")))
+        w = oke.launch_args("worker", c, self.home, "/p")
+        self.assertIn("Agent", w[w.index("--tools") + 1].split(","))
 
     def test_assignment_header_switches_on_tools_mcp_and_plugins(self):
         conf = os.path.join(self.home, "claude-conf")
