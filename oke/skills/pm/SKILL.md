@@ -132,6 +132,7 @@ When a child's wait finishes, act on its first line:
 | `idle_no_report`, `bad_report` | Once: `$OKE send <child> "Re-read your assignment and write a proper report."`, then wait again. Second time: report `failed` for that job |
 | `gone` | `oke wait` already revived the child three times without a new report. Report `failed` with the agent name |
 | `superseded` | A newer wait on that child replaced this one. Do nothing |
+| `{"deliver": {"to": ..., "text": ...}}` | The child runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again |
 | `deliver_failed` | Your message to the child could not be typed in three times. Report `failed` for that job and name the child |
 | exit code 1 or 2 | herdr failed or is unreachable. Report `failed` with the stderr text. Do not treat the child as gone |
 

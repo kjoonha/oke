@@ -133,9 +133,10 @@ class BgRuntime(object):
         raise HerdrError("agent_not_ready", "%s did not show up in claude agents" % name)
 
     def prompt(self, name, text):
-        # shortcut: no documented way for a script to type into a bg session; step 4
-        # hands the text to the calling Claude session (SendMessage) instead.
-        return False
+        """No documented way for a script to type into a bg session: the Claude session
+        that waits on `name` sends the text itself (SendMessage)."""
+        self.agent(name)  # gone: agent_not_found, like herdr
+        return "ask_caller"
 
     def keys(self, name, keys):
         raise HerdrError("unsupported", "a background session takes no keys: claude attach %s"

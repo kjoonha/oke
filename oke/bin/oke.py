@@ -429,8 +429,9 @@ def write_lean_settings(folder, plugins=()):
 # Built-in tools a lean child gets; an assignment's `tools:` adds more. Measured: the
 # full built-in set is about 28k tokens of a 41k start, this set about 3k.
 ROLE_TOOLS = {
+    # SendMessage: in bg mode the PM hands its children their mail (a `deliver` wait result)
     "pm": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "TaskStop",
-           "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch"],
+           "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch", "SendMessage"],
     "worker": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "TaskStop",
                "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch"],
     "reviewer": ["Bash", "Read", "Glob", "Grep", "Skill", "TaskCreate", "TaskUpdate", "TaskList",
@@ -924,12 +925,16 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                         return warn_job(result[1:])
                     return result[1:]
                 try:
-                    if deliver(agent) is False:  # the mail stays; the next round tries again
+                    sent = deliver(agent)
+                    if sent is False:  # the mail stays; the next round tries again
                         failed_deliveries += 1
                     else:
                         failed_deliveries = 0
                 except (HerdrError, OSError):
-                    pass  # a passing outage: the next check_once counts it
+                    sent = None  # a passing outage: the next check_once counts it
+                if isinstance(sent, str):
+                    # the caller sends it (SendMessage) and starts this wait again
+                    return json.dumps({"deliver": {"to": agent, "text": sent}}, ensure_ascii=False)
                 if failed_deliveries >= DELIVER_TRIES:
                     return "deliver_failed"  # never loop silently on mail that cannot go in
                 idle = 0
@@ -2141,7 +2146,9 @@ def cmd_send(args):
 
 def deliver(agent):
     """Type the queued messages into `agent`, which the caller saw idle. They leave the
-    inbox only after herdr took them, so a failed prompt loses nothing."""
+    inbox only after herdr took them, so a failed prompt loses nothing. A runtime that
+    cannot type (bg) answers "ask_caller": the text is returned for the waiting Claude
+    session to send with SendMessage."""
     if not inbox_messages(agent):
         return None
     lock = "deliver-" + agent
@@ -2152,14 +2159,17 @@ def deliver(agent):
         if not msgs:
             return None
         text = "OKe inbox: " + " | ".join(t for _, t in msgs)
-        if not runtime().prompt(agent, text):
+        took = runtime().prompt(agent, text)
+        if not took:
             return False
         done = os.path.join(inbox_dir(agent), "read")
         if not os.path.isdir(done):
             os.makedirs(done, exist_ok=True)
+        # shortcut: with ask_caller the mail counts as read once handed out; a caller
+        # compacted before its SendMessage loses it (the file stays in read/)
         for path, _ in msgs:
             replace_file(path, os.path.join(done, os.path.basename(path)))
-        return True
+        return text if took == "ask_caller" else True
     finally:
         unlock(lock)
 

@@ -167,6 +167,7 @@ When it finishes, read the first line of its output. If the user speaks before i
 | `no_jobs` | The PM has no open job left. Do not start its wait again |
 | `gone` | OKe already revived the PM three times without a new report, or no job needs it. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / archive |
 | `superseded` | A newer wait replaced this one. Do nothing: do not run the queue and do not start a wait |
+| `{"deliver": {"to": ..., "text": ...}}` | The PM runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again. Not a result to show the user |
 | `deliver_failed` | Messages for the PM could not be typed in three times in a row. Tell the user and offer to go to the PM pane (`$OKE attach <pm>`); the messages stay in `~/.oke/inbox/<pm>/`. Start the wait again after the user says the pane is free |
 | exit code 1 or 2 | herdr failed or is unreachable (the message is on stderr). Tell the user. Do not treat the agent as gone |
 
@@ -229,4 +230,5 @@ With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merg
 
 - Write a decision or a user instruction into the assignment or intake file the moment you get it. Your context can be compacted; the files cannot.
 - After compaction, run `$OKE status` and the queue, and start a wait for each PM with open jobs.
+- `$OKE attach <agent>` prints `"attached": false` and a `hint` when OKe cannot show the agent itself (background sessions): give the user that command to run in a terminal. `$OKE keys` fails there too: for a dialog, offer only that command.
 - Do not send text starting with `/` through `$OKE send` from Git Bash; it is rewritten into a Windows path.

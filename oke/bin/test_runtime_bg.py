@@ -133,5 +133,22 @@ class TestSpawnInBg(BgBase):
         self.assertEqual(oke.runtime().name, "herdr")
 
 
+class TestDeliverInBg(BgBase):
+    def test_wait_hands_the_mail_to_the_caller(self):
+        os.environ["OKE_RUNTIME"] = "bg"
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
+                              {"fix-a-w1": {"agent": "fix-a-w1", "job": "fix-a", "pane": "a1",
+                                            "role": "worker", "seq": 1}})
+        rows = [dict(ROWS[0], state="done")]
+        self.fake({"agents --json": [OUT(json.dumps(rows))]})
+        self.assertEqual(self.cli("send", "fix-a-w1", "stop", "now"), 0, self.err)
+        report = os.path.join(os.path.dirname(a), "report.md")
+        line = oke.wait_loop("fix-a-w1", report, 1, poll=0, max_polls=10)
+        self.assertEqual(json.loads(line), {"deliver": {"to": "fix-a-w1", "text": "OKe inbox: user: stop now"}})
+        self.assertEqual(oke.inbox_messages("fix-a-w1"), [])
+
+
 if __name__ == "__main__":
     unittest.main()
