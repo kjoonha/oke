@@ -5,7 +5,7 @@ description: Use when your first prompt says to use the oke:pm skill. You manage
 
 # OKe PM
 
-`~/.oke` in this skill means OKe's home folder: the `OKE_HOME` environment variable when it is set (`echo $OKE_HOME`), else `~/.oke`.
+`$OKE_HOME` is OKe's home folder (`~/.oke` when the variable is not set).
 
 You manage one repository and every OKe job in it. Several jobs can run at once. You never edit repository code yourself: workers do that. You may run `git` and `herdr`.
 
@@ -24,8 +24,8 @@ OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if python3 doe
 | `<your folder>/assignment.md` | orchestrator | Your standing assignment (path in your first prompt). Header: `cwd` (the repository), `wiki` |
 | `<your folder>/board.md` | you | Your board, covering all your jobs |
 | `<your folder>/children.json` | `$OKE spawn` | Your children. Read it, never write it |
-| `~/.oke/jobs/<job>/pm/assignment.md` | orchestrator | One job's instruction. Header: `job`, `seq`. `이번 지시` starts with `kind:` |
-| `~/.oke/jobs/<job>/pm/report.md` | you | That job's report |
+| `$OKE_HOME/jobs/<job>/pm/assignment.md` | orchestrator | One job's instruction. Header: `job`, `seq`. `이번 지시` starts with `kind:` |
+| `$OKE_HOME/jobs/<job>/pm/report.md` | you | That job's report |
 
 ## Messages
 
@@ -80,7 +80,7 @@ Never `$OKE spawn` a name that is already in `children.json`. If `git -C <repo> 
 
 ### kind: plan
 
-Read `~/.oke/jobs/<job>/intake.md`, the repository, and `<wiki>/index.md` if it exists. Do not change the repository. Write `~/.oke/jobs/<job>/plan.md`:
+Read `$OKE_HOME/jobs/<job>/intake.md`, the repository, and `<wiki>/index.md` if it exists. Do not change the repository. Write `$OKE_HOME/jobs/<job>/plan.md`:
 
 ```
 job: <job>
@@ -92,12 +92,12 @@ job: <job>
 ## 사용자에게 물을 것 (or 없음)
 ```
 
-A small job gets one line per section. Use no worktree only when the change is small, the main checkout is clean, and no other OKe job of this repository is open: a job without a worktree changes the main checkout that every merge uses. Report `done` with a short summary, or `question` if intake is not enough to plan.
+A small job gets one line per section. Use no worktree only when the change is small and no other OKe job of this repository is open: a job without a worktree changes the main checkout that every merge uses. Whether the main checkout already holds the user's own changes is your call: without a worktree, `$OKE job merge` commits every tracked change there (new files only as you stage them). Report `done` with a short summary, or `question` if intake is not enough to plan.
 
 ### kind: execute
 
 1. Worktree, if the plan uses one: `$OKE worktree <job> --repo <repo>`. It prints `id` (to remove it later), `path` (the checkout) and `place` (where to start the worker). Write `id` and `path` on your board. If it fails, report `failed` with the error. It always uses branch `oke/<job>`, the only one `$OKE job merge` merges.
-2. Write `~/.oke/jobs/<job>/<job>-w1/assignment.md`:
+2. Write `$OKE_HOME/jobs/<job>/<job>-w1/assignment.md`:
 
 ```
 agent: <job>-w1
@@ -115,7 +115,7 @@ seq: 1
 ## 이번 지시
 ```
 
-   Add `kind: codex` or `kind: opencode` to the header only when the intake asks for that agent; otherwise leave `kind` out and `~/.oke/config.json` (`agents`) decides. The reviewer's assignment takes a `kind` the same way.
+   Add `kind: codex` or `kind: opencode` to the header only when the intake asks for that agent; otherwise leave `kind` out and `$OKE_HOME/config.json` (`agents`) decides. The reviewer's assignment takes a `kind` the same way.
    A claude child starts lean: none of the user's plugins or MCP servers, and only the core built-in tools, always on whatever you write (`$OKE extras` lists them per role, plus the MCP servers and plugins the user has). Each costs tokens on every turn of that child, so add only what this job needs, as comma-separated header lines: `tools: WebFetch` (a built-in tool), `mcp: codegraph` (an MCP server), `plugins: <name@marketplace>`. Leave them out when the job needs nothing extra. The reviewer's assignment takes them the same way.
    `commit: yes` only with a worktree and autonomy `balanced` or `full`. Without a worktree the worker must not commit: a commit there is already on the main branch, before the user was asked about the merge.
 3. `$OKE spawn <that file> --pane <place>`. Without a worktree: `$OKE spawn <that file>` (it starts next to you).
@@ -140,7 +140,9 @@ When a child's wait finishes, act on its first line:
 
 **A new instruction for a child:** edit its assignment (`이번 지시`, `seq` + 1), `$OKE send <child> "Assignment updated (seq <n>). Re-read <its assignment path>."`, then start its wait with the new seq. The wait types the message in once the child is idle, so start the wait last. A message must not start with `/`.
 
-**Review.** With a worktree, the review always covers a commit: if the worker did not commit (`commit: no`), commit its changes first (`git -C <cwd> add -A`, `git -C <cwd> commit`). Then write `~/.oke/jobs/<job>/<job>-rv/assignment.md` (role `reviewer`, same `cwd` as the worker, `commit: <git -C <cwd> rev-parse HEAD>` in the header, 이번 지시 = the diff range `<base branch>...<that commit>` (three dots: only this job's changes, even after other jobs merged)). Without a worktree put `tree: <the tree from $OKE job tree <job>>` in the header instead of `commit`, right before you spawn or instruct the reviewer; 이번 지시 = "uncommitted changes: `git diff HEAD`, and new files listed by `git status --short`". `$OKE spawn <file> --split-from <worker pane>`. Wait for it.
+**Review.** With a worktree, the review always covers a commit: if the worker did not commit (`commit: no`), commit its changes first: `git -C <cwd> add -u`, then `git -C <cwd> add <file>` for each new file that is part of the job, then `git -C <cwd> commit` (see "New files" below). Then write `$OKE_HOME/jobs/<job>/<job>-rv/assignment.md` (role `reviewer`, same `cwd` as the worker, `commit: <git -C <cwd> rev-parse HEAD>` in the header, 이번 지시 = the diff range `<base branch>...<that commit>` (three dots: only this job's changes, even after other jobs merged)). Without a worktree, first `git -C <cwd> add <file>` each new file that is part of the job (see "New files"; tracked changes are always included), then put `tree: <the tree from $OKE job tree <job>>` in the header instead of `commit`, right before you spawn or instruct the reviewer; 이번 지시 = "uncommitted changes: `git diff HEAD`, and new files listed by `git status --short`". `$OKE spawn <file> --split-from <worker pane>`. Wait for it.
+
+**New files.** You decide which untracked files (`git -C <cwd> status --short`, `??`) belong to the job: the ones the worker's report names or the plan calls for. Leave out what builds and checks leave behind (caches, compiled files, logs, build output) and anything you do not recognise; never delete a file you did not see the job create. `$OKE job merge` commits tracked changes plus only what you staged, and names the untracked files it left (`left_untracked`): mention them in your report.
 
 Every new instruction to the reviewer (another round, a rebase) repeats this: commit the worker's changes if needed, and put the new `commit:` (without a worktree: a new `tree:`) and range in its assignment. `$OKE job merge` refuses a branch whose tip is not the commit the passing review named.
 
@@ -207,4 +209,4 @@ Add only what a report's 배운 것 states and you believe. Fix a page that turn
 
 ## Autonomy
 
-`autonomy` in `~/.oke/config.json`: `conservative` sends every worker question upward; `balanced` and `full` let you answer what the plan, code or wiki settles.
+`autonomy` in `$OKE_HOME/config.json`: `conservative` sends every worker question upward; `balanced` and `full` let you answer what the plan, code or wiki settles.

@@ -418,8 +418,7 @@ def write_lean_settings(folder, plugins=()):
             hooks[event] = kept
     env = dict(user.get("env") or {}, CLAUDE_CODE_DISABLE_AUTO_MEMORY="1")
     env.pop("CLAUDE_CODE_PLUGIN_DIRS", None)  # the user's own mods would load in every child
-    if os.environ.get("OKE_HOME"):
-        env["OKE_HOME"] = oke_home()  # a herdr pane does not inherit the spawner's environment
+    env["OKE_HOME"] = oke_home()  # the skills say $OKE_HOME; a herdr pane does not inherit it
     settings = {"hooks": hooks, "env": env}
     if plugins:
         settings["enabledPlugins"] = dict((p, True) for p in plugins)
@@ -1756,19 +1755,25 @@ def merge_job(job):
     return 2
 
 
-# Byproducts of running the code and its checks: never part of a job's commit (seen live:
-# a direct merge committed __pycache__). Tracked files matching them are skipped too.
-BYPRODUCTS = [":(exclude)*__pycache__*", ":(exclude)*.pyc", ":(exclude)*.pytest_cache*"]
-ADD = ["add", "-A", "--", "."] + BYPRODUCTS
+# Tracked changes always go in; a new file only when the PM staged it (`git add`): only
+# the PM can tell the job's new files from what its checks left (seen live: `add -A`
+# committed __pycache__).
+ADD = ["add", "-u"]
 
 
 def pending_tree(main):
-    """Tree sha of the main checkout as `oke job merge` would commit it. The real index is
-    untouched. The review of a job without a worktree names this tree."""
+    """Tree sha of the main checkout as `oke job merge` would commit it: what the PM
+    staged plus every tracked change. The real index is untouched. The review of a job without a worktree names this tree."""
     idx = os.path.join(oke_home(), "tree-%d.index" % os.getpid())
     env = dict(os.environ, GIT_INDEX_FILE=idx)
+    real = os.path.join(main, git_out(main, "rev-parse", "--git-path", "index")[1])
     try:
-        for argv in (["read-tree", "HEAD"], ADD, ["write-tree"]):
+        steps = [ADD, ["write-tree"]]
+        if os.path.exists(real):
+            shutil.copyfile(real, idx)  # what the PM staged
+        else:
+            steps.insert(0, ["read-tree", "HEAD"])
+        for argv in steps:
             result = subprocess.run(["git", "-C", main] + argv, env=env,
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             if result.returncode != 0:
@@ -1813,7 +1818,9 @@ def commit_direct(job, info, main, review, reviewed):
     ledger_add(job, os.path.basename(os.path.dirname(review)), merged, "review", "pass",
                review.replace("\\", "/"))
     ledger_add(job, "oke", merged, "merge", "ok", "pre=%s direct" % pre)
-    print(json.dumps({"result": "merged", "job": job, "commit": merged, "direct": True}))
+    left = git_out(main, "ls-files", "--others", "--exclude-standard")[1].splitlines()
+    print(json.dumps({"result": "merged", "job": job, "commit": merged, "direct": True,
+                      "left_untracked": [f for f in left if f]}))
     return 0
 
 

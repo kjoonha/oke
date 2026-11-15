@@ -363,6 +363,7 @@ class TestDirectCommit(MergeBase):
         MergeBase.setUp(self)
         self.git(self.repo, "branch", "-q", "-D", "oke/fix-a")
         self.write("toy/d.txt", "d\n")
+        self.git(self.repo, "add", "d.txt")  # the PM stages the job's new files
         path = os.path.join(self.jobs, "fix-a-rv", "assignment.md")
         os.makedirs(os.path.dirname(path))
         self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
@@ -385,11 +386,17 @@ class TestDirectCommit(MergeBase):
         self.assertEqual(self.cli("job", "verify", "fix-a", "test -f d.txt"), 0, self.err)
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
 
-    def test_build_byproducts_are_not_committed(self):
+    def test_unstaged_byproducts_are_not_committed(self):
         self.write("toy/__pycache__/d.cpython-311.pyc", "x")  # left by the checks after the review
         self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
         self.assertEqual(self.git_out(self.repo, "status", "--porcelain").strip(), "?? __pycache__/")
         self.assertNotIn("__pycache__", self.git_out(self.repo, "show", "--name-only", "HEAD"))
+        self.assertEqual(json.loads(self.out)["left_untracked"], ["__pycache__/d.cpython-311.pyc"])
+
+    def test_an_unstaged_new_file_is_left_out_of_the_review_tree(self):
+        self.write("toy/notes.txt", "the user's own\n")  # not staged: not the job's
+        self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["tree"], self.tree)
 
     def test_a_failed_check_gives_the_changes_back_uncommitted(self):
         self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
@@ -400,17 +407,20 @@ class TestDirectCommit(MergeBase):
         self.assertEqual(self.ledger()["merge"], "rolled_back")
 
     def test_a_change_after_the_review_is_refused(self):
-        self.write("toy/other.txt", "not reviewed\n")
+        self.write("toy/d.txt", "changed after the review\n")
         self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
         self.assertIn("not the ones the review covered", self.err)
         self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), self.pre)
-        self.assertEqual(self.git_out(self.repo, "diff", "--cached", "--name-only").strip(), "")
+        # only what the PM staged, as it was: the refused merge staged nothing of its own
+        self.assertEqual(self.git_out(self.repo, "diff", "--cached", "--name-only").strip(), "d.txt")
+        self.assertEqual(self.git_out(self.repo, "show", ":d.txt"), "d\n")
 
     def test_the_commit_holds_exactly_the_reviewed_tree(self):
         self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
         self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD^{tree}").strip(), self.tree)
 
     def test_nothing_to_commit_is_refused(self):
+        self.git(self.repo, "reset", "-q")
         os.remove(os.path.join(self.repo, "d.txt"))
         self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
         self.assertIn("no changes", self.err)

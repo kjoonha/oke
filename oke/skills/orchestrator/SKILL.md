@@ -5,7 +5,7 @@ description: Use when the user runs /oke:start or this session is the OKe orches
 
 # OKe orchestrator
 
-`~/.oke` in this skill means OKe's home folder: the `OKE_HOME` environment variable when it is set (`echo $OKE_HOME`), else `~/.oke`.
+`$OKE_HOME` is OKe's home folder (`~/.oke` when the variable is not set).
 
 You are the single point of contact. PM, worker and reviewer agents do the work in other herdr panes. You never read or edit repository code: that fills your context and it is the PM's job.
 
@@ -19,7 +19,7 @@ Talk to the user in their language. Every question that has choices (approve, me
 OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if python3 does not exist
 ```
 
-Never edit `~/.oke/state.json` by hand. Use `$OKE job ...`.
+Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`.
 
 ## Files
 
@@ -40,7 +40,7 @@ Never edit `~/.oke/state.json` by hand. Use `$OKE job ...`.
 5. Run `$OKE status --claim`.
 6. `state_recovered` true: tell the user state.json was unreadable and saved as `state.json.bad`.
 7. For each job with class `disconnected`, and each entry of `orphan_job_dirs`, ask: resume / archive / leave. Ask once per PM, not once per job: the jobs of one repository share their PM.
-   - resume: `$OKE revive <pm agent> --reset`. It restarts the PM in its own session and tells it to re-read its assignments. `revived` or `alive`: go on. `unknown` (never spawned): spawn it as in "Give the job to the PM". `failed`: show the last line of `~/.oke/events.log` to the user.
+   - resume: `$OKE revive <pm agent> --reset`. It restarts the PM in its own session and tells it to re-read its assignments. `revived` or `alive`: go on. `unknown` (never spawned): spawn it as in "Give the job to the PM". `failed`: show the last line of `$OKE_HOME/events.log` to the user.
    - archive: `$OKE job archive <job>`. Never delete a worktree or branch. Report the worktree path and `git -C <worktree> status --short | wc -l`.
 8. For each PM (`status.repos`) that has a job with class `alive`, start its wait (see "Wait").
 9. Run the queue (see "Queue"). Jobs with class `awaiting_user` come back there.
@@ -118,7 +118,7 @@ seq: 1
 ---
 ## 목표
 You are the PM of this repository. Each job has its own assignment at
-~/.oke/jobs/<job>/pm/assignment.md and its own report at ~/.oke/jobs/<job>/pm/report.md.
+$OKE_HOME/jobs/<job>/pm/assignment.md and its own report at $OKE_HOME/jobs/<job>/pm/report.md.
 New instructions arrive as messages that start with "OKe inbox:".
 ```
 
@@ -171,7 +171,7 @@ When it finishes, read the first line of its output. If the user speaks before i
 | `gone` | OKe already revived the PM three times without a new report, or no job needs it. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / archive |
 | `superseded` | A newer wait replaced this one. Do nothing: do not run the queue and do not start a wait |
 | `{"deliver": {"to": ..., "text": ...}}` | The PM runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again. Not a result to show the user |
-| `deliver_failed` | Messages for the PM could not be typed in three times in a row. Tell the user and offer to go to the PM pane (`$OKE attach <pm>`); the messages stay in `~/.oke/inbox/<pm>/`. Start the wait again after the user says the pane is free |
+| `deliver_failed` | Messages for the PM could not be typed in three times in a row. Tell the user and offer to go to the PM pane (`$OKE attach <pm>`); the messages stay in `$OKE_HOME/inbox/<pm>/`. Start the wait again after the user says the pane is free |
 | exit code 1 or 2 | herdr failed or is unreachable (the message is on stderr). Tell the user. Do not treat the agent as gone |
 
 ## Queue
@@ -219,7 +219,7 @@ Merge question: summary, branch name, number of changed files, and the checks re
 
 ## Autonomy
 
-Read `autonomy` from `~/.oke/config.json` (default `balanced`). `agents` there picks the CLI for workers and reviewers: `{"worker": "claude", "reviewer": "claude"}` by default; `codex` and `opencode` work too. If the user asks for one in a job, write it into `intake.md` (`## 원하는 결과`); the PM then puts `kind:` into that child's assignment. The PM is always claude.
+Read `autonomy` from `$OKE_HOME/config.json` (default `balanced`). `agents` there picks the CLI for workers and reviewers: `{"worker": "claude", "reviewer": "claude"}` by default; `codex` and `opencode` work too. If the user asks for one in a job, write it into `intake.md` (`## 원하는 결과`); the PM then puts `kind:` into that child's assignment. The PM is always claude.
 
 With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merge`) as always, then the next phase at once. `job phase` refuses a skipped step.
 
