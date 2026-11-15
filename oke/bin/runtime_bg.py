@@ -21,6 +21,16 @@ CLAUDE_TIMEOUT = 120  # seconds
 START_POLLS = 30      # seconds a new session gets to show up in `claude agents`
 # bg state -> herdr agent_status. failed, stopped and unknown states count as gone.
 STATUS = {"working": "working", "blocked": "blocked", "done": "idle"}
+
+
+def status_of(row):
+    """herdr's agent_status for a `claude agents` row, or None when it is gone. `state`
+    can stay "working" while the session waits for input (seen live: status idle), so
+    a live session's own `status` decides between working and idle."""
+    state = STATUS.get(row.get("state"))
+    if state in (None, "blocked"):
+        return state
+    return {"idle": "idle", "busy": "working"}.get(row.get("status"), state)
 # Settings every bg child needs: no self-isolation into its own worktree (OKe already
 # picked the folder), and messages from the PM or orchestrator taken without asking.
 BG_SETTINGS = {"worktree": {"bgIsolation": "none"}, "crossSessionInbound": "accept"}
@@ -66,8 +76,22 @@ def run_claude(args, cwd=None):
 def as_agent(a):
     """One `claude agents --json` row in herdr's agent shape."""
     return {"name": a.get("name"), "pane_id": a.get("id"), "terminal_id": a.get("id"),
-            "agent_status": STATUS.get(a.get("state"), "gone"), "cwd": a.get("cwd"),
+            "agent_status": status_of(a) or "gone", "cwd": a.get("cwd"),
             "agent_session": {"value": a.get("sessionId")} if a.get("sessionId") else None}
+
+
+def without_bypass(argv):
+    """bypassPermissions -> dontAsk with the agent's own tools allowed. `--bg` takes
+    bypass only with the user's disclaimer acceptance from user settings, which a lean
+    child does not read (seen live), and a bg session cannot answer a dialog anyway:
+    dontAsk denies anything else instead of asking."""
+    argv = list(argv)
+    if "bypassPermissions" not in argv:
+        return argv
+    argv[argv.index("bypassPermissions")] = "dontAsk"
+    tools = argv[argv.index("--tools") + 1].split(",") if "--tools" in argv else ["Bash", "Read", "Edit", "Write"]
+    # --allowedTools takes every word after it: it goes last
+    return argv + ["--allowedTools"] + tools
 
 
 def with_bg_settings(argv, folder):
@@ -110,7 +134,7 @@ class BgRuntime(object):
         return data if isinstance(data, list) else []
 
     def agents(self):
-        return [as_agent(a) for a in self.rows() if STATUS.get(a.get("state"))]
+        return [as_agent(a) for a in self.rows() if status_of(a)]
 
     def agent(self, name):
         for a in self.agents():
@@ -138,7 +162,8 @@ class BgRuntime(object):
         if settings and os.path.isfile(settings):
             folder = os.path.dirname(settings)  # OKe's agent folder
         # The prompt goes first: --allowedTools takes every word after it (seen live).
-        run_claude([prompt, "--bg", "--name", name] + with_bg_settings(argv, folder), cwd=place)
+        argv = without_bypass(with_bg_settings(argv, folder))
+        run_claude([prompt, "--bg", "--name", name] + argv, cwd=place)
         registered()
         for _ in range(START_POLLS):
             try:
@@ -185,7 +210,7 @@ class BgRuntime(object):
         return place if any(a.get("id") == place for a in self.rows()) else None
 
     def place_exists(self, place):
-        return any(a.get("id") == place and STATUS.get(a.get("state")) for a in self.rows())
+        return any(a.get("id") == place and status_of(a) for a in self.rows())
 
     def has_claude(self, place):
         return self.place_exists(place)

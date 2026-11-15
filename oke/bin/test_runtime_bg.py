@@ -46,6 +46,14 @@ class TestBgRuntime(BgBase):
         self.assertEqual(self.rt.place_id("a0"), "a0")  # a dead one can still be closed
         self.assertFalse(self.rt.place_exists("a0"))
 
+    def test_status_decides_between_working_and_idle(self):
+        row = {"id": "a", "name": "n", "state": "working", "status": "idle"}
+        self.assertEqual(runtime_bg.status_of(row), "idle")  # seen live on a waiting PM
+        self.assertEqual(runtime_bg.status_of(dict(row, status="busy")), "working")
+        self.assertEqual(runtime_bg.status_of(dict(row, state="done", status=None)), "idle")
+        self.assertEqual(runtime_bg.status_of(dict(row, state="blocked")), "blocked")
+        self.assertIsNone(runtime_bg.status_of(dict(row, state="stopped")))
+
     def test_unknown_agent(self):
         self.fake({"agents --json": [OUT("[]")]})
         with self.assertRaises(oke.HerdrError) as c:
@@ -70,6 +78,13 @@ class TestBgRuntime(BgBase):
         self.assertEqual(merged["env"], {"X": "1"})
         self.assertEqual(merged["worktree"], {"bgIsolation": "none"})
         self.assertEqual(merged["crossSessionInbound"], "accept")
+
+    def test_bypass_becomes_dont_ask_with_the_role_tools(self):
+        argv = runtime_bg.without_bypass(["--tools", "Bash,Edit", "--permission-mode", "bypassPermissions"])
+        self.assertEqual(argv, ["--tools", "Bash,Edit", "--permission-mode", "dontAsk",
+                                "--allowedTools", "Bash", "Edit"])
+        self.assertEqual(runtime_bg.without_bypass(["--permission-mode", "dontAsk"]),
+                         ["--permission-mode", "dontAsk"])
 
     def test_start_refuses_other_kinds(self):
         with self.assertRaises(oke.HerdrError):
