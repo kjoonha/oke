@@ -51,12 +51,14 @@ herdr pane 에서 Claude Code 를 켜고 `/oke:start`. 그 세션이 orchestrato
   "models": {"pm": "opus", "worker": "sonnet", "reviewer": "sonnet"},
   "agents": {"worker": "claude", "reviewer": "claude"},
   "interview_threshold": 0.2,
-  "interview_max_rounds": 10
+  "interview_max_rounds": 10,
+  "lean_launch": true
 }
 ```
 
 - `autonomy`: `conservative` (worker 가 명령마다 승인을 묻는다), `balanced` (기본), `full`.
 - `agents`: worker / reviewer 를 띄울 CLI. `claude`, `codex`, `opencode`. orchestrator 와 PM 은 늘 claude 다. 제약은 `docs/superpowers/specs/2026-11-13-oke-slice4-design.md` 의 "안 되는 것".
+- `lean_launch`: PM / worker / reviewer 를 사용자 plugin, hook, MCP 서버 없이 띄운다 (`--setting-sources project,local --strict-mcp-config`). 사용자 `settings.json` 에서 herdr hook 과 `env` 만 `~/.oke/lean-settings.json` 으로 옮긴다. 시작 context 가 약 76k 에서 40k token 으로 준다. 자식에게도 개인 plugin 이 필요하면 `false`.
 
 - `interview_threshold`, `interview_max_rounds`: job 을 받을 때 orchestrator 가 하는 인터뷰. 목표, 제약, 성공 기준을 0~1 로 매겨 모호도(`1 - 0.4 목표 - 0.3 제약 - 0.3 기준`)가 이 값 이하가 될 때까지, 가장 흐린 부분만 한 번에 하나씩 묻는다. 사용자가 "이만 계획" 을 고르거나 최대 횟수에 닿으면 끝난다.
 

@@ -506,6 +506,34 @@ class TestSpawn(SpawnBase):
         self.assertNotIn("Write", r)
         self.assertNotIn("Bash", r)
 
+    def test_lean_launch_keeps_only_herdr_hooks_and_env(self):
+        conf = os.path.join(self.home, "claude-conf")
+        os.makedirs(conf)
+        herdr_group = {"matcher": "startup", "hooks": [{"type": "command", "command": "pwsh herdr-agent-state.ps1"}]}
+        other = {"hooks": [{"type": "command", "command": "node caveman.mjs"}]}
+        with open(os.path.join(conf, "settings.json"), "w") as f:
+            json.dump({"hooks": {"SessionStart": [other, herdr_group], "Stop": [other]},
+                       "env": {"PYTHONUTF8": "1"}, "enabledPlugins": {"x@y": True}}, f)
+        old = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = conf
+        try:
+            c = oke.load_config()
+            args = oke.launch_args("reviewer", c, self.home, "/p")
+        finally:
+            if old is None:
+                del os.environ["CLAUDE_CONFIG_DIR"]
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = old
+        self.assertEqual(args[args.index("--setting-sources") + 1], "project,local")
+        self.assertIn("--strict-mcp-config", args)
+        # before --allowedTools, which takes every argument after it
+        self.assertLess(args.index("--settings"), args.index("--allowedTools"))
+        with open(args[args.index("--settings") + 1]) as f:
+            lean = json.load(f)
+        self.assertEqual(lean["hooks"], {"SessionStart": [herdr_group]})
+        self.assertEqual(lean["env"], {"PYTHONUTF8": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"})
+        self.assertNotIn("--setting-sources", oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p"))
+
     def test_conservative_agents_can_still_write_their_own_files(self):
         c = dict(oke.load_config(), autonomy="conservative", wiki_path="/w")
         w = oke.launch_args("worker", c, "/h", "/p")

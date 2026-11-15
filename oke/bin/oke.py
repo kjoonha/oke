@@ -61,6 +61,7 @@ def load_config():
         "wiki_path": os.path.join(home, "wiki"),
         "models": {"pm": "opus", "worker": "sonnet", "reviewer": "sonnet"},
         "agents": {"worker": "claude", "reviewer": "claude"},  # which CLI runs each role
+        "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
     }
     try:
         with io.open(os.path.join(home, "config.json"), encoding="utf-8") as f:
@@ -448,10 +449,42 @@ def edit_rules(path, windows=None):
     return rules
 
 
+def write_lean_settings(home):
+    """Settings for a lean child: only the user's herdr hooks (herdr learns the session
+    id from them, revive needs it) and env. Returns the file path, or None if unwritable."""
+    folder = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+    try:
+        with io.open(os.path.join(folder, "settings.json"), encoding="utf-8-sig") as f:
+            user = json.load(f)
+    except (IOError, OSError, ValueError):
+        user = {}
+    if not isinstance(user, dict):
+        user = {}
+    hooks = {}
+    for event, groups in (user.get("hooks") or {}).items():
+        kept = [g for g in groups if isinstance(g, dict) and any(
+            "herdr" in str(h.get("command", "")).lower() for h in g.get("hooks") or [] if isinstance(h, dict))]
+        if kept:
+            hooks[event] = kept
+    env = dict(user.get("env") or {}, CLAUDE_CODE_DISABLE_AUTO_MEMORY="1")
+    path = os.path.join(home, "lean-settings.json")
+    try:
+        with io.open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"hooks": hooks, "env": env}, indent=2, ensure_ascii=False))
+    except (IOError, OSError):
+        return None
+    return path
+
+
 def launch_args(role, config, home, plugin_dir, resume=None):
     args = ["--model", config["models"].get(role, "sonnet"),
             "--add-dir", home, "--add-dir", config["wiki_path"],
             "--plugin-dir", plugin_dir]
+    # Measured: the user's plugins, hooks and MCP servers add about 36k tokens to every
+    # child's context. Without a settings file, start as before so the herdr hook stays.
+    settings = config.get("lean_launch", True) and write_lean_settings(home)
+    if settings:
+        args += ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", settings]
     if resume:
         args += ["--resume", resume]
     if role == "reviewer":
