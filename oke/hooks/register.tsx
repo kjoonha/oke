@@ -367,8 +367,19 @@ export const register: Register = on => {
     const tree = await read($, board)
     const open = await read($, expanded)
     const times = await read($, since)
+    // the orchestrator's own task list: the person watches this session most of the time
+    const mine = role === 'orchestrator' ? await read($, todos) : []
     const now = Date.now()
-    if (tree.length === 0) return <Text dimColor>No OKe work yet.</Text>
+    if (tree.length === 0 && mine.length === 0) return <Text dimColor>No OKe work yet.</Text>
+
+    const todoRows = (list: Todo[], indent: string) => list.map(t => {
+      const [tm, tc] = TODO[t.status] ?? ['○', undefined]
+      return (
+        <Text color={tc} dimColor={t.status === 'completed'} bold={t.status === 'in_progress'}>
+          {`${indent}${tm} ${t.content}`}
+        </Text>
+      )
+    })
 
     const toggle = (agent: string) =>
       void update($, expanded, list => (list.includes(agent) ? list.filter(a => a !== agent) : [...list, agent]))
@@ -390,14 +401,7 @@ export const register: Register = on => {
           <Text dimColor>{`${t ? ` ${elapsed(now - t.at)}` : ''}${extra.length ? ` · ${extra.join(', ')}` : ''}`}</Text>
         </Button>,
       ]
-      for (const t of n.todos ?? []) {
-        const [tm, tc] = TODO[t.status] ?? ['○', undefined]
-        rows.push(
-          <Text color={tc} dimColor={t.status === 'completed'} bold={t.status === 'in_progress'}>
-            {`${indent}  ${tm} ${t.content}`}
-          </Text>,
-        )
-      }
+      rows.push(...todoRows(n.todos ?? [], `${indent}  `))
       if (isOpen) {
         rows.push(
           <Box flexDirection="row">
@@ -419,6 +423,12 @@ export const register: Register = on => {
       for (const j of waiting) {
         rows.push(<Text color="yellow">{`  ▸ ${j.job}: ${PENDING[j.pending as string] ?? j.pending}`}</Text>)
       }
+      rows.push(<Text> </Text>)
+    }
+    if (mine.length) {
+      const done = mine.filter(t => t.status === 'completed').length
+      rows.push(<Text bold>{`오케 할 일 ${done}/${mine.length}`}</Text>)
+      rows.push(...todoRows(mine, '  '))
       rows.push(<Text> </Text>)
     }
     for (const repo of tree) {

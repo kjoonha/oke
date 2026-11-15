@@ -226,3 +226,23 @@ test('the band shows the conductor in an OKe session', async ($, on) => {
   await ui.unmount()
   tickRole = 'worker'
 })
+
+test('the orchestrator board shows its own todo list', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  engine(on, [], [])
+  on('fs.write', () => ({ value: undefined }))
+  on('tool.call', (_: any, e: any) => ({ result: { oldTodos: [], newTodos: e.todos } }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'TodoWrite', todos: [
+    { content: 'intake calc-pow', status: 'completed', activeForm: 'a' },
+    { content: 'relay plan', status: 'in_progress', activeForm: 'b' }] } as any)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /오케 할 일 1\/2/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /✓ intake calc-pow/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /▸ relay plan/ })).toBeTruthy()
+  await ui.unmount()
+  tickRole = 'worker'
+})
