@@ -260,8 +260,14 @@ class HerdrRuntime(object):
     name = "herdr"
     Error = HerdrError
 
+    owns_orchestrator = True  # a PM may revive a dead orchestrator in its pane
+
     def inside(self):
         return os.environ.get("HERDR_ENV") == "1"
+
+    def whoami(self):
+        """The calling session's place: its herdr pane."""
+        return os.environ.get("HERDR_PANE_ID")
 
     def missing(self):
         return missing_commands()

@@ -169,6 +169,8 @@ def load_state(recover=False):
     for key in EMPTY_STATE:
         if isinstance(loaded.get(key), dict):
             state[key] = loaded[key]
+    if loaded.get("runtime") in RUNTIMES:
+        state["runtime"] = loaded["runtime"]
     return state
 
 
@@ -1233,6 +1235,11 @@ def cmd_resume_all(args):
 def whoami(state, pane):
     """(role, name, key, record) of the OKe agent in `pane`, or None. Pane ids come
     back after a herdr restart, so a recorded session has to match as well."""
+    if pane and pane.startswith("session:"):
+        # a session id is never reused: no need to ask the runtime who is there
+        sid = pane[len("session:"):]
+        mine = [r for r in records(state) if r[3].get("pane") == pane or r[3].get("session") == sid]
+        return (mine[0] if mine else None), list_agents()
     mine = [r for r in records(state) if r[3].get("pane") == pane]
     if not mine:
         return None, []
@@ -1288,6 +1295,46 @@ def board_tree(state, agents, only_key=None):
     return tree
 
 
+TODO_MARKS = {"completed": "v", "in_progress": ">", "pending": "o"}
+
+
+def board_lines(tree):
+    """The board as (depth, text) lines: one renderer-neutral list for --text and --html."""
+    out = []
+
+    def agent(n, depth):
+        out.append((depth, "%s %s: %s%s" % (n["role"], n["agent"], n["status"],
+                                            ", report " + n["report"] if n.get("report") else "")))
+        for t in n.get("todos") or []:
+            out.append((depth + 1, "%s %s" % (TODO_MARKS.get(t["status"], "o"), t["content"])))
+
+    for repo in tree:
+        out.append((0, "repo " + repo["repo"]))
+        if repo["pm"]:
+            agent(repo["pm"], 1)
+        for job in repo["jobs"]:
+            if job["phase"] in DONE_PHASES:
+                continue
+            out.append((1, "job %s: %s%s" % (job["job"], job["phase"],
+                                             ", waiting for you (%s)" % job["pending"] if job["pending"] else "")))
+            for n in job["agents"]:
+                agent(n, 2)
+    return out or [(0, "no OKe agents yet")]
+
+
+def cmd_board(args):
+    """The board for hosts that cannot draw the mod's pane (Orca chat, SDK hosts)."""
+    lines = board_lines(board_tree(load_state(), list_agents()))
+    if not args.html:
+        print("\n".join("  " * d + t for d, t in lines))
+        return 0
+    import html
+    items = "".join('<li style="margin-left:%dem">%s</li>' % (d * 1.5, html.escape(t)) for d, t in lines)
+    print('<div style="font-family:monospace"><h3>OKe board</h3><ul style="list-style:none;padding:0">%s</ul></div>'
+          % items)
+    return 0
+
+
 def cmd_tick(args):
     """One watcher round for a mod: who am I, revive what died, new events, the board."""
     state = load_state()
@@ -1302,7 +1349,8 @@ def cmd_tick(args):
         if role == "orchestrator":
             targets = [r for r in records(state) if r[0] == "pm"]
         elif role == "pm":
-            targets = [r for r in records(state) if r[0] == "orchestrator"
+            targets = [r for r in records(state)
+                       if (r[0] == "orchestrator" and runtime().owns_orchestrator)
                        or (r[2] == key and r[0] in ("worker", "reviewer"))]
         else:
             targets = []
@@ -1399,6 +1447,14 @@ def cmd_status(args):
     # herdr calls are slow (seconds each): make them before taking the lock, so
     # spawn and the waits do not time out on it. The agent list may then be a few
     # seconds old: an agent that just started can show as dead until the next status.
+    if args.claim and not os.environ.get("OKE_RUNTIME"):
+        # one runtime per OKe home, chosen by where the orchestrator starts
+        want = "herdr" if os.environ.get("HERDR_ENV") == "1" else "bg"
+        if runtime().name != want:
+            with locked():
+                current = load_state()
+                current["runtime"] = want
+                save_state(current)
     herdr_info = None
     if runtime().inside():
         herdr_info = (runtime().missing(), list_agents())
@@ -1473,7 +1529,7 @@ def status_locked(args, herdr_info):
                                 "pm_seq": pm_job_report(name)[0],
                                 "pm_job_dir": pm_job_dir(name).replace("\\", "/")}
 
-    here = os.environ.get("HERDR_PANE_ID")
+    here = runtime().whoami()
     recorded = state["orchestrator"].get("pane")
     there = [a for a in agents if a.get("pane_id") == recorded]
     orch = state["orchestrator"]
@@ -2111,7 +2167,7 @@ def cmd_send(args):
     if found[0] == "orchestrator":
         return fail("the orchestrator has no inbox: a PM reports to it instead")
     sender = "user"
-    pane = os.environ.get("HERDR_PANE_ID")
+    pane = runtime().whoami()
     if pane:
         try:
             me, _ = whoami(state, pane)
@@ -2350,6 +2406,10 @@ def build_parser():
             p.add_argument("job", nargs="?")
             p.add_argument("--repo")
             p.add_argument("--remove", metavar="ID")
+
+    board = sub.add_parser("board", help="the board as text or HTML, for hosts without the mod pane")
+    board.add_argument("--html", action="store_true")
+    board.set_defaults(func=cmd_board)
 
     send = sub.add_parser("send")
     send.add_argument("agent")

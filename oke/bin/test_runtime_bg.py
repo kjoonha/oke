@@ -150,5 +150,62 @@ class TestDeliverInBg(BgBase):
         self.assertEqual(oke.inbox_messages("fix-a-w1"), [])
 
 
+class TestIdentityInBg(BgBase):
+    def setUp(self):
+        BgBase.setUp(self)
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-orch"
+
+    def test_claim_outside_herdr_picks_bg_and_records_the_session(self):
+        self.fake({"agents --json": [OUT("[]")]})
+        self.assertEqual(self.cli("status", "--claim"), 0, self.err)
+        st = oke.load_state()
+        self.assertEqual(st["runtime"], "bg")
+        self.assertEqual(st["orchestrator"]["pane"], "session:sid-orch")
+
+    def test_tick_knows_a_bg_child_by_its_session(self):
+        os.environ["OKE_RUNTIME"] = "bg"
+        self.job("fix-a", "working")
+        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
+                              {"fix-a-w1": {"agent": "fix-a-w1", "job": "fix-a", "pane": "a1",
+                                            "session": "s-1", "role": "worker", "seq": 1}})
+        self.fake({"agents --json": [OUT(json.dumps(ROWS))]})
+        self.assertEqual(self.cli("tick", "--pane", "session:s-1"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["agent"], "fix-a-w1")
+
+    def test_a_bg_pm_never_revives_the_orchestrator(self):
+        os.environ["OKE_RUNTIME"] = "bg"
+        st = oke.load_state()
+        st["orchestrator"] = {"pane": "session:sid-orch"}
+        st["repos"][oke.repo_key(self.repo)] = {"pm": {"agent": "pm-toy", "pane": "a2", "session": "s-2"}}
+        oke.save_state(st)
+        self.fake({"agents --json": [OUT(json.dumps(ROWS))]})
+        self.addCleanup(setattr, oke, "revive", oke.revive)
+        oke.revive = lambda name: self.fail("revived " + name)
+        self.assertEqual(self.cli("tick", "--pane", "session:s-2"), 0, self.err)
+        out = json.loads(self.out)
+        self.assertEqual((out["role"], out["revived"]), ("pm", {}))
+
+
+class TestBoardAndScreen(BgBase):
+    def test_board_text_and_html(self):
+        os.environ["OKE_RUNTIME"] = "bg"
+        self.job("fix-a", "working")
+        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
+                              {"fix-a-w1": {"agent": "fix-a-w1", "job": "fix-a", "pane": "a1",
+                                            "session": "s-1", "role": "worker", "seq": 1}})
+        self.fake({"agents --json": [OUT(json.dumps(ROWS))]})
+        self.assertEqual(self.cli("board"), 0, self.err)
+        self.assertIn("job fix-a: working", self.out)
+        self.assertIn("    worker fix-a-w1: working", self.out)
+        self.assertEqual(self.cli("board", "--html"), 0, self.err)
+        self.assertIn("<li", self.out)
+        self.assertIn("fix-a-w1", self.out)
+
+    def test_screen_strips_terminal_escapes(self):
+        log = "\x1b[38;2;1;2;3mhello\x1b[K\n\x1b[mhello\nworld \x1b]0;t\x07\n"
+        self.fake({"agents --json": [OUT(json.dumps(ROWS))], "logs": [OUT(log)]})
+        self.assertEqual(self.rt.screen("pm-toy"), "hello\nworld\n")
+
+
 if __name__ == "__main__":
     unittest.main()

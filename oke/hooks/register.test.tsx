@@ -91,7 +91,7 @@ test('a permanent error is not resubmitted', async ($, on) => {
   expect(prompts.length).toBe(0)
 })
 
-test('outside herdr the mod does nothing', async ($, on) => {
+test('without herdr or a session id the mod does nothing', async ($, on) => {
   mock.clock(on)
   mock.env(on, {})
   const runs: Run[] = []
@@ -101,6 +101,16 @@ test('outside herdr the mod does nothing', async ($, on) => {
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.complete({ ...TURN, reason: 'error' } as any)
   expect(runs.length).toBe(0)
+})
+
+test('outside herdr the session id is the place', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { CLAUDE_CODE_SESSION_ID: 'sid-1' })
+  const runs: Run[] = []
+  engine(on, runs, [])
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(runs[0]?.argv).toContain('session:sid-1')
 })
 
 test('a session that is no OKe agent ticks once a minute, a PM every 10 s', async ($, on) => {

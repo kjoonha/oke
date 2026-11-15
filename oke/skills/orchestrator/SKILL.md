@@ -53,6 +53,7 @@ The OKe mod in every agent does this without you:
 - An agent whose turn ends on an API error that clears by itself (rate limit, overload, server error) resubmits the turn after 30 s, 1 m, 2 m, 4 m, then every 5 m, up to `api_retry_limit` (default 20) tries. Other API errors, and the last try, make a child or PM report `failed` with "API error" in the summary.
 - Revivals and give-ups appear as short notices in your pane. After three deaths in a row with no new report, OKe stops reviving that agent; your wait then says `gone`.
 - The user opens the board with `/oke-board` (type it in this pane; it is a command of the mod, not of the skill).
+- A host that draws no mod pane (Orca's chat, other SDK hosts) has no `/oke-board`. There, when the user asks for the board or a job changes phase, run `$OKE board` and put its text in your reply. In Orca's chat (`ORCA_CHAT_SCRATCH_DIR` is set) you may instead write `$OKE board --html` to a file in that folder and show it as an Orca visual.
 
 ## Intake
 

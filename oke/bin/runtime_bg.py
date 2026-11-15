@@ -9,11 +9,14 @@ short id (claude agents --json: "id"). Errors reuse HerdrError and its codes
 import io
 import json
 import os
+import re
 import subprocess
 import time
 
 from runtime_herdr import HerdrError
 
+# terminal escapes in `claude logs`: CSI, OSC (ended by BEL or ST), and two-byte ones
+ANSI = re.compile(r"\x1b(\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])")
 CLAUDE_TIMEOUT = 120  # seconds
 START_POLLS = 30      # seconds a new session gets to show up in `claude agents`
 # bg state -> herdr agent_status. failed, stopped and unknown states count as gone.
@@ -88,8 +91,16 @@ class BgRuntime(object):
     name = "bg"
     Error = HerdrError
 
+    owns_orchestrator = False  # the orchestrator is the user's own session: never revived
+
     def inside(self):
         return True  # any terminal or host where claude runs
+
+    def whoami(self):
+        """The calling session's place: "session:<id>". A bg child's record holds that
+        session id; the orchestrator's record holds this place itself."""
+        sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        return "session:" + sid if sid else None
 
     def missing(self):
         return []
@@ -108,7 +119,13 @@ class BgRuntime(object):
         raise HerdrError("agent_not_found", name)
 
     def screen(self, name):
-        lines = run_claude(["logs", self.agent(name)["pane_id"]]).splitlines()
+        """The end of `claude logs`, which is raw terminal output: escapes removed and
+        repeated redraws of the same line folded."""
+        lines = []
+        for line in ANSI.sub("", run_claude(["logs", self.agent(name)["pane_id"]])).splitlines():
+            line = line.rstrip()
+            if line and (not lines or lines[-1] != line):
+                lines.append(line)
         return "\n".join(lines[-40:]) + "\n"
 
     def start(self, name, place, argv, prompt, trusted, registered=lambda: None, kind="claude"):

@@ -23,7 +23,8 @@ class Base(unittest.TestCase):
         self._env = dict(os.environ)
         self._grace = oke.BLOCKED_GRACE
         os.environ["OKE_HOME"] = self.home
-        for k in ("HERDR_ENV", "HERDR_PANE_ID", "OKE_HERDR", "FAKE_HERDR_DIR"):
+        for k in ("HERDR_ENV", "HERDR_PANE_ID", "OKE_HERDR", "FAKE_HERDR_DIR", "OKE_RUNTIME",
+                  "OKE_CLAUDE", "CLAUDE_CODE_SESSION_ID"):
             os.environ.pop(k, None)
         self.out = ""
         self.err = ""
