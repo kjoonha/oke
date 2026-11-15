@@ -455,6 +455,20 @@ class TestTick(ReviveBase):
         self.assertIn("coding", job["agents"][0]["board"])
         self.assertEqual(job["merge"], "none")
         self.assertIn("pending", job)
+        self.assertEqual(job["agents"][0]["todos"], [])
+
+    def test_board_shows_todos_and_tick_names_the_folder(self):
+        todos = [{"content": "write test", "status": "completed"}, {"content": "fix", "status": "in_progress"},
+                 "junk", {"content": "docs"}]
+        self.write_file(os.path.join(self.child_dir, "todos.json"), json.dumps(todos))
+        out = self.tick("w7:p1", [AG(None, pane="w7:p1", session="s-o"), AG("pm-toy", pane="w1:p3"),
+                                  AG("fix-a-w1", pane="w1:p5")], "--board")
+        self.assertEqual(out["board"][0]["jobs"][0]["agents"][0]["todos"],
+                         [{"content": "write test", "status": "completed"},
+                          {"content": "fix", "status": "in_progress"},
+                          {"content": "docs", "status": "pending"}])
+        worker = self.tick("w1:p5", [AG("fix-a-w1", pane="w1:p5"), AG("pm-toy", pane="w1:p3")])
+        self.assertEqual(os.path.normcase(worker["folder"]), os.path.normcase(self.child_dir))
 
 
 class TestApiRetry(ReviveBase):

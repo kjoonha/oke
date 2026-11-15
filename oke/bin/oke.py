@@ -61,6 +61,7 @@ def load_config():
         "wiki_path": os.path.join(home, "wiki"),
         "models": {"pm": "opus", "worker": "sonnet", "reviewer": "sonnet"},
         "agents": {"worker": "claude", "reviewer": "claude"},  # which CLI runs each role
+        "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
     }
     try:
         with io.open(os.path.join(home, "config.json"), encoding="utf-8") as f:
@@ -398,7 +399,8 @@ def first_prompt(kind, role, path):
 def agent_command(kind, role, config, home, plugin_dir, folder, resume=None):
     """herdr's --kind and the CLI arguments for one worker or reviewer."""
     if kind == "claude":
-        return kind, launch_args(role, config, home, plugin_dir, resume)
+        header = read_header(os.path.join(folder, "assignment.md")) if folder else None
+        return kind, launch_args(role, config, home, plugin_dir, resume, folder, header)
     conservative = config.get("autonomy") == "conservative"
     if kind == "codex":
         # Hooks off: codex asks about untrusted hooks at a moment herdr cannot see,
@@ -448,10 +450,102 @@ def edit_rules(path, windows=None):
     return rules
 
 
-def launch_args(role, config, home, plugin_dir, resume=None):
+def claude_config_dir():
+    return os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
+
+
+def user_json(path):
+    data = read_json(path, {})
+    return data if isinstance(data, dict) else {}
+
+
+def user_mcp_servers():
+    """MCP servers the user configured (user scope), by name."""
+    path = os.path.join(os.path.dirname(claude_config_dir()), ".claude.json")         if not os.environ.get("CLAUDE_CONFIG_DIR") else os.path.join(claude_config_dir(), ".claude.json")
+    servers = user_json(path).get("mcpServers")
+    return servers if isinstance(servers, dict) else {}
+
+
+def user_plugins():
+    """Plugins the user has enabled, as name@marketplace."""
+    enabled = user_json(os.path.join(claude_config_dir(), "settings.json")).get("enabledPlugins") or {}
+    return sorted(k for k, v in enabled.items() if v) if isinstance(enabled, dict) else []
+
+
+def header_list(header, field):
+    return [x.strip() for x in str((header or {}).get(field) or "").split(",") if x.strip()]
+
+
+def write_lean_settings(folder, plugins=()):
+    """Settings for a lean child: only the user's herdr hooks (herdr learns the session
+    id from them, revive needs it), env, and the plugins its assignment asks for.
+    Returns the file path, or None if unwritable."""
+    user = user_json(os.path.join(claude_config_dir(), "settings.json"))
+    hooks = {}
+    for event, groups in (user.get("hooks") or {}).items():
+        kept = [g for g in groups if isinstance(g, dict) and any(
+            "herdr" in str(h.get("command", "")).lower() for h in g.get("hooks") or [] if isinstance(h, dict))]
+        if kept:
+            hooks[event] = kept
+    env = dict(user.get("env") or {}, CLAUDE_CODE_DISABLE_AUTO_MEMORY="1")
+    env.pop("CLAUDE_CODE_PLUGIN_DIRS", None)  # the user's own mods would load in every child
+    settings = {"hooks": hooks, "env": env}
+    if plugins:
+        settings["enabledPlugins"] = dict((p, True) for p in plugins)
+    path = os.path.join(folder, "lean-settings.json")
+    try:
+        with io.open(path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(settings, indent=2, ensure_ascii=False))
+    except (IOError, OSError):
+        return None
+    return path
+
+
+# Built-in tools a lean child gets; an assignment's `tools:` adds more. Measured: the
+# full built-in set is about 28k tokens of a 41k start, this set about 3k.
+ROLE_TOOLS = {
+    "pm": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "TaskStop",
+           "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch"],
+    "worker": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "TaskStop",
+               "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch"],
+    "reviewer": ["Bash", "Read", "Glob", "Grep", "Skill", "TaskCreate", "TaskUpdate", "TaskList",
+                 "WebFetch", "WebSearch"],
+}
+# Always on, whatever the PM writes: built-in tools only (user's choice). MCP servers
+# and plugins come only from the assignment header.
+
+
+def cmd_extras(args):
+    """What a PM may switch on for one child (`tools:`, `mcp:`, `plugins:` header lines)."""
+    print(json.dumps({"default_tools": ROLE_TOOLS, "mcp": sorted(user_mcp_servers()),
+                      "plugins": user_plugins()}, ensure_ascii=False))
+    return 0
+
+
+def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header=None):
+    """`header` is the agent's assignment header: its `tools:`, `mcp:` and `plugins:`
+    (comma separated) are what the PM switched on for this job."""
     args = ["--model", config["models"].get(role, "sonnet"),
             "--add-dir", home, "--add-dir", config["wiki_path"],
             "--plugin-dir", plugin_dir]
+    # Measured: the user's plugins, hooks and MCP servers add about 36k tokens to every
+    # child's context. Without a settings file, start as before so the herdr hook stays.
+    folder = folder or home
+    settings = config.get("lean_launch", True) and write_lean_settings(folder, header_list(header, "plugins"))
+    if settings:
+        args += ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", settings]
+        tools = ROLE_TOOLS.get(role, ROLE_TOOLS["worker"])
+        args += ["--tools", ",".join(tools + [t for t in header_list(header, "tools") if t not in tools])]
+        known = user_mcp_servers()
+        servers = dict((n, known[n]) for n in header_list(header, "mcp") if n in known)
+        if servers:
+            path = os.path.join(folder, "mcp.json")
+            try:
+                with io.open(path, "w", encoding="utf-8") as f:
+                    f.write(json.dumps({"mcpServers": servers}, indent=2, ensure_ascii=False))
+                args += ["--mcp-config", path]
+            except (IOError, OSError):
+                pass  # the child starts without them
     if resume:
         args += ["--resume", resume]
     if role == "reviewer":
@@ -1346,10 +1440,15 @@ def board_node(role, name, key, record, agents):
             board = f.read()
     except (IOError, OSError, TypeError, UnicodeDecodeError):
         board = ""
+    # the agent's own task list, written by its OKe mod
+    todos = read_json(os.path.join(folder, "todos.json"), []) if folder else []
+    todos = [t for t in todos if isinstance(t, dict)] if isinstance(todos, list) else []
     return {"agent": name, "role": role, "status": a.get("agent_status") if a else "dead",
             "pane": (a or {}).get("pane_id") or record.get("pane"),
             "report": (report or {}).get("type"), "board": board,
-            "revives": record.get("revives", 0)}
+            "revives": record.get("revives", 0),
+            "todos": [{"content": str(t.get("content", "")), "status": str(t.get("status", "pending"))}
+                      for t in todos]}
 
 
 def board_tree(state, agents, only_key=None):
@@ -1383,6 +1482,7 @@ def cmd_tick(args):
     if me is not None:
         role, name, key, record = me
         out["role"], out["agent"] = role, name
+        out["folder"] = agent_folder(role, name, key, record)
         if role == "orchestrator":
             targets = [r for r in records(state) if r[0] == "pm"]
         elif role == "pm":
@@ -2425,6 +2525,8 @@ def build_parser():
 
     pending = sub.add_parser("pending")
     pending.set_defaults(func=cmd_pending)
+
+    sub.add_parser("extras", help="what a child's assignment may switch on").set_defaults(func=cmd_extras)
 
     send = sub.add_parser("send")
     send.add_argument("agent")

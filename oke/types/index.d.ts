@@ -6,7 +6,12 @@ export type BoardNode = {
   report: string | null
   board: string
   revives: number
+  /** The agent's own task list (TaskCreate/TaskUpdate/TodoWrite), from its todos.json. */
+  todos: Todo[]
 }
+
+/** One task: pending, in_progress or completed. `id` is TaskCreate's, absent for TodoWrite. */
+export type Todo = { id?: string; content: string; status: string }
 
 export type BoardJob = {
   job: string
@@ -29,6 +34,7 @@ declare module 'claude-code' {
       board: Shaped<BoardRepo[]>
       expanded: Shaped<string[]>
       since: Shaped<Record<string, Since>>
+      todos: Shaped<Todo[]>
     }
   }
 }

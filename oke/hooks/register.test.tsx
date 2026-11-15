@@ -6,17 +6,19 @@ const BOARD = [{
   repo: 'toy-6b0484', key: 'k', pm: null,
   jobs: [{ job: 'calc-sub', phase: 'working', merge: 'rolled_back', pending: 'question', agents: [{
     agent: 'calc-sub-w1', role: 'worker', status: 'working', pane: 'w7:p9', report: null,
-    board: '## 지금\nwriting sub', revives: 1 }] },
+    board: '## 지금\nwriting sub', revives: 1, todos: [
+      { content: 'write sub', status: 'completed' }, { content: 'test sub', status: 'in_progress' },
+      { content: 'docs', status: 'pending' }] }] },
   { job: 'calc-add', phase: 'done', merge: 'verified', pending: null, agents: [{
     agent: 'calc-add-w1', role: 'worker', status: 'idle', pane: 'w7:p8', report: 'done',
-    board: '', revives: 0 }] }],
+    board: '', revives: 0, todos: [] }] }],
 }]
 
 let tickRole = 'worker'
 
 function answer(args: readonly string[]) {
   if (args[0] === 'tick') {
-    return { role: tickRole, events: [], events_offset: 0, board: tickRole === 'worker' ? null : BOARD, revived: {} }
+    return { role: tickRole, folder: '/oke/jobs/j/w1', events: [], events_offset: 0, board: tickRole === 'worker' ? null : BOARD, revived: {} }
   }
   if (args[0] === 'api-retry' && args.includes('--clear')) return { action: 'cleared' }
   if (args.includes('authentication_failed')) return { action: 'give_up', limit: 20 }
@@ -166,6 +168,81 @@ test('the board puts what waits on the user first and folds finished jobs', asyn
   expect(await ui.find({ type: 'Text', text: /계획 승인 작업 리뷰 병합 검증/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /✓ calc-add 끝/ })).toBeTruthy()
   expect(await ui.find({ key: 'open-calc-add-w1' })).toBeFalsy()
+  await ui.unmount()
+  tickRole = 'worker'
+})
+
+test('the board marks done, current and open todos apart', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  engine(on, [], [])
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /✓ write sub/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /▸ test sub/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /○ docs/ })).toBeTruthy()
+  await ui.unmount()
+  tickRole = 'worker'
+})
+
+test('task tool calls are written to the agent folder', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  engine(on, [], [])
+  const writes: { path: string; text: string }[] = []
+  on('fs.write', (_: any, e: any) => {
+    writes.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
+  on('tool.call', (_: any, e: any) => (e.tool === 'TaskCreate'
+    ? { result: { task: { id: '1', subject: e.subject } } }
+    : { result: { success: true, taskId: e.taskId, updatedFields: ['status'] } }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'write sub', description: 'd' } as any)
+  await $.tool.call({ tool: 'TaskUpdate', taskId: '1', status: 'in_progress' } as any)
+  const last = writes[writes.length - 1]!
+  expect(last.path.replace(/\\/g, '/')).toMatch(/\/oke\/jobs\/j\/w1\/todos\.json$/)
+  expect(JSON.parse(last.text)).toEqual([{ id: '1', content: 'write sub', status: 'in_progress' }])
+})
+
+test('the band shows the conductor in an OKe session', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  engine(on, [], [])
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({
+    plugin: 'oke', component: 'AbovePrompt', requestId: 'band', surface: 'terminal',
+    props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 20, bodyColumns: 60,
+      scroll: { offset: 0, bodyRows: 20 }, view: {} },
+  } as any)
+  expect(await ui.find({ key: 'conductor' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /내 차례!/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /OKe orchestrator · job 1 · 작업 1 · 내 차례 1/ })).toBeTruthy()
+  await ui.unmount()
+  tickRole = 'worker'
+})
+
+test('the orchestrator board shows its own todo list', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  engine(on, [], [])
+  on('fs.write', () => ({ value: undefined }))
+  on('tool.call', (_: any, e: any) => ({ result: { oldTodos: [], newTodos: e.todos } }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'TodoWrite', todos: [
+    { content: 'intake calc-pow', status: 'completed', activeForm: 'a' },
+    { content: 'relay plan', status: 'in_progress', activeForm: 'b' }] } as any)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /오케 할 일 1\/2/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /✓ intake calc-pow/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /▸ relay plan/ })).toBeTruthy()
   await ui.unmount()
   tickRole = 'worker'
 })
