@@ -1,0 +1,137 @@
+"""BgRuntime against a fake `claude` binary (the fake herdr script, which answers
+any argv from a scenario)."""
+import io
+import json
+import os
+import subprocess
+import sys
+import unittest
+
+from test_oke import SpawnBase, HERE, spawn_ok  # noqa: F401
+import oke
+import runtime_bg
+
+ROWS = [
+    {"id": "a1", "sessionId": "s-1", "name": "fix-a-w1", "state": "working", "cwd": "/r"},
+    {"id": "a2", "sessionId": "s-2", "name": "pm-toy", "state": "done", "cwd": "/r"},
+    {"id": "a0", "sessionId": "s-0", "name": "fix-a-w1", "state": "stopped", "cwd": "/r"},
+]
+
+
+def OUT(text):
+    return {"stdout": text, "exit": 0}
+
+
+class BgBase(SpawnBase):
+    def fake(self, scenario):
+        SpawnBase.fake(self, scenario)
+        os.environ["OKE_CLAUDE"] = os.environ["OKE_HERDR"]
+
+    def setUp(self):
+        SpawnBase.setUp(self)
+        self.rt = runtime_bg.BgRuntime()
+        runtime_bg.START_POLLS = 2
+
+    def argv(self):
+        return self.calls()
+
+
+class TestBgRuntime(BgBase):
+    def test_agents_map_states_and_drop_dead_ones(self):
+        self.fake({"agents --json": [OUT(json.dumps(ROWS))]})
+        agents = self.rt.agents()
+        self.assertEqual([(a["name"], a["pane_id"], a["agent_status"]) for a in agents],
+                         [("fix-a-w1", "a1", "working"), ("pm-toy", "a2", "idle")])
+        self.assertEqual(agents[0]["agent_session"], {"value": "s-1"})
+        self.assertEqual(self.rt.place_id("a0"), "a0")  # a dead one can still be closed
+        self.assertFalse(self.rt.place_exists("a0"))
+
+    def test_unknown_agent(self):
+        self.fake({"agents --json": [OUT("[]")]})
+        with self.assertRaises(oke.HerdrError) as c:
+            self.rt.agent("nobody")
+        self.assertEqual(c.exception.code, "agent_not_found")
+
+    def test_start_puts_prompt_first_and_adds_bg_settings(self):
+        folder = self.path("agent")
+        os.makedirs(folder)
+        lean = os.path.join(folder, "lean-settings.json")
+        with io.open(lean, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"env": {"X": "1"}}))
+        self.fake({"go": [OUT("started")],
+                   "agents --json": [OUT("[]"), OUT(json.dumps(ROWS))]})
+        info = self.rt.start("fix-a-w1", self.repo, ["--settings", lean, "--allowedTools", "Bash"], "go",
+                             trusted=lambda: False)
+        self.assertEqual(info["pane_id"], "a1")
+        start = self.argv()[0]
+        self.assertEqual(start[:4], ["go", "--bg", "--name", "fix-a-w1"])
+        with io.open(start[start.index("--settings") + 1], encoding="utf-8") as f:
+            merged = json.load(f)
+        self.assertEqual(merged["env"], {"X": "1"})
+        self.assertEqual(merged["worktree"], {"bgIsolation": "none"})
+        self.assertEqual(merged["crossSessionInbound"], "accept")
+
+    def test_start_refuses_other_kinds(self):
+        with self.assertRaises(oke.HerdrError):
+            self.rt.start("x", self.repo, [], "go", lambda: False, kind="codex")
+
+    def test_close_stops_then_removes(self):
+        self.fake({"stop": [{"stderr": "not running", "exit": 1}], "rm": [OUT("")]})
+        self.rt.close("a0")
+        self.assertEqual(self.argv(), [["stop", "a0"], ["rm", "a0"]])
+
+    def test_keys_and_attach_name_the_attach_command(self):
+        self.fake({"agents --json": [OUT(json.dumps(ROWS))]})
+        self.assertEqual(self.rt.attach("pm-toy"), "claude attach a2")
+        with self.assertRaises(oke.HerdrError) as c:
+            self.rt.keys("pm-toy", ["enter"])
+        self.assertIn("claude attach a2", str(c.exception))
+
+    def test_child_env_drops_nesting_variables(self):
+        os.environ.update({"CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "x", "ORCA_CHAT_SCRATCH_DIR": "d",
+                           "CLAUDE_CONFIG_DIR": "/c", "PATH_KEEP_ME": "y"})
+        env = runtime_bg.child_env()
+        self.assertNotIn("CLAUDECODE", env)
+        self.assertNotIn("CLAUDE_CODE_ENTRYPOINT", env)
+        self.assertNotIn("ORCA_CHAT_SCRATCH_DIR", env)
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], "/c")
+        self.assertEqual(env["PATH_KEEP_ME"], "y")
+
+    def test_worktree_inside_the_repo(self):
+        git = lambda *a: subprocess.check_call(["git", "-C", self.repo] + list(a),
+                                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not os.path.isdir(os.path.join(self.repo, ".git")):
+            git("init", "-q")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base")
+        wt = self.rt.worktree_create(self.repo, "oke/fix-a", "fix-a")
+        self.assertEqual(wt["path"], os.path.join(self.repo, ".claude", "worktrees", "oke-fix-a"))
+        self.assertTrue(os.path.isdir(wt["path"]))
+        self.rt.worktree_remove(wt["id"])
+        self.assertFalse(os.path.isdir(wt["path"]))
+
+
+class TestSpawnInBg(BgBase):
+    def test_spawn_records_the_session_id_as_the_place(self):
+        os.environ["OKE_RUNTIME"] = "bg"
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        prompt = oke.first_prompt("claude", "worker", a.replace("\\", "/"))
+        self.fake({"agents --json": [OUT("[]"), OUT("[]"), OUT(json.dumps(ROWS))],
+                   prompt: [OUT("started")]})
+        self.assertEqual(self.cli("spawn", a), 0, self.err)
+        self.assertEqual(json.loads(self.out), {"agent": "fix-a-w1", "pane": "a1", "session": "s-1"})
+        kid = self.children()["fix-a-w1"]
+        self.assertEqual((kid["pane"], kid["terminal"]), ("a1", "a1"))
+        self.assertEqual(self.argv()[1][0], prompt)
+
+    def test_runtime_named_in_state(self):
+        st = oke.load_state()
+        st["runtime"] = "bg"
+        oke.save_state(st)
+        self.assertEqual(oke.runtime().name, "bg")
+        os.environ["OKE_RUNTIME"] = "herdr"
+        self.assertEqual(oke.runtime().name, "herdr")
+
+
+if __name__ == "__main__":
+    unittest.main()

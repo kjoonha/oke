@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 
+import runtime_bg
 import runtime_herdr
 from runtime_herdr import DialogError, HerdrError, herdr, herdr_text, session_of  # noqa: F401 (tests)
 
@@ -282,13 +283,20 @@ def slug(text, limit=24):
 
 # ---------------------------------------------------------------- runtime
 
-_RUNTIME = runtime_herdr.HerdrRuntime()
+RUNTIMES = {"herdr": runtime_herdr.HerdrRuntime, "bg": runtime_bg.BgRuntime}
+_runtimes = {}
 
 
 def runtime():
-    """The runtime that runs OKe's agents. Only herdr for now (see
-    docs/superpowers/specs/2026-11-15-oke-runtime-layer-design.md)."""
-    return _RUNTIME
+    """The runtime that runs OKe's agents: $OKE_RUNTIME, else the one state.json names,
+    else herdr (see docs/superpowers/specs/2026-11-15-oke-runtime-layer-design.md)."""
+    state = read_json(state_path(), {})
+    name = os.environ.get("OKE_RUNTIME") or (state.get("runtime") if isinstance(state, dict) else None) or "herdr"
+    if name not in RUNTIMES:
+        raise StateError("unknown runtime %r: use %s" % (name, " or ".join(sorted(RUNTIMES))))
+    if name not in _runtimes:
+        _runtimes[name] = RUNTIMES[name]()
+    return _runtimes[name]
 
 
 def list_agents():
@@ -451,8 +459,9 @@ def cmd_rt(args):
         rt.keys(args.agent, args.keys)
         out = {"agent": args.agent, "sent": args.keys}
     elif args.rt == "attach":
-        rt.attach(args.agent)
-        out = {"agent": args.agent, "attached": True}
+        hint = rt.attach(args.agent)
+        # herdr shows the pane itself; a bg session needs the user to run the hint
+        out = {"agent": args.agent, "attached": hint is None, "hint": hint}
     elif args.rt == "close":
         rt.close(args.place)
         out = {"closed": args.place}
