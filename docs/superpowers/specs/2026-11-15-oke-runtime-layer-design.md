@@ -136,14 +136,19 @@ The board data stays one function in the domain; only the renderers differ.
 5. Mod: identity from the runtime; `oke board --text|--html`.
 6. Live run without herdr in this Orca terminal.
 
+## Decided after the first draft
+
+- Worktrees: herdr mode keeps `herdr worktree create`. bg mode creates the worktree
+  with `git worktree add` under `<repo>/.claude/worktrees/oke-<job>`: a folder inside
+  a trusted folder is trusted (measured), so `claude --bg` starts there. The user
+  chose not to unify the two places.
+- bg children get `--settings` `worktree.bgIsolation: "none"`, or they move
+  themselves into a worktree of their own before editing.
+- RHEL8 is out of scope for bg mode (herdr stays the runtime there).
+
 ## Open questions
 
-1. Trust: `claude --bg` refuses an untrusted folder, and every new worktree is
-   untrusted. Options: (a) OKe marks the worktree trusted in `~/.claude.json`
-   (writes the user's config), (b) worktrees under a folder the user trusted once,
-   if trust covers subfolders (to measure), (c) start the child in the trusted repo
-   root and `cd` to the worktree in its first prompt.
-2. A bg session nobody attached stops after about an hour idle unless pinned. A PM
-   waits for hours. Measure whether a session running a background `oke wait`
-   counts as idle, and whether `--settings` can pin it.
-3. RHEL8 at work: `claude --bg` needs the supervisor; not tried on Linux.
+1. A bg session nobody attached stops after about an hour idle. A turn that ended
+   with a background command still shows `working` (measured); whether the
+   supervisor leaves it running past an hour, and whether the command's end wakes
+   it, is being measured.
