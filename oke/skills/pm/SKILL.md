@@ -92,7 +92,7 @@ job: <job>
 ## 사용자에게 물을 것 (or 없음)
 ```
 
-A small job gets one line per section. Use no worktree only when the change is small, the main checkout is clean, and no other OKe job of this repository is open: a job without a worktree changes the main checkout that every merge uses. Report `done` with a short summary, or `question` if intake is not enough to plan.
+A small job gets one line per section. Use no worktree only when the change is small and no other OKe job of this repository is open: a job without a worktree changes the main checkout that every merge uses. Whether the main checkout already holds the user's own changes is your call: without a worktree, `$OKE job merge` commits every tracked change there (new files only as you stage them). Report `done` with a short summary, or `question` if intake is not enough to plan.
 
 ### kind: execute
 
