@@ -26,6 +26,7 @@ class Base(unittest.TestCase):
         for k in ("HERDR_ENV", "HERDR_PANE_ID", "OKE_HERDR", "FAKE_HERDR_DIR", "OKE_RUNTIME",
                   "OKE_CLAUDE", "CLAUDE_CODE_SESSION_ID"):
             os.environ.pop(k, None)
+        os.environ["OKE_RUNTIME"] = "herdr"  # outside a herdr pane OKe would pick bg
         self.out = ""
         self.err = ""
 
@@ -533,7 +534,8 @@ class TestSpawn(SpawnBase):
         with open(args[args.index("--settings") + 1]) as f:
             lean = json.load(f)
         self.assertEqual(lean["hooks"], {"SessionStart": [herdr_group]})
-        self.assertEqual(lean["env"], {"PYTHONUTF8": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"})
+        self.assertEqual(lean["env"], {"PYTHONUTF8": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+                                       "OKE_HOME": oke.oke_home()})
         self.assertNotIn("--setting-sources", oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p"))
         self.assertNotIn("Edit", args[args.index("--tools") + 1].split(","))
         for role in ("pm", "worker", "reviewer"):

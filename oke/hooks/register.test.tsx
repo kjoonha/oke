@@ -32,6 +32,7 @@ function engine(on: any, runs: Run[], prompts: string[]) {
   })
   on('command.register', () => ({ value: { command: 'oke-board' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('session.id', () => ({ value: 'sid-1' }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('prompt.submit', (_: any, e: any) => {
     prompts.push(e.text)
@@ -91,26 +92,15 @@ test('a permanent error is not resubmitted', async ($, on) => {
   expect(prompts.length).toBe(0)
 })
 
-test('without herdr or a session id the mod does nothing', async ($, on) => {
-  mock.clock(on)
-  mock.env(on, {})
-  const runs: Run[] = []
-  const prompts: string[] = []
-  engine(on, runs, prompts)
-
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await $.turn.complete({ ...TURN, reason: 'error' } as any)
-  expect(runs.length).toBe(0)
-})
-
 test('outside herdr the session id is the place', async ($, on) => {
   mock.clock(on)
-  mock.env(on, { CLAUDE_CODE_SESSION_ID: 'sid-1' })
+  mock.env(on, {})
   const runs: Run[] = []
   engine(on, runs, [])
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  expect(runs[0]?.argv).toContain('session:sid-1')
+  const place = runs[0]?.argv[runs[0].argv.indexOf('--pane') + 1]
+  expect(place).toBe('session:sid-1')
 })
 
 test('a session that is no OKe agent ticks once a minute, a PM every 10 s', async ($, on) => {

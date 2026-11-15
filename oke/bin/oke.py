@@ -291,9 +291,11 @@ _runtimes = {}
 
 def runtime():
     """The runtime that runs OKe's agents: $OKE_RUNTIME, else the one state.json names,
-    else herdr (see docs/superpowers/specs/2026-11-15-oke-runtime-layer-design.md)."""
+    else herdr inside a herdr pane and bg outside (see docs/superpowers/specs/2026-11-15-oke-runtime-layer-design.md)."""
     state = read_json(state_path(), {})
-    name = os.environ.get("OKE_RUNTIME") or (state.get("runtime") if isinstance(state, dict) else None) or "herdr"
+    # before the first claim (seen live: a plain `oke status` outside herdr said "not inside")
+    default = "herdr" if os.environ.get("HERDR_ENV") == "1" else "bg"
+    name = os.environ.get("OKE_RUNTIME") or (state.get("runtime") if isinstance(state, dict) else None) or default
     if name not in RUNTIMES:
         raise StateError("unknown runtime %r: use %s" % (name, " or ".join(sorted(RUNTIMES))))
     if name not in _runtimes:
@@ -416,6 +418,8 @@ def write_lean_settings(folder, plugins=()):
             hooks[event] = kept
     env = dict(user.get("env") or {}, CLAUDE_CODE_DISABLE_AUTO_MEMORY="1")
     env.pop("CLAUDE_CODE_PLUGIN_DIRS", None)  # the user's own mods would load in every child
+    if os.environ.get("OKE_HOME"):
+        env["OKE_HOME"] = oke_home()  # a herdr pane does not inherit the spawner's environment
     settings = {"hooks": hooks, "env": env}
     if plugins:
         settings["enabledPlugins"] = dict((p, True) for p in plugins)
@@ -1450,9 +1454,9 @@ def cmd_status(args):
     if args.claim and not os.environ.get("OKE_RUNTIME"):
         # one runtime per OKe home, chosen by where the orchestrator starts
         want = "herdr" if os.environ.get("HERDR_ENV") == "1" else "bg"
-        if runtime().name != want:
-            with locked():
-                current = load_state()
+        with locked():
+            current = load_state()
+            if current.get("runtime") != want:
                 current["runtime"] = want
                 save_state(current)
     herdr_info = None
@@ -1560,9 +1564,15 @@ def status_locked(args, herdr_info):
 # ---------------------------------------------------------------- compact hook
 
 def compact_message():
-    pane = os.environ.get("HERDR_PANE_ID")
+    pane = runtime().whoami()
     if not pane:
         return ""
+    sid = pane[len("session:"):] if pane.startswith("session:") else None
+
+    def mine(rec):
+        # a bg child's place is its short id; its session id is what whoami knows
+        return rec.get("pane") == pane or bool(sid and rec.get("session") == sid)
+
     home = oke_home()
     # Read-only on purpose: a hook must not rename or rewrite state files.
     state = read_json(state_path(), None)
@@ -1576,12 +1586,12 @@ def compact_message():
     repos = state.get("repos") or {}
     keys = set(repos) | set(j.get("repo") for j in (state.get("jobs") or {}).values() if j.get("repo"))
     for key in sorted(keys):
-        if ((repos.get(key) or {}).get("pm") or {}).get("pane") == pane:
+        if mine((repos.get(key) or {}).get("pm") or {}):
             folder = pm_dir(key)
             note = pm_jobs_note({"jobs": state.get("jobs") or {}}, key)
             break
         for name, rec in read_children(key).items():
-            if rec.get("pane") == pane and rec.get("job"):
+            if mine(rec) and rec.get("job"):
                 folder = os.path.join(home, "jobs", rec["job"], name)
                 break
         if folder:
@@ -1746,13 +1756,19 @@ def merge_job(job):
     return 2
 
 
+# Byproducts of running the code and its checks: never part of a job's commit (seen live:
+# a direct merge committed __pycache__). Tracked files matching them are skipped too.
+BYPRODUCTS = [":(exclude)*__pycache__*", ":(exclude)*.pyc", ":(exclude)*.pytest_cache*"]
+ADD = ["add", "-A", "--", "."] + BYPRODUCTS
+
+
 def pending_tree(main):
-    """Tree sha of the main checkout as `git add -A` would commit it. The real index is
+    """Tree sha of the main checkout as `oke job merge` would commit it. The real index is
     untouched. The review of a job without a worktree names this tree."""
     idx = os.path.join(oke_home(), "tree-%d.index" % os.getpid())
     env = dict(os.environ, GIT_INDEX_FILE=idx)
     try:
-        for argv in (["read-tree", "HEAD"], ["add", "-A"], ["write-tree"]):
+        for argv in (["read-tree", "HEAD"], ADD, ["write-tree"]):
             result = subprocess.run(["git", "-C", main] + argv, env=env,
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             if result.returncode != 0:
@@ -1784,7 +1800,7 @@ def commit_direct(job, info, main, review, reviewed):
         return fail("the changes in %s are not the ones the review covered (tree %s, reviewed %s): give "
                     "the reviewer a new instruction with `tree: %s`, then merge" % (main, tree, reviewed, tree))
     pre = git_out(main, "rev-parse", "HEAD")[1]
-    for argv in (["add", "-A"], ["commit", "-q", "-m", "oke: %s" % job]):
+    for argv in (ADD, ["commit", "-q", "-m", "oke: %s" % job]):
         result = subprocess.run(["git", "-C", main] + argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if result.returncode != 0:
             subprocess.call(["git", "-C", main, "reset", "-q"])  # unstage; the files stay as they are

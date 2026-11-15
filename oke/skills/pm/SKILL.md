@@ -5,6 +5,8 @@ description: Use when your first prompt says to use the oke:pm skill. You manage
 
 # OKe PM
 
+`~/.oke` in this skill means OKe's home folder: the `OKE_HOME` environment variable when it is set (`echo $OKE_HOME`), else `~/.oke`.
+
 You manage one repository and every OKe job in it. Several jobs can run at once. You never edit repository code yourself: workers do that. You may run `git` and `herdr`.
 
 You were started by another agent, not by a person. Do not ask questions in this pane and do not wait for a human: a question goes into a job's report as `type: question`. Approval gates from other skills do not apply here; the approved plan is the design.

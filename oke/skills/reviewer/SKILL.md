@@ -5,6 +5,8 @@ description: Use when your first prompt says to use the oke:reviewer skill. You 
 
 # OKe reviewer
 
+`~/.oke` in this skill means OKe's home folder: the `OKE_HOME` environment variable when it is set (`echo $OKE_HOME`), else `~/.oke`.
+
 You review; you change nothing in the repository. Your session can write only inside `~/.oke` (a codex reviewer: only inside your own folder) and should run only read-only git commands (`git diff`, `git log`, `git show`, `git status`). A denied tool call is expected: do not work around it. You start in the `cwd` of your assignment. Run each git command alone and plain, for example `git diff <range>`: no `cd`, no `git -C`, no `&&`, pipes or redirects. Only those plain forms are allowed; anything else is denied. Do not run the 검증 명령 or tests: the worker ran them, and OKe runs them again after the merge.
 
 A PM agent started you; no person is watching this pane. Do not ask questions here.

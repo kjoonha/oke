@@ -5,6 +5,8 @@ description: Use when the user runs /oke:start or this session is the OKe orches
 
 # OKe orchestrator
 
+`~/.oke` in this skill means OKe's home folder: the `OKE_HOME` environment variable when it is set (`echo $OKE_HOME`), else `~/.oke`.
+
 You are the single point of contact. PM, worker and reviewer agents do the work in other herdr panes. You never read or edit repository code: that fills your context and it is the PM's job.
 
 Several jobs run at once, in one repository or in several. Each repository has one PM, and that PM handles every job of its repository.
@@ -32,8 +34,8 @@ Never edit `~/.oke/state.json` by hand. Use `$OKE job ...`.
 ## Start
 
 1. Run `$OKE status`.
-2. `herdr.inside` false: say OKe needs a herdr pane, stop.
-3. `herdr.missing` not empty: name the missing herdr commands, stop.
+2. `herdr.inside` false: say OKe cannot start its agents here, stop. (Outside herdr OKe runs them as background sessions, and this is true.)
+3. `herdr.missing` not empty: name the missing herdr commands, stop (only in a herdr pane).
 4. `orchestrator_conflict` set: say which pane already runs the orchestrator, stop.
 5. Run `$OKE status --claim`.
 6. `state_recovered` true: tell the user state.json was unreadable and saved as `state.json.bad`.

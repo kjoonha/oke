@@ -140,7 +140,14 @@ class TestSpawnInBg(BgBase):
         self.assertEqual((kid["pane"], kid["terminal"]), ("a1", "a1"))
         self.assertEqual(self.argv()[1][0], prompt)
 
+    def test_outside_herdr_the_default_is_bg(self):
+        del os.environ["OKE_RUNTIME"]
+        self.assertEqual(oke.runtime().name, "bg")
+        os.environ["HERDR_ENV"] = "1"
+        self.assertEqual(oke.runtime().name, "herdr")
+
     def test_runtime_named_in_state(self):
+        del os.environ["OKE_RUNTIME"]
         st = oke.load_state()
         st["runtime"] = "bg"
         oke.save_state(st)
@@ -172,6 +179,7 @@ class TestIdentityInBg(BgBase):
         os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-orch"
 
     def test_claim_outside_herdr_picks_bg_and_records_the_session(self):
+        del os.environ["OKE_RUNTIME"]
         self.fake({"agents --json": [OUT("[]")]})
         self.assertEqual(self.cli("status", "--claim"), 0, self.err)
         st = oke.load_state()
@@ -187,6 +195,15 @@ class TestIdentityInBg(BgBase):
         self.fake({"agents --json": [OUT(json.dumps(ROWS))]})
         self.assertEqual(self.cli("tick", "--pane", "session:s-1"), 0, self.err)
         self.assertEqual(json.loads(self.out)["agent"], "fix-a-w1")
+
+    def test_compact_hook_finds_a_bg_child_by_its_session(self):
+        os.environ["OKE_RUNTIME"] = "bg"
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "s-1"
+        self.job("fix-a", "working")
+        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
+                              {"fix-a-w1": {"agent": "fix-a-w1", "job": "fix-a", "pane": "a1",
+                                            "session": "s-1", "role": "worker", "seq": 1}})
+        self.assertIn("fix-a/fix-a-w1/assignment.md", oke.compact_message())
 
     def test_a_bg_pm_never_revives_the_orchestrator(self):
         os.environ["OKE_RUNTIME"] = "bg"

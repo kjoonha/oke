@@ -246,8 +246,8 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     // herdr pane, else this Claude session (OKe without herdr runs children as --bg sessions)
-    const session = await $.env.get('CLAUDE_CODE_SESSION_ID')
-    pane = (await $.env.get('HERDR_PANE_ID')) || (session ? `session:${session}` : undefined)
+    // the process env has no session id (seen live): ask the session itself
+    pane = (await $.env.get('HERDR_PANE_ID')) || `session:${await $.session.id()}`
     if (!pane) return r
     await $.command.register({ name: 'oke-board', description: 'Show the OKe agents and their boards' })
     // A process that died during a backoff leaves its marker; this one starts clean.
