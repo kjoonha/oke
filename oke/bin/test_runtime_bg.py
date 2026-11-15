@@ -51,7 +51,8 @@ class TestBgRuntime(BgBase):
         self.assertEqual(runtime_bg.status_of(row), "idle")  # seen live on a waiting PM
         self.assertEqual(runtime_bg.status_of(dict(row, status="busy")), "working")
         self.assertEqual(runtime_bg.status_of(dict(row, state="done", status=None)), "idle")
-        self.assertEqual(runtime_bg.status_of(dict(row, state="blocked")), "blocked")
+        self.assertEqual(runtime_bg.status_of(dict(row, state="blocked")), "idle")  # a question, not a dialog
+        self.assertEqual(runtime_bg.status_of(dict(row, state="blocked", status="busy")), "blocked")
         self.assertIsNone(runtime_bg.status_of(dict(row, state="stopped")))
 
     def test_unknown_agent(self):

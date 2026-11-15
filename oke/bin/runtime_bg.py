@@ -24,13 +24,20 @@ STATUS = {"working": "working", "blocked": "blocked", "done": "idle"}
 
 
 def status_of(row):
-    """herdr's agent_status for a `claude agents` row, or None when it is gone. `state`
-    can stay "working" while the session waits for input (seen live: status idle), so
-    a live session's own `status` decides between working and idle."""
+    """herdr's agent_status for a `claude agents` row, or None when it is gone. A live
+    session's own `status` wins over `state`: a waiting PM showed state working, and a
+    turn that ended with a question showed state blocked, both with status idle at an
+    empty prompt (seen live). Only a non-idle blocked session is at a dialog."""
     state = STATUS.get(row.get("state"))
-    if state in (None, "blocked"):
-        return state
-    return {"idle": "idle", "busy": "working"}.get(row.get("status"), state)
+    if state is None:
+        return None
+    if row.get("status") == "idle":
+        return "idle"
+    if state == "blocked":
+        return "blocked"
+    return {"busy": "working"}.get(row.get("status"), state)
+
+
 # Settings every bg child needs: no self-isolation into its own worktree (OKe already
 # picked the folder), and messages from the PM or orchestrator taken without asking.
 BG_SETTINGS = {"worktree": {"bgIsolation": "none"}, "crossSessionInbound": "accept"}
