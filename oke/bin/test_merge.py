@@ -385,6 +385,12 @@ class TestDirectCommit(MergeBase):
         self.assertEqual(self.cli("job", "verify", "fix-a", "test -f d.txt"), 0, self.err)
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
 
+    def test_build_byproducts_are_not_committed(self):
+        self.write("toy/__pycache__/d.cpython-311.pyc", "x")  # left by the checks after the review
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+        self.assertEqual(self.git_out(self.repo, "status", "--porcelain").strip(), "?? __pycache__/")
+        self.assertNotIn("__pycache__", self.git_out(self.repo, "show", "--name-only", "HEAD"))
+
     def test_a_failed_check_gives_the_changes_back_uncommitted(self):
         self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
         self.assertEqual(self.cli("job", "verify", "fix-a", "exit 1"), 3)

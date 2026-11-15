@@ -5,6 +5,8 @@ description: Use when your first prompt says to use the oke:pm skill. You manage
 
 # OKe PM
 
+`~/.oke` in this skill means OKe's home folder: the `OKE_HOME` environment variable when it is set (`echo $OKE_HOME`), else `~/.oke`.
+
 You manage one repository and every OKe job in it. Several jobs can run at once. You never edit repository code yourself: workers do that. You may run `git` and `herdr`.
 
 You were started by another agent, not by a person. Do not ask questions in this pane and do not wait for a human: a question goes into a job's report as `type: question`. Approval gates from other skills do not apply here; the approved plan is the design.
@@ -67,7 +69,7 @@ Your folder may already hold `board.md` and `children.json` from before. Read bo
 For each child in `children.json` whose `job` is an open job, decide in this order:
 
 1. Its `report.md` has the `seq` of its `assignment.md` and type `done`, `question` or `failed`: the child finished that step. Do not start it again. Handle that report as in the table below (a finished reviewer stays finished).
-2. It is in `herdr agent list`: it keeps its work. Write that job's report as `waiting` (unless it already has the current seq and type `question`, `blocked` or `failed`: leave that one) and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If it is at a dialog the wait says `blocked`; handle it as in the table below.
+2. It is in `$OKE agents`: it keeps its work. Write that job's report as `waiting` (unless it already has the current seq and type `question`, `blocked` or `failed`: leave that one) and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If it is at a dialog the wait says `blocked`; handle it as in the table below.
 3. Otherwise: `$OKE revive <child>` (it restarts the child in its own session and tells it to re-read its assignment), then wait as in 2. Your own watcher may have revived it already; then `revive` says `alive`.
 
 Then, for each open job whose assignment `seq` is higher than the `seq` of its `pm/report.md`: you had not acted on that instruction yet. Act on it now. And for each job whose report is `waiting` on another job that is no longer open (a merge that waited): start it now. For each job in phase `merging`, `$OKE ledger show <job>`: `merge: unverified` means its verification never finished; run step 3a of the merge again.
@@ -94,7 +96,7 @@ A small job gets one line per section. Use no worktree only when the change is s
 
 ### kind: execute
 
-1. Worktree, if the plan uses one: `herdr worktree create --cwd <repo> --branch oke/<job> --label <job> --no-focus`. Read the new pane id and the checkout path from the JSON result. If it fails, report `failed` with the error. Never use another branch name: `$OKE job merge` merges only `oke/<job>`.
+1. Worktree, if the plan uses one: `$OKE worktree <job> --repo <repo>`. It prints `id` (to remove it later), `path` (the checkout) and `place` (where to start the worker). Write `id` and `path` on your board. If it fails, report `failed` with the error. It always uses branch `oke/<job>`, the only one `$OKE job merge` merges.
 2. Write `~/.oke/jobs/<job>/<job>-w1/assignment.md`:
 
 ```
@@ -116,7 +118,7 @@ seq: 1
    Add `kind: codex` or `kind: opencode` to the header only when the intake asks for that agent; otherwise leave `kind` out and `~/.oke/config.json` (`agents`) decides. The reviewer's assignment takes a `kind` the same way.
    A claude child starts lean: none of the user's plugins or MCP servers, and only the core built-in tools, always on whatever you write (`$OKE extras` lists them per role, plus the MCP servers and plugins the user has). Each costs tokens on every turn of that child, so add only what this job needs, as comma-separated header lines: `tools: WebFetch` (a built-in tool), `mcp: codegraph` (an MCP server), `plugins: <name@marketplace>`. Leave them out when the job needs nothing extra. The reviewer's assignment takes them the same way.
    `commit: yes` only with a worktree and autonomy `balanced` or `full`. Without a worktree the worker must not commit: a commit there is already on the main branch, before the user was asked about the merge.
-3. `$OKE spawn <that file> --pane <worktree pane>`. Without a worktree: `--split-from $HERDR_PANE_ID`.
+3. `$OKE spawn <that file> --pane <place>`. Without a worktree: `$OKE spawn <that file>` (it starts next to you).
 4. Write the job's report as `waiting` (`on: <job>-w1`), start `$OKE wait <job>-w1 --report <its folder>/report.md --seq <its seq>` in the background, end your turn.
 
 Each child has its own wait. Children of different jobs run side by side.
@@ -132,6 +134,7 @@ When a child's wait finishes, act on its first line:
 | `idle_no_report`, `bad_report` | Once: `$OKE send <child> "Re-read your assignment and write a proper report."`, then wait again. Second time: report `failed` for that job |
 | `gone` | `oke wait` already revived the child three times without a new report. Report `failed` with the agent name |
 | `superseded` | A newer wait on that child replaced this one. Do nothing |
+| `{"deliver": {"to": ..., "text": ...}}` | The child runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again |
 | `deliver_failed` | Your message to the child could not be typed in three times. Report `failed` for that job and name the child |
 | exit code 1 or 2 | herdr failed or is unreachable. Report `failed` with the stderr text. Do not treat the child as gone |
 
@@ -165,13 +168,13 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
    2. Worker `done`: give the reviewer a new instruction to review what the rebase changed, with `commit:` set to the rebased tip (`job merge` refuses until that review passes). `verdict: pass`: back to step 3. `changes`: as in the review rounds.
    3. Worker `question` or `failed`, or the merge conflicts again after the rebase: report `question` for the job with the conflicting files. The user decides.
 5. Update the wiki from the reports' 배운 것 (see below).
-6. Remove the worktree once it is merged: `herdr worktree remove --workspace <its workspace id>`. First look at `git status --short` there. Changed tracked files: keep the worktree and say so. Untracked files: judge them. Byproducts of builds and checks (caches such as `__pycache__`, compiled files, test logs) do not stop the removal. Anything that looks like work (source, docs, data) keeps the worktree: list those files in your report.
-7. Close the worker and reviewer panes: `herdr pane close <pane>`.
+6. Remove the worktree once it is merged: `$OKE worktree --remove <its id>`. First look at `git status --short` there. Changed tracked files: keep the worktree and say so. Untracked files: judge them. Byproducts of builds and checks (caches such as `__pycache__`, compiled files, test logs) do not stop the removal. Anything that looks like work (source, docs, data) keeps the worktree: list those files in your report.
+7. Close the worker and reviewer: `$OKE close <pane>` (the `pane` that `spawn` printed).
 8. Report `done` for the job. If a merge waited for this one, start it now.
 
 ### kind: cancel
 
-The user gave the job up. Ignore any later wait result for that job's children (a `gone` after you close them included): write no report for it. Do not start their waits again, close its worker and reviewer panes (`herdr pane close <pane>`), and leave its worktree and branch as they are (say so on the board). A job without a worktree leaves uncommitted files in the main checkout that would block every later merge: report nothing for the cancelled job, but name those files in the next merge's `question` at step 1 ("left by the cancelled job <job>"). Write no report: the job is closed. If a merge waited for this job, start it now.
+The user gave the job up. Ignore any later wait result for that job's children (a `gone` after you close them included): write no report for it. Do not start their waits again, close its worker and reviewer (`$OKE close <pane>`), and leave its worktree and branch as they are (say so on the board). A job without a worktree leaves uncommitted files in the main checkout that would block every later merge: report nothing for the cancelled job, but name those files in the next merge's `question` at step 1 ("left by the cancelled job <job>"). Write no report: the job is closed. If a merge waited for this job, start it now.
 
 ### kind: answer
 

@@ -245,7 +245,9 @@ async function openBoard($: any) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    pane = await $.env.get('HERDR_PANE_ID')
+    // herdr pane, else this Claude session (OKe without herdr runs children as --bg sessions)
+    // the process env has no session id (seen live): ask the session itself
+    pane = (await $.env.get('HERDR_PANE_ID')) || `session:${await $.session.id()}`
     if (!pane) return r
     await $.command.register({ name: 'oke-board', description: 'Show the OKe agents and their boards' })
     // A process that died during a backoff leaves its marker; this one starts clean.
@@ -383,7 +385,11 @@ export const register: Register = on => {
 
     const toggle = (agent: string) =>
       void update($, expanded, list => (list.includes(agent) ? list.filter(a => a !== agent) : [...list, agent]))
-    const focus = (agent: string) => void $.process.run(['herdr', 'agent', 'focus', agent], { timeoutMs: 10_000 })
+    // herdr focuses the pane; a background session can only be attached by the user
+    const focus = async (agent: string) => {
+      const out = await oke($, ['attach', agent])
+      if (out?.hint) $.ui.status(`OKe: ${out.hint}`)
+    }
 
     // One row per agent, the row itself toggles it open: a second row of buttons per
     // agent doubled the height, and buttons beside text squeezed it away (seen live).
@@ -406,7 +412,7 @@ export const register: Register = on => {
         rows.push(
           <Box flexDirection="row">
             <Text>{`${indent}  `}</Text>
-            <Button key={`go-${n.agent}`} label="이동" onPress={() => focus(n.agent)} />
+            <Button key={`go-${n.agent}`} label="이동" onPress={() => void focus(n.agent)} />
           </Box>,
         )
         for (const line of (n.board || '(no board.md)').split('\n')) {

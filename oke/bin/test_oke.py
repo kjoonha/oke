@@ -12,6 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import oke  # noqa: E402
+import runtime_herdr  # noqa: E402
 
 
 class Base(unittest.TestCase):
@@ -22,8 +23,10 @@ class Base(unittest.TestCase):
         self._env = dict(os.environ)
         self._grace = oke.BLOCKED_GRACE
         os.environ["OKE_HOME"] = self.home
-        for k in ("HERDR_ENV", "HERDR_PANE_ID", "OKE_HERDR", "FAKE_HERDR_DIR"):
+        for k in ("HERDR_ENV", "HERDR_PANE_ID", "OKE_HERDR", "FAKE_HERDR_DIR", "OKE_RUNTIME",
+                  "OKE_CLAUDE", "CLAUDE_CODE_SESSION_ID"):
             os.environ.pop(k, None)
+        os.environ["OKE_RUNTIME"] = "herdr"  # outside a herdr pane OKe would pick bg
         self.out = ""
         self.err = ""
 
@@ -279,7 +282,7 @@ class TestHerdr(Base):
                    "agent wait --help": [{"stdout": "", "exit": 2}], "agent read --help": [OK],
                    "agent send-keys --help": [OK], "pane split --help": [OK],
                    "worktree create --help": [OK]})
-        self.assertEqual(oke.missing_commands(), ["agent wait"])
+        self.assertEqual(runtime_herdr.missing_commands(), ["agent wait"])
 
 
 def AG(name="a", status="idle", pane="w1:p9", session="s-1", cwd=None):
@@ -309,7 +312,7 @@ class SpawnBase(Base):
     def setUp(self):
         Base.setUp(self)
         self.repo = self.git_repo("toy")
-        oke.DIALOG_POLL = 0
+        runtime_herdr.DIALOG_POLL = 0
 
     def job(self, name, phase):
         self.assertEqual(self.cli("job", "new", name, "--repo", self.repo), 0)
@@ -531,7 +534,8 @@ class TestSpawn(SpawnBase):
         with open(args[args.index("--settings") + 1]) as f:
             lean = json.load(f)
         self.assertEqual(lean["hooks"], {"SessionStart": [herdr_group]})
-        self.assertEqual(lean["env"], {"PYTHONUTF8": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"})
+        self.assertEqual(lean["env"], {"PYTHONUTF8": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+                                       "OKE_HOME": oke.oke_home()})
         self.assertNotIn("--setting-sources", oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p"))
         self.assertNotIn("Edit", args[args.index("--tools") + 1].split(","))
         for role in ("pm", "worker", "reviewer"):
@@ -703,7 +707,7 @@ class TestWait(Base):
 
 
 def help_ok():
-    return dict((c + " --help", [OK]) for c in oke.REQUIRED_COMMANDS)
+    return dict((c + " --help", [OK]) for c in runtime_herdr.REQUIRED_COMMANDS)
 
 
 class TestStatus(SpawnBase):

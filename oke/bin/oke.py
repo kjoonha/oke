@@ -14,6 +14,10 @@ import subprocess
 import sys
 import time
 
+import runtime_bg
+import runtime_herdr
+from runtime_herdr import DialogError, HerdrError, herdr, herdr_text, session_of  # noqa: F401 (tests)
+
 PHASES = ("intake", "planning", "awaiting_approval", "working", "reviewing",
           "awaiting_merge", "merging", "done", "failed")
 EMPTY_STATE = {"orchestrator": {}, "repos": {}, "jobs": {}}
@@ -165,6 +169,8 @@ def load_state(recover=False):
     for key in EMPTY_STATE:
         if isinstance(loaded.get(key), dict):
             state[key] = loaded[key]
+    if loaded.get("runtime") in RUNTIMES:
+        state["runtime"] = loaded["runtime"]
     return state
 
 
@@ -277,113 +283,36 @@ def slug(text, limit=24):
 
 # ---------------------------------------------------------------- herdr
 
-REQUIRED_COMMANDS = ("agent start", "agent prompt", "agent wait", "agent read",
-                     "agent send-keys", "pane split", "worktree create")
+# ---------------------------------------------------------------- runtime
+
+RUNTIMES = {"herdr": runtime_herdr.HerdrRuntime, "bg": runtime_bg.BgRuntime}
+_runtimes = {}
 
 
-class HerdrError(Exception):
-    def __init__(self, code, message):
-        Exception.__init__(self, "%s: %s" % (code, message))
-        self.code = code
-        self.message = message
+def runtime():
+    """The runtime that runs OKe's agents: $OKE_RUNTIME, else the one state.json names,
+    else herdr inside a herdr pane and bg outside (see docs/superpowers/specs/2026-11-15-oke-runtime-layer-design.md)."""
+    state = read_json(state_path(), {})
+    # before the first claim (seen live: a plain `oke status` outside herdr said "not inside")
+    default = "herdr" if os.environ.get("HERDR_ENV") == "1" else "bg"
+    name = os.environ.get("OKE_RUNTIME") or (state.get("runtime") if isinstance(state, dict) else None) or default
+    if name not in RUNTIMES:
+        raise StateError("unknown runtime %r: use %s" % (name, " or ".join(sorted(RUNTIMES))))
+    if name not in _runtimes:
+        _runtimes[name] = RUNTIMES[name]()
+    return _runtimes[name]
 
 
-def herdr_argv():
-    value = os.environ.get("OKE_HERDR", "herdr")
-    if value.lstrip().startswith("["):
-        return json.loads(value)
-    return value.split()
-
-
-HERDR_TIMEOUT = 180  # seconds; longer than any --timeout OKe passes (agent start: 90 s)
-
-
-def run_herdr(args):
-    """Return (exit code, stdout, stderr). Raises HerdrError when herdr cannot run
-    or hangs: a hung herdr must not freeze a wait or hold a lock forever."""
-    try:
-        p = subprocess.Popen(herdr_argv() + list(args), stdin=subprocess.DEVNULL,
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    except (OSError, ValueError) as e:
-        raise HerdrError("herdr_unavailable", str(e))
-    try:
-        out, err = p.communicate(timeout=HERDR_TIMEOUT)
-    except subprocess.TimeoutExpired:
-        p.kill()
-        try:
-            p.communicate(timeout=5)  # a child that inherited the pipes may keep them open
-        except subprocess.TimeoutExpired:
-            pass
-        raise HerdrError("herdr_unavailable", "herdr %s did not answer in %d s"
-                         % (" ".join(args[:2]), HERDR_TIMEOUT))
-    return (p.returncode,
-            out.decode("utf-8", "replace").replace("\r\n", "\n"),
-            err.decode("utf-8", "replace").replace("\r\n", "\n"))
-
-
-def parse_json(text):
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def raise_herdr_error(code, out, err):
-    """herdr prints error JSON on stderr; anything else means herdr itself is unreachable."""
-    for text in (err, out):
-        data = parse_json(text)
-        if data and isinstance(data.get("error"), dict):
-            raise HerdrError(data["error"].get("code", "unknown"), data["error"].get("message", ""))
-    lines = (err.strip() or out.strip() or "no output (exit %d)" % code).splitlines()
-    raise HerdrError("herdr_unavailable", lines[0])
-
-
-def herdr(*args):
-    code, out, err = run_herdr(args)
-    data = parse_json(out)
-    if data is None or "error" in data:
-        raise_herdr_error(code, out, err)
-    return data.get("result", {})
-
-
-def herdr_text(*args):
-    code, out, err = run_herdr(args)
-    if code != 0:
-        raise_herdr_error(code, out, err)
-    return out
-
-
-def missing_commands():
-    missing = []
-    for command in REQUIRED_COMMANDS:
-        code, _, _ = run_herdr(command.split() + ["--help"])
-        if code != 0:
-            missing.append(command)
-    return missing
+def list_agents():
+    return runtime().agents()
 
 
 # ---------------------------------------------------------------- spawn
 
 AGENT_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
-TRUST_MARKER = "trust this folder"
-DIALOG_TRIES = 5
-DIALOG_POLL = 1.0
-START_TIMEOUT_MS = 90000
 FIRST_PROMPT = ("Use the oke:{role} skill. Your assignment file is {path}. "
                 "Read it first, then follow it.")
 KINDS = ("claude", "codex", "opencode")
-READY_MARKERS = {"codex": "for shortcuts"}  # the input line's hint: no dialog left
-READY_TRIES = 10  # orchestrator and PM are always claude
-# Startup screens OKe answers by itself: (text on screen, kind or None for all, keys).
-SAFE_DIALOGS = [
-    ("update now", "codex", ["esc"]),  # "Update now / Skip": esc skips
-    # codex's hook review panel: esc closes it without trusting, so the hook stays off
-    ("hook needs review", "codex", ["esc"]),
-    # "Review hooks / Trust all / Continue without trusting": esc skips, hooks stay off.
-    # herdr shows this screen as idle, so a first prompt's Enter would pick "Review".
-    ("continue without trusting", "codex", ["esc"]),
-]
 
 
 def first_prompt(kind, role, path):
@@ -489,6 +418,8 @@ def write_lean_settings(folder, plugins=()):
             hooks[event] = kept
     env = dict(user.get("env") or {}, CLAUDE_CODE_DISABLE_AUTO_MEMORY="1")
     env.pop("CLAUDE_CODE_PLUGIN_DIRS", None)  # the user's own mods would load in every child
+    if os.environ.get("OKE_HOME"):
+        env["OKE_HOME"] = oke_home()  # a herdr pane does not inherit the spawner's environment
     settings = {"hooks": hooks, "env": env}
     if plugins:
         settings["enabledPlugins"] = dict((p, True) for p in plugins)
@@ -504,8 +435,9 @@ def write_lean_settings(folder, plugins=()):
 # Built-in tools a lean child gets; an assignment's `tools:` adds more. Measured: the
 # full built-in set is about 28k tokens of a 41k start, this set about 3k.
 ROLE_TOOLS = {
+    # SendMessage: in bg mode the PM hands its children their mail (a `deliver` wait result)
     "pm": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "TaskStop",
-           "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch"],
+           "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch", "SendMessage"],
     "worker": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "TaskStop",
                "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch"],
     "reviewer": ["Bash", "Read", "Glob", "Grep", "Skill", "TaskCreate", "TaskUpdate", "TaskList",
@@ -519,6 +451,40 @@ def cmd_extras(args):
     """What a PM may switch on for one child (`tools:`, `mcp:`, `plugins:` header lines)."""
     print(json.dumps({"default_tools": ROLE_TOOLS, "mcp": sorted(user_mcp_servers()),
                       "plugins": user_plugins()}, ensure_ascii=False))
+    return 0
+
+
+def cmd_rt(args):
+    """Runtime actions the skills need, so they never call herdr (or claude) themselves."""
+    rt = runtime()
+    if args.rt == "agents":
+        out = sorted(a.get("name") for a in rt.agents() if a.get("name"))
+    elif args.rt == "read":
+        sys.stdout.write(rt.screen(args.agent))
+        return 0
+    elif args.rt == "keys":
+        rt.keys(args.agent, args.keys)
+        out = {"agent": args.agent, "sent": args.keys}
+    elif args.rt == "attach":
+        hint = rt.attach(args.agent)
+        # herdr shows the pane itself; a bg session needs the user to run the hint
+        out = {"agent": args.agent, "attached": hint is None, "hint": hint}
+    elif args.rt == "close":
+        rt.close(args.place)
+        out = {"closed": args.place}
+    elif args.rt == "place":
+        repo = native_path(args.repo)
+        out = {"place": rt.place_for_repo(repo, os.path.basename(repo.rstrip("/\\")))}
+    elif args.rt == "worktree":
+        if args.remove:
+            rt.worktree_remove(args.remove)
+            out = {"removed": args.remove}
+        else:
+            if not args.job or not args.repo:
+                return fail("worktree needs <job> and --repo (or --remove <id>)")
+            # shortcut: `oke job merge` merges only oke/<job>, so the branch name is fixed here
+            out = rt.worktree_create(native_path(args.repo), "oke/" + args.job, args.job)
+    print(json.dumps(out, ensure_ascii=False))
     return 0
 
 
@@ -600,118 +566,6 @@ def read_children(key):
     return data if isinstance(data, dict) else {}
 
 
-def session_of(agent):
-    session = agent.get("agent_session")
-    return session.get("value") if isinstance(session, dict) else None
-
-
-def list_agents():
-    return herdr("agent", "list").get("agents", [])
-
-
-class DialogError(Exception):
-    """The new agent stopped at a dialog OKe may not answer. The message is the screen."""
-
-
-def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: None, kind="claude"):
-    """Start claude in `pane`, answer the trust dialog only when `trusted()` allows it,
-    send the first prompt and make sure the first turn started. `registered` runs once
-    herdr knows the name. Returns herdr's agent info."""
-    try:
-        # herdr's 30 s default was too short live for a claude resuming a long session
-        herdr("agent", "start", agent, "--kind", kind, "--pane", pane, "--timeout", str(START_TIMEOUT_MS),
-              "--", *claude_args)
-    except HerdrError as e:
-        if e.code != "agent_not_ready":
-            raise
-        registered()  # herdr keeps the name even though the agent is not ready
-        answer_startup_dialogs(agent, kind, trusted)
-    registered()
-    if kind != "claude":
-        # codex can show a panel after herdr already calls it ready; a prompt typed
-        # then is lost (seen live). Close such panels first.
-        close_startup_panels(agent, kind, READY_MARKERS.get(kind))
-
-    # Wait until the first turn starts: for a few seconds after a prompt herdr still
-    # says idle, and `oke wait` would read that as "idle with no report".
-    try:
-        herdr("agent", "prompt", agent, prompt,
-              "--wait", "--until", "working", "--until", "blocked", "--timeout", "20000")
-    except HerdrError as e:
-        if e.code not in ("agent_prompt_stalled", "timeout"):
-            raise
-    info = herdr("agent", "get", agent).get("agent", {})
-    if info.get("agent_status") in ("idle", "done"):
-        if kind != "claude":
-            # codex asks about untrusted hooks only when the first prompt is submitted;
-            # herdr shows that as idle. Skip it; the prompt text stays in the input.
-            close_startup_panels(agent, kind, ready=None)
-        # Seen live: the prompt text sat in the input box with its Enter lost.
-        # Enter on an empty input does nothing, so one more is safe.
-        herdr("agent", "send-keys", agent, "enter")
-        try:
-            herdr("agent", "wait", agent, "--until", "working", "--until", "blocked", "--timeout", "20000")
-        except HerdrError as e:
-            if e.code != "timeout":
-                raise
-        info = herdr("agent", "get", agent).get("agent", {})
-    return info
-
-
-def startup_keys(screen, kind, trusted):
-    """Keys for a startup screen OKe may answer, or None."""
-    low = screen.lower()
-    if TRUST_MARKER in low:
-        if not trusted():
-            return None
-        # claude preselects "No, exit"; codex preselects "Trust and continue"
-        return ["down", "enter"] if kind == "claude" else ["enter"]
-    for text, only, keys in SAFE_DIALOGS:
-        if text in low and only in (None, kind):
-            return keys
-    return None
-
-
-def close_startup_panels(agent, kind, ready):
-    """Skip the safe screens (update offer, hook trust) shown while herdr already
-    calls the agent ready or idle. With a `ready` marker, look until the input line
-    shows it: the next screen can take a moment to draw."""
-    for _ in range(READY_TRIES if ready else 3):
-        try:
-            screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
-        except HerdrError:
-            return  # cannot look: the prompt reports a real outage
-        keys = startup_keys(screen, kind, lambda: False)
-        if keys:
-            herdr("agent", "send-keys", agent, *keys)
-        elif not ready or ready in screen.lower():
-            return
-        time.sleep(DIALOG_POLL)
-
-
-def answer_startup_dialogs(agent, kind, trusted):
-    """Answer the startup screens one by one (codex may offer an update, then ask for
-    trust). Anything else is the user's call: DialogError with the screen."""
-    for _ in range(3):
-        # The dialog can still be drawing when herdr reports the agent blocked.
-        for _ in range(DIALOG_TRIES):
-            screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
-            keys = startup_keys(screen, kind, trusted)
-            if keys:
-                break
-            time.sleep(DIALOG_POLL)
-        if not keys:
-            raise DialogError(screen)
-        herdr("agent", "send-keys", agent, *keys)
-        try:
-            herdr("agent", "wait", agent, "--until", "idle", "--timeout", "30000")
-            return
-        except HerdrError as e:
-            if e.code != "timeout":
-                raise  # still blocked: the next screen is another dialog
-    raise DialogError(screen)
-
-
 def cmd_spawn(args):
     path = os.path.abspath(native_path(args.assignment)).replace("\\", "/")
     header = read_header(path)
@@ -760,8 +614,7 @@ def cmd_spawn(args):
 
     pane = args.pane
     if not pane:
-        pane = herdr("pane", "split", "--pane", args.split_from, "--direction", "right",
-                     "--cwd", cwd, "--no-focus")["pane"]["pane_id"]
+        pane = runtime().split(args.split_from, cwd)
 
     record = {"agent": agent, "pane": pane, "session": None, "kind": kind,
               "seq": header["seq"], "role": role, "job": header.get("job")}
@@ -786,7 +639,7 @@ def cmd_spawn(args):
             if repo_key(cwd) != key:
                 return False
             if args.pane:
-                where = herdr("pane", "get", pane).get("pane", {}).get("cwd") or ""
+                where = runtime().place_cwd(pane)
                 return repo_key(where) == key
         except (ValueError, HerdrError):
             return False
@@ -795,7 +648,7 @@ def cmd_spawn(args):
     kind, cli_args = agent_command(kind, role, config, oke_home(), plugin_root(),
                                    os.path.dirname(path), args.resume)
     try:
-        info = start_agent(agent, pane, cli_args, first_prompt(kind, role, path),
+        info = runtime().start(agent, pane, cli_args, first_prompt(kind, role, path),
                            trusted_folder, save_record, kind)
     except DialogError as e:
         return fail("agent %s is stopped at a dialog in pane %s:\n%s" % (agent, pane, e))
@@ -805,7 +658,7 @@ def cmd_spawn(args):
         return fail("spawn of %s failed in pane %s: %s" % (agent, pane, e))
     record["pane"] = info.get("pane_id", pane)
     record["session"] = session_of(info)
-    record["terminal"] = terminal_of(record["pane"])  # lets a revive close this pane safely
+    record["terminal"] = runtime().place_id(record["pane"])  # lets a revive close this pane safely
     save_record()
     print(json.dumps({"agent": agent, "pane": record["pane"], "session": record["session"]}))
     return 0
@@ -856,7 +709,7 @@ def look_at(agent, folder):
     """herdr's view of an agent: 'gone', 'blocked\\n<screen>', 'idle' when it has
     nothing to do, '?deliver' when idle with mail, or None while it works."""
     try:
-        info = herdr("agent", "get", agent).get("agent", {})
+        info = runtime().agent(agent)
     except HerdrError as e:
         if e.code in ("agent_not_found", "pane_not_found"):
             return "gone"
@@ -865,7 +718,7 @@ def look_at(agent, folder):
     status = info.get("agent_status")
     if status == "blocked":
         try:
-            return "blocked\n" + herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
+            return "blocked\n" + runtime().screen(agent)
         except HerdrError as e:
             if e.code in ("agent_not_found", "pane_not_found"):
                 return "gone"
@@ -1078,12 +931,16 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                         return warn_job(result[1:])
                     return result[1:]
                 try:
-                    if deliver(agent) is False:  # the mail stays; the next round tries again
+                    sent = deliver(agent)
+                    if sent is False:  # the mail stays; the next round tries again
                         failed_deliveries += 1
                     else:
                         failed_deliveries = 0
                 except (HerdrError, OSError):
-                    pass  # a passing outage: the next check_once counts it
+                    sent = None  # a passing outage: the next check_once counts it
+                if isinstance(sent, str):
+                    # the caller sends it (SendMessage) and starts this wait again
+                    return json.dumps({"deliver": {"to": agent, "text": sent}}, ensure_ascii=False)
                 if failed_deliveries >= DELIVER_TRIES:
                     return "deliver_failed"  # never loop silently on mail that cannot go in
                 idle = 0
@@ -1199,34 +1056,6 @@ def live_agent(record, agents):
     return None
 
 
-def pane_has_claude(pane):
-    try:
-        info = herdr("pane", "process-info", "--pane", pane).get("process_info", {})
-    except HerdrError as e:
-        if e.code == "herdr_unavailable":
-            raise
-        return False
-    return any("claude" in (p.get("name") or "").lower() for p in info.get("foreground_processes") or [])
-
-
-def terminal_of(pane):
-    """herdr's id of the terminal in `pane`; unlike the pane id it is never reused."""
-    try:
-        return herdr("pane", "get", pane).get("pane", {}).get("terminal_id")
-    except HerdrError:
-        return None
-
-
-def pane_exists(pane):
-    try:
-        herdr("pane", "get", pane)
-        return True
-    except HerdrError as e:
-        if e.code == "herdr_unavailable":
-            raise
-        return False
-
-
 def strip_resume(argv):
     out, skip = [], False
     for a in argv:
@@ -1272,14 +1101,7 @@ def new_pane(state, role, key, cwd):
         parents = [state["orchestrator"].get("pane")]
     else:
         parents = [((state["repos"].get(key) or {}).get("pm") or {}).get("pane")]
-    for parent in [p for p in parents if p]:
-        try:
-            return herdr("pane", "split", "--pane", parent, "--direction", "right",
-                         "--cwd", cwd, "--no-focus")["pane"]["pane_id"]
-        except HerdrError as e:
-            if e.code == "herdr_unavailable":
-                raise
-    return herdr("workspace", "create", "--cwd", cwd, "--label", "oke", "--no-focus")["root_pane"]["pane_id"]
+    return runtime().new_place(parents, cwd)
 
 
 def relaunch(state, role, key, name, record, folder):
@@ -1308,22 +1130,22 @@ def relaunch(state, role, key, name, record, folder):
     # same pane id can be a user's shell. The user's own orchestrator pane stays.
     old = record.get("pane")
     if old and (role != "orchestrator" or record.get("agent") == ORCH_NAME):
-        if record.get("terminal") and terminal_of(old) == record["terminal"]:
+        if record.get("terminal") and runtime().place_id(old) == record["terminal"]:
             try:
-                herdr("pane", "close", old)
+                runtime().close(old)
             except HerdrError as e:
                 if e.code == "herdr_unavailable":
                     raise  # a worktree group root refuses to close: leave it
     pane = new_pane(state, role, key, cwd)
     # The folder was trusted when the agent first started; a trust dialog now is unexpected.
     try:
-        return start_agent(agent, pane, args, prompt, lambda: False,
+        return runtime().start(agent, pane, args, prompt, lambda: False,
                            kind=kind if role != "orchestrator" else "claude")
     except (HerdrError, DialogError):
         # herdr keeps the name of a start that failed; with the pane closed it is
         # gone again, so the next watcher round does not read it as alive.
         try:
-            herdr("pane", "close", pane)
+            runtime().close(pane)
         except HerdrError:
             pass
         raise
@@ -1388,7 +1210,7 @@ def revive_locked(name):
         log_event("revive_failed %s: %s" % (name, (str(e).strip().splitlines() or [""])[0]))
         return "failed"
     fields.update(pane=info.get("pane_id"), session=session_of(info) or record.get("session"))
-    fields["terminal"] = terminal_of(fields["pane"]) if fields["pane"] else None
+    fields["terminal"] = runtime().place_id(fields["pane"]) if fields["pane"] else None
     if role == "orchestrator":
         fields["agent"] = ORCH_NAME
     update_record(role, key, name, fields)
@@ -1417,6 +1239,11 @@ def cmd_resume_all(args):
 def whoami(state, pane):
     """(role, name, key, record) of the OKe agent in `pane`, or None. Pane ids come
     back after a herdr restart, so a recorded session has to match as well."""
+    if pane and pane.startswith("session:"):
+        # a session id is never reused: no need to ask the runtime who is there
+        sid = pane[len("session:"):]
+        mine = [r for r in records(state) if r[3].get("pane") == pane or r[3].get("session") == sid]
+        return (mine[0] if mine else None), list_agents()
     mine = [r for r in records(state) if r[3].get("pane") == pane]
     if not mine:
         return None, []
@@ -1472,6 +1299,46 @@ def board_tree(state, agents, only_key=None):
     return tree
 
 
+TODO_MARKS = {"completed": "v", "in_progress": ">", "pending": "o"}
+
+
+def board_lines(tree):
+    """The board as (depth, text) lines: one renderer-neutral list for --text and --html."""
+    out = []
+
+    def agent(n, depth):
+        out.append((depth, "%s %s: %s%s" % (n["role"], n["agent"], n["status"],
+                                            ", report " + n["report"] if n.get("report") else "")))
+        for t in n.get("todos") or []:
+            out.append((depth + 1, "%s %s" % (TODO_MARKS.get(t["status"], "o"), t["content"])))
+
+    for repo in tree:
+        out.append((0, "repo " + repo["repo"]))
+        if repo["pm"]:
+            agent(repo["pm"], 1)
+        for job in repo["jobs"]:
+            if job["phase"] in DONE_PHASES:
+                continue
+            out.append((1, "job %s: %s%s" % (job["job"], job["phase"],
+                                             ", waiting for you (%s)" % job["pending"] if job["pending"] else "")))
+            for n in job["agents"]:
+                agent(n, 2)
+    return out or [(0, "no OKe agents yet")]
+
+
+def cmd_board(args):
+    """The board for hosts that cannot draw the mod's pane (Orca chat, SDK hosts)."""
+    lines = board_lines(board_tree(load_state(), list_agents()))
+    if not args.html:
+        print("\n".join("  " * d + t for d, t in lines))
+        return 0
+    import html
+    items = "".join('<li style="margin-left:%dem">%s</li>' % (d * 1.5, html.escape(t)) for d, t in lines)
+    print('<div style="font-family:monospace"><h3>OKe board</h3><ul style="list-style:none;padding:0">%s</ul></div>'
+          % items)
+    return 0
+
+
 def cmd_tick(args):
     """One watcher round for a mod: who am I, revive what died, new events, the board."""
     state = load_state()
@@ -1486,7 +1353,8 @@ def cmd_tick(args):
         if role == "orchestrator":
             targets = [r for r in records(state) if r[0] == "pm"]
         elif role == "pm":
-            targets = [r for r in records(state) if r[0] == "orchestrator"
+            targets = [r for r in records(state)
+                       if (r[0] == "orchestrator" and runtime().owns_orchestrator)
                        or (r[2] == key and r[0] in ("worker", "reviewer"))]
         else:
             targets = []
@@ -1583,9 +1451,17 @@ def cmd_status(args):
     # herdr calls are slow (seconds each): make them before taking the lock, so
     # spawn and the waits do not time out on it. The agent list may then be a few
     # seconds old: an agent that just started can show as dead until the next status.
+    if args.claim and not os.environ.get("OKE_RUNTIME"):
+        # one runtime per OKe home, chosen by where the orchestrator starts
+        want = "herdr" if os.environ.get("HERDR_ENV") == "1" else "bg"
+        with locked():
+            current = load_state()
+            if current.get("runtime") != want:
+                current["runtime"] = want
+                save_state(current)
     herdr_info = None
-    if os.environ.get("HERDR_ENV") == "1":
-        herdr_info = (missing_commands(), list_agents())
+    if runtime().inside():
+        herdr_info = (runtime().missing(), list_agents())
     with locked():
         return status_locked(args, herdr_info)
 
@@ -1593,11 +1469,8 @@ def cmd_status(args):
 def own_launch(pane, agents):
     """How the orchestrator in `pane` was started, so a watcher can start it again."""
     found = {}
-    try:
-        info = herdr("pane", "process-info", "--pane", pane).get("process_info", {})
-    except HerdrError:
-        info = {}  # without it the orchestrator just cannot be revived; the claim still stands
-    for p in info.get("foreground_processes") or []:
+    # without them the orchestrator just cannot be revived; the claim still stands
+    for p in runtime().processes(pane):
         if "claude" in (p.get("name") or "").lower() and p.get("argv"):
             argv = p["argv"][1:]
             # shortcut: a node-run claude has its script as the next argument; other launchers unhandled
@@ -1614,7 +1487,7 @@ def own_launch(pane, agents):
 def status_locked(args, herdr_info):
     state = load_state(recover=True)
     home = oke_home()
-    result = {"herdr": {"inside": os.environ.get("HERDR_ENV") == "1", "missing": []},
+    result = {"herdr": {"inside": runtime().inside(), "missing": []},
               "state_recovered": bool(state.get("_recovered")),
               "orchestrator_conflict": None, "repos": {}, "jobs": {}, "orphan_job_dirs": []}
     jobs_dir = os.path.join(home, "jobs")
@@ -1660,7 +1533,7 @@ def status_locked(args, herdr_info):
                                 "pm_seq": pm_job_report(name)[0],
                                 "pm_job_dir": pm_job_dir(name).replace("\\", "/")}
 
-    here = os.environ.get("HERDR_PANE_ID")
+    here = runtime().whoami()
     recorded = state["orchestrator"].get("pane")
     there = [a for a in agents if a.get("pane_id") == recorded]
     orch = state["orchestrator"]
@@ -1691,9 +1564,15 @@ def status_locked(args, herdr_info):
 # ---------------------------------------------------------------- compact hook
 
 def compact_message():
-    pane = os.environ.get("HERDR_PANE_ID")
+    pane = runtime().whoami()
     if not pane:
         return ""
+    sid = pane[len("session:"):] if pane.startswith("session:") else None
+
+    def mine(rec):
+        # a bg child's place is its short id; its session id is what whoami knows
+        return rec.get("pane") == pane or bool(sid and rec.get("session") == sid)
+
     home = oke_home()
     # Read-only on purpose: a hook must not rename or rewrite state files.
     state = read_json(state_path(), None)
@@ -1707,12 +1586,12 @@ def compact_message():
     repos = state.get("repos") or {}
     keys = set(repos) | set(j.get("repo") for j in (state.get("jobs") or {}).values() if j.get("repo"))
     for key in sorted(keys):
-        if ((repos.get(key) or {}).get("pm") or {}).get("pane") == pane:
+        if mine((repos.get(key) or {}).get("pm") or {}):
             folder = pm_dir(key)
             note = pm_jobs_note({"jobs": state.get("jobs") or {}}, key)
             break
         for name, rec in read_children(key).items():
-            if rec.get("pane") == pane and rec.get("job"):
+            if mine(rec) and rec.get("job"):
                 folder = os.path.join(home, "jobs", rec["job"], name)
                 break
         if folder:
@@ -1877,13 +1756,19 @@ def merge_job(job):
     return 2
 
 
+# Byproducts of running the code and its checks: never part of a job's commit (seen live:
+# a direct merge committed __pycache__). Tracked files matching them are skipped too.
+BYPRODUCTS = [":(exclude)*__pycache__*", ":(exclude)*.pyc", ":(exclude)*.pytest_cache*"]
+ADD = ["add", "-A", "--", "."] + BYPRODUCTS
+
+
 def pending_tree(main):
-    """Tree sha of the main checkout as `git add -A` would commit it. The real index is
+    """Tree sha of the main checkout as `oke job merge` would commit it. The real index is
     untouched. The review of a job without a worktree names this tree."""
     idx = os.path.join(oke_home(), "tree-%d.index" % os.getpid())
     env = dict(os.environ, GIT_INDEX_FILE=idx)
     try:
-        for argv in (["read-tree", "HEAD"], ["add", "-A"], ["write-tree"]):
+        for argv in (["read-tree", "HEAD"], ADD, ["write-tree"]):
             result = subprocess.run(["git", "-C", main] + argv, env=env,
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             if result.returncode != 0:
@@ -1915,7 +1800,7 @@ def commit_direct(job, info, main, review, reviewed):
         return fail("the changes in %s are not the ones the review covered (tree %s, reviewed %s): give "
                     "the reviewer a new instruction with `tree: %s`, then merge" % (main, tree, reviewed, tree))
     pre = git_out(main, "rev-parse", "HEAD")[1]
-    for argv in (["add", "-A"], ["commit", "-q", "-m", "oke: %s" % job]):
+    for argv in (ADD, ["commit", "-q", "-m", "oke: %s" % job]):
         result = subprocess.run(["git", "-C", main] + argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if result.returncode != 0:
             subprocess.call(["git", "-C", main, "reset", "-q"])  # unstage; the files stay as they are
@@ -2298,7 +2183,7 @@ def cmd_send(args):
     if found[0] == "orchestrator":
         return fail("the orchestrator has no inbox: a PM reports to it instead")
     sender = "user"
-    pane = os.environ.get("HERDR_PANE_ID")
+    pane = runtime().whoami()
     if pane:
         try:
             me, _ = whoami(state, pane)
@@ -2333,7 +2218,9 @@ def cmd_send(args):
 
 def deliver(agent):
     """Type the queued messages into `agent`, which the caller saw idle. They leave the
-    inbox only after herdr took them, so a failed prompt loses nothing."""
+    inbox only after herdr took them, so a failed prompt loses nothing. A runtime that
+    cannot type (bg) answers "ask_caller": the text is returned for the waiting Claude
+    session to send with SendMessage."""
     if not inbox_messages(agent):
         return None
     lock = "deliver-" + agent
@@ -2344,29 +2231,17 @@ def deliver(agent):
         if not msgs:
             return None
         text = "OKe inbox: " + " | ".join(t for _, t in msgs)
-        try:
-            herdr("agent", "prompt", agent, text, "--wait", "--until", "working",
-                  "--until", "blocked", "--timeout", "20000")
-        except HerdrError as e:
-            if e.code == "herdr_unavailable":
-                raise
-            # After a stall or timeout the text may be in although the wait for
-            # "working" failed: typing it again would give the same instruction twice.
-            # Any other error (a refusal) typed nothing.
-            if e.code not in ("agent_prompt_stalled", "timeout"):
-                return False
-            try:
-                status = herdr("agent", "get", agent).get("agent", {}).get("agent_status")
-            except HerdrError:
-                status = None
-            if status not in ("working", "blocked"):
-                return False
+        took = runtime().prompt(agent, text)
+        if not took:
+            return False
         done = os.path.join(inbox_dir(agent), "read")
         if not os.path.isdir(done):
             os.makedirs(done, exist_ok=True)
+        # shortcut: with ask_caller the mail counts as read once handed out; a caller
+        # compacted before its SendMessage loses it (the file stays in read/)
         for path, _ in msgs:
             replace_file(path, os.path.join(done, os.path.basename(path)))
-        return True
+        return text if took == "ask_caller" else True
     finally:
         unlock(lock)
 
@@ -2474,7 +2349,7 @@ def build_parser():
 
     spawn = sub.add_parser("spawn")
     spawn.add_argument("assignment")
-    where = spawn.add_mutually_exclusive_group(required=True)
+    where = spawn.add_mutually_exclusive_group()  # neither: next to the caller
     where.add_argument("--pane")
     where.add_argument("--split-from")
     spawn.add_argument("--resume")
@@ -2527,6 +2402,30 @@ def build_parser():
     pending.set_defaults(func=cmd_pending)
 
     sub.add_parser("extras", help="what a child's assignment may switch on").set_defaults(func=cmd_extras)
+
+    for name, helptext in (("agents", "names of the running agents"),
+                           ("read", "the agent's screen"), ("keys", "press keys in the agent"),
+                           ("attach", "show the agent to the user"), ("close", "close a place"),
+                           ("place", "a place for a new PM in a repository"),
+                           ("worktree", "create or remove a job's worktree")):
+        p = sub.add_parser(name, help=helptext)
+        p.set_defaults(func=cmd_rt, rt=name)
+        if name in ("read", "keys", "attach"):
+            p.add_argument("agent")
+        if name == "keys":
+            p.add_argument("keys", nargs="+")
+        if name == "close":
+            p.add_argument("place")
+        if name == "place":
+            p.add_argument("repo")
+        if name == "worktree":
+            p.add_argument("job", nargs="?")
+            p.add_argument("--repo")
+            p.add_argument("--remove", metavar="ID")
+
+    board = sub.add_parser("board", help="the board as text or HTML, for hosts without the mod pane")
+    board.add_argument("--html", action="store_true")
+    board.set_defaults(func=cmd_board)
 
     send = sub.add_parser("send")
     send.add_argument("agent")
