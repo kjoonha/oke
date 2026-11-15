@@ -1379,10 +1379,15 @@ def board_node(role, name, key, record, agents):
             board = f.read()
     except (IOError, OSError, TypeError, UnicodeDecodeError):
         board = ""
+    # the agent's own task list, written by its OKe mod
+    todos = read_json(os.path.join(folder, "todos.json"), []) if folder else []
+    todos = [t for t in todos if isinstance(t, dict)] if isinstance(todos, list) else []
     return {"agent": name, "role": role, "status": a.get("agent_status") if a else "dead",
             "pane": (a or {}).get("pane_id") or record.get("pane"),
             "report": (report or {}).get("type"), "board": board,
-            "revives": record.get("revives", 0)}
+            "revives": record.get("revives", 0),
+            "todos": [{"content": str(t.get("content", "")), "status": str(t.get("status", "pending"))}
+                      for t in todos]}
 
 
 def board_tree(state, agents, only_key=None):
@@ -1416,6 +1421,7 @@ def cmd_tick(args):
     if me is not None:
         role, name, key, record = me
         out["role"], out["agent"] = role, name
+        out["folder"] = agent_folder(role, name, key, record)
         if role == "orchestrator":
             targets = [r for r in records(state) if r[0] == "pm"]
         elif role == "pm":

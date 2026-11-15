@@ -5,7 +5,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { BoardJob, BoardNode, BoardRepo, Since } from '../types'
+import type { BoardJob, BoardNode, BoardRepo, Since, Todo } from '../types'
 
 const PANE = 'oke-board'
 const TICK_MS = 10_000
@@ -13,10 +13,15 @@ const UNKNOWN_EVERY = 6 // ticks: a session that is not (yet) an OKe agent is ch
 const board = atom({ plugin: 'oke', key: 'board' } as const, [] as BoardRepo[], { shape: 'board-2' })
 const expanded = atom({ plugin: 'oke', key: 'expanded' } as const, [] as string[], { shape: 'expanded-1' })
 const since = atom({ plugin: 'oke', key: 'since' } as const, {} as Record<string, Since>, { shape: 'since-1' })
+const todos = atom({ plugin: 'oke', key: 'todos' } as const, [] as Todo[], { shape: 'todos-1' })
 
 // Module state starts over on a reload; session.start runs again then.
 let pane: string | undefined
 let role: string | null = null
+let folder: string | null = null
+let bandId: string | null = null
+let mood: Mood = 'rest'
+let frame = 0
 let python: string | null = null
 let eventsOffset: number | null = null
 let ticking = false
@@ -53,6 +58,7 @@ async function tick($: any) {
     const out = await oke($, args)
     if (!out) return
     role = out.role
+    folder = out.folder ?? null
     eventsOffset = out.events_offset
     if (role === 'orchestrator') {
       for (const line of out.events as string[]) $.ui.toast(`OKe: ${line.replace(/^\S+ /, '')}`, { timeoutMs: 8000 })
@@ -145,6 +151,93 @@ function elapsed(ms: number): string {
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${m % 60}m`
 }
 
+/** How a todo shows on the board: mark and color by status. */
+const TODO: Record<string, [string, string | undefined]> = {
+  completed: ['✓', 'green'],
+  in_progress: ['▸', 'yellow'],
+  pending: ['○', undefined],
+}
+
+const TASK_TOOLS = ['TaskCreate', 'TaskUpdate', 'TodoWrite']
+
+/** Apply one task tool call to the list, as the tool itself did. */
+function applyTask(list: Todo[], tool: string, input: any, result: any): Todo[] {
+  if (tool === 'TodoWrite') {
+    const next = result?.newTodos ?? input.todos ?? []
+    return next.map((t: any) => ({ content: t.content, status: t.status }))
+  }
+  if (tool === 'TaskCreate') {
+    const id = result?.task?.id
+    return id ? [...list, { id: String(id), content: input.subject, status: 'pending' }] : list
+  }
+  // TaskUpdate
+  if (result?.success === false) return list
+  if (input.status === 'deleted') return list.filter(t => t.id !== input.taskId)
+  return list.map(t => (t.id === input.taskId
+    ? { ...t, content: input.subject ?? t.content, status: input.status ?? t.status }
+    : t))
+}
+
+// ---------------------------------------------------------------- conductor band
+// A 10x8 pixel conductor drawn as a 10x4 Raster: each cell's upper half block takes
+// the top pixel as its foreground and the bottom pixel as its background.
+type Mood = 'conduct' | 'rest' | 'wave' | 'stop'
+const W = 10
+const DEFAULT = 0x01000000
+const PALETTE: Record<string, number> = {
+  h: 0x3b2a20, s: 0xf2c9a0, k: 0x23233a, w: 0xffffff, b: 0xf5f5f5, n: 0xffd24a, z: 0x8a8fa8, r: 0xe04848, '!': 0xffb020,
+}
+const BODY = ['..kwwk....', '..kkkk....', '..k..k....']
+const FRAMES: Record<Mood, string[][]> = {
+  conduct: [
+    ['...hh....n', '..hssh..b.', '...ss..b..', '..kwwkkw..', '.skwwk....', ...BODY],
+    ['...hh.....', '..hssh....', '...ss....n', '..kwwk....', '.skwwkkw..', '..kwwk..b.', '..kkkk...b', '..k..k....'],
+    ['.n.hh.....', '..hssh..b.', '...ss..b..', '..kwwkkw..', '.skwwk....', ...BODY],
+    ['...hh.....', '..hssh...n', '...ss.....', '..kwwk....', '.skwwkkw..', '..kwwk..b.', '..kkkk...b', '..k..k....'],
+  ],
+  rest: [
+    ['...hh.....', '..hssh..z.', '...ss.....', '..kwwk....', '.skwwks...', ...BODY],
+    ['...hh...z.', '..hssh....', '...ss.....', '..kwwk....', '.skwwks...', ...BODY],
+  ],
+  wave: [
+    ['...hh..s.!', '..hssh.k..', '...ss..k..', '..kwwkk...', '.skwwk....', ...BODY],
+    ['...hh...s!', '..hssh..k.', '...ss..k..', '..kwwkk...', '.skwwk....', ...BODY],
+  ],
+  stop: [['...hh.....', '..hssh....', '...ss.....', '..rwwr....', '.srwwrs...', '..rwwr....', '..rrrr....', '..r..r....']],
+}
+
+function cells(pixels: string[]): string {
+  const words = new Uint32Array(W * 4 * 3)
+  for (let row = 0; row < 4; row++) {
+    for (let col = 0; col < W; col++) {
+      const top = PALETTE[pixels[row * 2]?.[col] ?? '.']
+      const bottom = PALETTE[pixels[row * 2 + 1]?.[col] ?? '.']
+      const at = (row * W + col) * 3
+      if (top === undefined && bottom === undefined) words.set([0x20, DEFAULT, DEFAULT], at)
+      else if (top === undefined) words.set([0x2584, bottom ?? DEFAULT, DEFAULT], at) // ▄
+      else words.set([0x2580, top, bottom ?? DEFAULT], at) // ▀
+    }
+  }
+  return (new Uint8Array(words.buffer) as any).toBase64()
+}
+
+function frameCells(m: Mood, i: number): string {
+  const list = FRAMES[m]
+  return cells(list[Math.floor(i) % list.length] ?? [])
+}
+
+/** The band's mood from the board, or for a worker or reviewer from its own turn. */
+function moodOf(tree: BoardRepo[], working: boolean): Mood {
+  const jobs = tree.flatMap(r => r.jobs)
+  if (jobs.some(j => j.pending)) return 'wave'
+  const all = nodes(tree)
+  const open = jobs.filter(j => j.phase !== 'done' && j.phase !== 'failed')
+  if (open.some(j => j.agents.some(n => n.status === 'dead')) || (tree.some(r => r.pm?.status === 'dead') && open.length)) {
+    return 'stop'
+  }
+  return working || all.some(n => n.status === 'working') ? 'conduct' : 'rest'
+}
+
 async function openBoard($: any) {
   return $.ui.open({ id: PANE, title: 'OKe board' })
 }
@@ -174,7 +267,55 @@ export const register: Register = on => {
       skipped = 0
       void tick($)
     })
+    // The conductor moves while there is something to show; rest breathes at half speed.
+    $.clock.every(400, () => {
+      if (!bandId || mood === 'stop') return
+      frame += 1
+      if (mood === 'rest' && frame % 2) return
+      void $.ui.blit({ requestId: bandId, key: 'conductor', cells: frameCells(mood, mood === 'rest' ? frame / 2 : frame) })
+    })
     return r
+  })
+
+  // Each agent's own task list goes to its folder, where the board reads it.
+  on('tool.call', async ($, e: any, next) => {
+      const ran: any = await next(e)
+      const tool: string = e.tool
+      if (!pane || !TASK_TOOLS.includes(tool) || ran.deny !== undefined || ran.isError) return ran
+      const list = await update($, todos, old => applyTask(old, tool, e, ran.result))
+      if (folder) {
+        try {
+          await $.fs.write(`${folder}/todos.json`.replace(/\\/g, '/'), JSON.stringify(list))
+        } catch {
+          // the board just shows the older list
+        }
+      }
+      return ran
+  })
+
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (!role || e.props.hasSurvey) return next(e)
+    const { Box, Text, Raster } = $.ui.resolve(e) as any
+    const tree = await read($, board)
+    mood = moodOf(tree, e.props.isWorking)
+    bandId = e.requestId
+    const jobs = tree.flatMap(r => r.jobs)
+    const waiting = jobs.filter(j => j.pending).length
+    const busy = nodes(tree).filter(n => n.status === 'working').length
+    const open = jobs.filter(j => j.phase !== 'done' && j.phase !== 'failed').length
+    const words: Record<Mood, string> = { conduct: '연주 중', rest: '쉬는 중', wave: '내 차례!', stop: '멈춤' }
+    const line = role === 'worker' || role === 'reviewer'
+      ? `OKe ${role}`
+      : `OKe ${role} · job ${open} · 작업 ${busy}${waiting ? ` · 내 차례 ${waiting}` : ''}`
+    return (
+      <Box flexDirection="row">
+        <Raster key="conductor" columns={W} rows={4} cells={frameCells(mood, frame)} />
+        <Box flexDirection="column" marginLeft={1}>
+          <Text bold color={mood === 'stop' ? 'red' : mood === 'wave' ? 'yellow' : undefined}>{`♪ ${words[mood]}`}</Text>
+          <Text dimColor>{line}</Text>
+        </Box>
+      </Box>
+    )
   })
 
   on('command.run', { command: 'oke-board' }, async $ => {
@@ -249,6 +390,14 @@ export const register: Register = on => {
           <Text dimColor>{`${t ? ` ${elapsed(now - t.at)}` : ''}${extra.length ? ` · ${extra.join(', ')}` : ''}`}</Text>
         </Button>,
       ]
+      for (const t of n.todos ?? []) {
+        const [tm, tc] = TODO[t.status] ?? ['○', undefined]
+        rows.push(
+          <Text color={tc} dimColor={t.status === 'completed'} bold={t.status === 'in_progress'}>
+            {`${indent}  ${tm} ${t.content}`}
+          </Text>,
+        )
+      }
       if (isOpen) {
         rows.push(
           <Box flexDirection="row">
