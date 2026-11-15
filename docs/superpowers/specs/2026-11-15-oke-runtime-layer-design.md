@@ -1,6 +1,6 @@
 # OKe runtime layer: herdr and background sessions behind one interface
 
-Date: 2026-11-15. Status: design, not built. Replaces slice 6 ("no-herdr mode").
+Date: 2026-11-15. Status: approved by the user 2026-11-15; building. Replaces slice 6 ("no-herdr mode").
 
 ## Goal
 
@@ -135,6 +135,20 @@ The board data stays one function in the domain; only the renderers differ.
 4. Delivery rule in the skills; `crossSessionInbound` for children.
 5. Mod: identity from the runtime; `oke board --text|--html`.
 6. Live run without herdr in this Orca terminal.
+
+## Which way to run an agent
+
+OKe has three ways to run an agent. The runtime layer covers only the first.
+
+| Way | Fits | Why |
+|---|---|---|
+| Runtime session (`--bg` or a herdr pane) | the PM; the worker and reviewer of a normal or large job | lives for hours, takes new instructions mid-job, is revived after a crash, a person can look in |
+| Subagent (Agent tool) | a trivial job's change, a one-shot review, code exploration | ends inside its parent's turn; no new session, so no ~15k-token start |
+| `claude -p` | almost nothing | overlaps with a subagent; only for a one-shot run that needs another model or other permissions than its parent |
+
+A trivial job (the PM decides the size) never starts a runtime session: the PM runs
+it with subagents. A worker may hand exploration to a subagent (Agent is always in
+its tools).
 
 ## Decided after the first draft
 
