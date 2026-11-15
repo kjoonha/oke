@@ -6,22 +6,23 @@ import os
 import unittest
 
 import oke
+import runtime_herdr
 from test_oke import AGENT, SpawnBase
 from test_revive import E, ReviveBase
 
 
 class TestHerdrTimeout(SpawnBase):
     def test_a_hung_herdr_is_an_outage_not_a_hang(self):
-        old_argv, old_timeout = os.environ.get("OKE_HERDR"), oke.HERDR_TIMEOUT
+        old_argv, old_timeout = os.environ.get("OKE_HERDR"), runtime_herdr.HERDR_TIMEOUT
         os.environ["OKE_HERDR"] = json.dumps(["python", "-c", "import time; time.sleep(30)"])
-        oke.HERDR_TIMEOUT = 1
+        runtime_herdr.HERDR_TIMEOUT = 1
         try:
             with self.assertRaises(oke.HerdrError) as e:
                 oke.herdr("agent", "list")
             self.assertEqual(e.exception.code, "herdr_unavailable")
             self.assertIn("did not answer", e.exception.message)
         finally:
-            oke.HERDR_TIMEOUT = old_timeout
+            runtime_herdr.HERDR_TIMEOUT = old_timeout
             if old_argv is None:
                 del os.environ["OKE_HERDR"]
             else:
