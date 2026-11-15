@@ -301,6 +301,10 @@ class HerdrRuntime(object):
         return True
 
     def split(self, near, cwd):
+        """A new pane right of `near`; without `near`, right of the caller's own pane."""
+        near = near or os.environ.get("HERDR_PANE_ID")
+        if not near:
+            raise HerdrError("no_place", "not inside a herdr pane: give --pane or --split-from")
         return herdr("pane", "split", "--pane", near, "--direction", "right",
                      "--cwd", cwd, "--no-focus")["pane"]["pane_id"]
 
@@ -336,3 +340,30 @@ class HerdrRuntime(object):
 
     def close(self, place):
         herdr("pane", "close", place)
+
+    def keys(self, name, keys):
+        herdr("agent", "send-keys", name, *keys)
+
+    def attach(self, name):
+        """Show the agent to the user: herdr focuses its pane."""
+        herdr("agent", "focus", name)
+
+    def place_for_repo(self, repo, label):
+        """A place for a new PM: next to a pane already in `repo`, else a new workspace."""
+        want = os.path.normcase(os.path.abspath(repo))
+        for p in herdr("pane", "list").get("panes", []):
+            if p.get("cwd") and os.path.normcase(os.path.abspath(p["cwd"])) == want:
+                return self.split(p["pane_id"], repo)
+        return herdr("workspace", "create", "--cwd", repo, "--label", label,
+                     "--no-focus")["root_pane"]["pane_id"]
+
+    def worktree_create(self, repo, branch, label):
+        """Check out `branch` in a new worktree. Returns id (to remove it), path, place."""
+        ws = herdr("worktree", "create", "--cwd", repo, "--branch", branch, "--label", label,
+                   "--no-focus")["workspace"]
+        panes = herdr("pane", "list", "--workspace", ws["workspace_id"]).get("panes", [])
+        return {"id": ws["workspace_id"], "path": ws["worktree"]["checkout_path"],
+                "place": panes[0]["pane_id"] if panes else None}
+
+    def worktree_remove(self, wid):
+        herdr("worktree", "remove", "--workspace", wid)

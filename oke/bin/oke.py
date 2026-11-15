@@ -439,6 +439,39 @@ def cmd_extras(args):
     return 0
 
 
+def cmd_rt(args):
+    """Runtime actions the skills need, so they never call herdr (or claude) themselves."""
+    rt = runtime()
+    if args.rt == "agents":
+        out = sorted(a.get("name") for a in rt.agents() if a.get("name"))
+    elif args.rt == "read":
+        sys.stdout.write(rt.screen(args.agent))
+        return 0
+    elif args.rt == "keys":
+        rt.keys(args.agent, args.keys)
+        out = {"agent": args.agent, "sent": args.keys}
+    elif args.rt == "attach":
+        rt.attach(args.agent)
+        out = {"agent": args.agent, "attached": True}
+    elif args.rt == "close":
+        rt.close(args.place)
+        out = {"closed": args.place}
+    elif args.rt == "place":
+        repo = native_path(args.repo)
+        out = {"place": rt.place_for_repo(repo, os.path.basename(repo.rstrip("/\\")))}
+    elif args.rt == "worktree":
+        if args.remove:
+            rt.worktree_remove(args.remove)
+            out = {"removed": args.remove}
+        else:
+            if not args.job or not args.repo:
+                return fail("worktree needs <job> and --repo (or --remove <id>)")
+            # shortcut: `oke job merge` merges only oke/<job>, so the branch name is fixed here
+            out = rt.worktree_create(native_path(args.repo), "oke/" + args.job, args.job)
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
 def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header=None):
     """`header` is the agent's assignment header: its `tools:`, `mcp:` and `plugins:`
     (comma separated) are what the PM switched on for this job."""
@@ -2225,7 +2258,7 @@ def build_parser():
 
     spawn = sub.add_parser("spawn")
     spawn.add_argument("assignment")
-    where = spawn.add_mutually_exclusive_group(required=True)
+    where = spawn.add_mutually_exclusive_group()  # neither: next to the caller
     where.add_argument("--pane")
     where.add_argument("--split-from")
     spawn.add_argument("--resume")
@@ -2278,6 +2311,26 @@ def build_parser():
     pending.set_defaults(func=cmd_pending)
 
     sub.add_parser("extras", help="what a child's assignment may switch on").set_defaults(func=cmd_extras)
+
+    for name, helptext in (("agents", "names of the running agents"),
+                           ("read", "the agent's screen"), ("keys", "press keys in the agent"),
+                           ("attach", "show the agent to the user"), ("close", "close a place"),
+                           ("place", "a place for a new PM in a repository"),
+                           ("worktree", "create or remove a job's worktree")):
+        p = sub.add_parser(name, help=helptext)
+        p.set_defaults(func=cmd_rt, rt=name)
+        if name in ("read", "keys", "attach"):
+            p.add_argument("agent")
+        if name == "keys":
+            p.add_argument("keys", nargs="+")
+        if name == "close":
+            p.add_argument("place")
+        if name == "place":
+            p.add_argument("repo")
+        if name == "worktree":
+            p.add_argument("job", nargs="?")
+            p.add_argument("--repo")
+            p.add_argument("--remove", metavar="ID")
 
     send = sub.add_parser("send")
     send.add_argument("agent")
