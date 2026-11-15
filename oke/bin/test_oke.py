@@ -533,6 +533,35 @@ class TestSpawn(SpawnBase):
         self.assertEqual(lean["hooks"], {"SessionStart": [herdr_group]})
         self.assertEqual(lean["env"], {"PYTHONUTF8": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"})
         self.assertNotIn("--setting-sources", oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p"))
+        self.assertNotIn("Edit", args[args.index("--tools") + 1].split(","))
+
+    def test_assignment_header_switches_on_tools_mcp_and_plugins(self):
+        conf = os.path.join(self.home, "claude-conf")
+        os.makedirs(conf)
+        with open(os.path.join(conf, ".claude.json"), "w") as f:
+            json.dump({"mcpServers": {"codegraph": {"command": "codegraph"}, "big": {"command": "big"}}}, f)
+        with open(os.path.join(conf, "settings.json"), "w") as f:
+            json.dump({"enabledPlugins": {"sp@m": True, "off@m": False}}, f)
+        folder = os.path.join(self.home, "child")
+        os.makedirs(folder)
+        old = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = conf
+        try:
+            header = {"tools": "WebFetch, Bash", "mcp": "codegraph, nope", "plugins": "sp@m"}
+            args = oke.launch_args("worker", oke.load_config(), self.home, "/p", folder=folder, header=header)
+            self.assertEqual(oke.user_plugins(), ["sp@m"])
+        finally:
+            if old is None:
+                del os.environ["CLAUDE_CONFIG_DIR"]
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = old
+        tools = args[args.index("--tools") + 1].split(",")
+        self.assertIn("WebFetch", tools)
+        self.assertEqual(tools.count("Bash"), 1)
+        with open(args[args.index("--mcp-config") + 1]) as f:
+            self.assertEqual(json.load(f), {"mcpServers": {"codegraph": {"command": "codegraph"}}})
+        with open(args[args.index("--settings") + 1]) as f:
+            self.assertEqual(json.load(f)["enabledPlugins"], {"sp@m": True})
 
     def test_conservative_agents_can_still_write_their_own_files(self):
         c = dict(oke.load_config(), autonomy="conservative", wiki_path="/w")
