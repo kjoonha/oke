@@ -488,6 +488,7 @@ def write_lean_settings(folder, plugins=()):
         if kept:
             hooks[event] = kept
     env = dict(user.get("env") or {}, CLAUDE_CODE_DISABLE_AUTO_MEMORY="1")
+    env.pop("CLAUDE_CODE_PLUGIN_DIRS", None)  # the user's own mods would load in every child
     settings = {"hooks": hooks, "env": env}
     if plugins:
         settings["enabledPlugins"] = dict((p, True) for p in plugins)
