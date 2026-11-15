@@ -42,6 +42,12 @@ class TestRuntimeCommands(SpawnBase):
         self.assertEqual(self.cli("place", self.repo), 0)
         self.assertEqual(json.loads(self.out), {"place": "w5:p1"})
 
+    def test_place_refuses_a_repo_id(self):
+        self.fake({})
+        self.assertEqual(self.cli("place", "calc-1b3776"), 1)
+        self.assertIn("path", self.err)
+        self.assertEqual(self.argv(), [])
+
     def test_worktree_create_and_remove(self):
         ws = {"workspace_id": "w7", "worktree": {"checkout_path": "/wt/fix-a"}}
         self.fake({"worktree create": [J({"type": "worktree_created", "workspace": ws})],
