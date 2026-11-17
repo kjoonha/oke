@@ -420,6 +420,8 @@ def write_lean_settings(folder, plugins=()):
     env.pop("CLAUDE_CODE_PLUGIN_DIRS", None)  # the user's own mods would load in every child
     env["OKE_HOME"] = oke_home()  # the skills say $OKE_HOME; a herdr pane does not inherit it
     settings = {"hooks": hooks, "env": env}
+    if "autoCompactWindow" in user:  # the user's compaction setting holds in children too
+        settings["autoCompactWindow"] = user["autoCompactWindow"]
     if plugins:
         settings["enabledPlugins"] = dict((p, True) for p in plugins)
     path = os.path.join(folder, "lean-settings.json")
@@ -1389,6 +1391,39 @@ def cmd_tick(args):
         if args.board and role in ("orchestrator", "pm"):
             out["board"] = board_tree(state, agents, key if role == "pm" else None)
     print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+# ---------------------------------------------------------------- task boundary
+
+def answered(folder):
+    """The assignment seq the report in `folder` answers, or None while it owes one."""
+    seq = (read_header(os.path.join(folder, "assignment.md")) or {}).get("seq")
+    report = read_header(os.path.join(folder, "report.md")) or {}
+    return seq if seq is not None and report.get("seq") == seq else None
+
+
+def cmd_boundary(args):
+    """The assignments this PM, worker or reviewer has answered, as `job:seq`. A new
+    one since the mod last looked is a task boundary, where the mod compacts."""
+    state = load_state()
+    me, _ = whoami(state, args.pane)
+    out = {"role": None, "answered": []}
+    if me is not None:
+        role, name, key, record = me
+        out["role"] = role
+        if role == "pm":
+            jobs = sorted(n for n, j in state["jobs"].items() if j.get("repo") == key)
+            channels = [(job, pm_job_dir(job)) for job in jobs]
+        elif role in ("worker", "reviewer") and record.get("job"):
+            channels = [(record["job"], agent_folder(role, name, key, record))]
+        else:
+            channels = []
+        for job, folder in channels:
+            seq = answered(folder)
+            if seq is not None:
+                out["answered"].append("%s:%s" % (job, seq))
+    print(json.dumps(out))
     return 0
 
 
@@ -2410,6 +2445,9 @@ def build_parser():
     tick.add_argument("--events-from", type=int)
     tick.set_defaults(func=cmd_tick)
 
+    boundary = sub.add_parser("boundary", help="the assignments this agent has answered (mod)")
+    boundary.add_argument("--pane", required=True)
+    boundary.set_defaults(func=cmd_boundary)
     retry = sub.add_parser("api-retry")
     retry.add_argument("--pane", required=True)
     retry.add_argument("--attempt", type=int, default=1)

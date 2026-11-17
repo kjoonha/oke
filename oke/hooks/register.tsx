@@ -14,6 +14,7 @@ const board = atom({ plugin: 'oke', key: 'board' } as const, [] as BoardRepo[], 
 const expanded = atom({ plugin: 'oke', key: 'expanded' } as const, [] as string[], { shape: 'expanded-1' })
 const since = atom({ plugin: 'oke', key: 'since' } as const, {} as Record<string, Since>, { shape: 'since-1' })
 const todos = atom({ plugin: 'oke', key: 'todos' } as const, [] as Todo[], { shape: 'todos-1' })
+const answeredSeen = atom({ plugin: 'oke', key: 'answered' } as const, [] as string[], { shape: 'answered-1' })
 const bandOpen = atom({ plugin: 'oke', key: 'bandOpen' } as const, false as boolean, { shape: 'band-open-1' })
 
 // Module state starts over on a reload; session.start runs again then.
@@ -83,6 +84,30 @@ async function tick($: any) {
   } finally {
     ticking = false
   }
+}
+
+const COMPACT_NOTE = 'OKe task boundary: the report for this assignment is written. Keep the role, the job, '
+  + 'the assignment path and seq, decisions made and why, open questions and the files touched. '
+  + 'Drop tool output and exploration details.'
+
+/** At a task boundary (a report for an assignment's current seq, new since the last
+ * look) a PM, worker or reviewer compacts, unless the person turned auto-compact off. */
+async function compactAtBoundary($: any) {
+  if (role !== 'pm' && role !== 'worker' && role !== 'reviewer') return
+  const out = await oke($, ['boundary', '--pane', pane as string])
+  if (!out) return
+  const seen = await read($, answeredSeen)
+  const fresh = (out.answered as string[]).some(a => !seen.includes(a))
+  await update($, answeredSeen, () => out.answered)
+  if (!fresh) return
+  try {
+    const u = await $.session.usage({ breakdown: 'summary' })
+    if (u.context?.breakdown?.isAutoCompactEnabled === false) return
+  } catch {
+    return
+  }
+  // after this turn has settled, not inside its hook
+  $.clock.after(0, () => void $.session.compact({ instructions: COMPACT_NOTE }))
 }
 
 async function submitRetry($: any, kind: string) {
@@ -501,6 +526,7 @@ export const register: Register = on => {
     }
     if (e.reason !== 'error') {
       if (attempt > 0 || e.reason === 'aborted') await clearRetry($)
+      if (e.reason !== 'aborted') await compactAtBoundary($)
       return r
     }
     attempt += 1

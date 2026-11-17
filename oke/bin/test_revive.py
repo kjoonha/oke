@@ -481,6 +481,30 @@ class TestTick(ReviveBase):
         self.assertEqual((worker["job"], worker["seq"]), ("fix-a", 3))
 
 
+class TestBoundary(ReviveBase):
+    def boundary(self, pane):
+        self.fake({"agent list": [J({"agents": [AG("fix-a-w1", pane="w1:p5", session="s-w"),
+                                                AG("pm-toy", pane="w1:p3", session="s-pm"),
+                                                AG(None, pane="w7:p1", session="s-o")]})]})
+        self.assertEqual(self.cli("boundary", "--pane", pane), 0)
+        return json.loads(self.out)
+
+    def test_a_report_for_the_current_seq_is_a_boundary(self):
+        self.write_file(os.path.join(self.child_dir, "assignment.md"), "seq: 2\n---\nwork\n")
+        self.write_file(os.path.join(self.child_dir, "report.md"), "seq: 1\ntype: done\n---\nold\n")
+        self.assertEqual(self.boundary("w1:p5"), {"role": "worker", "answered": []})
+        self.write_file(os.path.join(self.child_dir, "report.md"), "seq: 2\ntype: done\n---\nnew\n")
+        self.assertEqual(self.boundary("w1:p5")["answered"], ["fix-a:2"])
+
+    def test_a_pm_answers_per_job_and_the_orchestrator_has_none(self):
+        folder = oke.pm_job_dir("fix-a")
+        os.makedirs(folder)
+        self.write_file(os.path.join(folder, "assignment.md"), "seq: 1\n---\nplan it\n")
+        self.write_file(os.path.join(folder, "report.md"), "seq: 1\ntype: plan\n---\nplan\n")
+        self.assertEqual(self.boundary("w1:p3"), {"role": "pm", "answered": ["fix-a:1"]})
+        self.assertEqual(self.boundary("w7:p1")["answered"], [])
+
+
 class TestApiRetry(ReviveBase):
     def retry(self, pane, *args):
         self.fake({"agent list": [J({"agents": [AG("fix-a-w1", pane="w1:p5", session="s-w"),

@@ -519,7 +519,8 @@ class TestSpawn(SpawnBase):
         other = {"hooks": [{"type": "command", "command": "node caveman.mjs"}]}
         with open(os.path.join(conf, "settings.json"), "w") as f:
             json.dump({"hooks": {"SessionStart": [other, herdr_group], "Stop": [other]},
-                       "env": {"PYTHONUTF8": "1"}, "enabledPlugins": {"x@y": True}}, f)
+                       "env": {"PYTHONUTF8": "1"}, "enabledPlugins": {"x@y": True},
+                       "autoCompactWindow": 400000}, f)
         old = os.environ.get("CLAUDE_CONFIG_DIR")
         os.environ["CLAUDE_CONFIG_DIR"] = conf
         try:
@@ -537,6 +538,7 @@ class TestSpawn(SpawnBase):
         with open(args[args.index("--settings") + 1]) as f:
             lean = json.load(f)
         self.assertEqual(lean["hooks"], {"SessionStart": [herdr_group]})
+        self.assertEqual(lean["autoCompactWindow"], 400000)
         self.assertEqual(lean["env"], {"PYTHONUTF8": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                                        "OKE_HOME": oke.oke_home()})
         self.assertNotIn("--setting-sources", oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p"))

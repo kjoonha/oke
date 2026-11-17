@@ -39,6 +39,8 @@ declare module 'claude-code' {
       todos: Shaped<Todo[]>
       /** Whether the band's folded job rows are open. */
       bandOpen: Shaped<boolean>
+      /** The `job:seq` assignments this agent had answered at its last task boundary. */
+      answered: Shaped<string[]>
     }
   }
 }
