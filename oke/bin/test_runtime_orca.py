@@ -44,6 +44,8 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(s(dict(WORKING, activity="idle")), "idle")
         self.assertEqual(s(dict(WORKING, activity="waiting")), "blocked")  # a permission prompt
         self.assertEqual(s(dict(WORKING, activity=None)), "working")  # unknown is never dead
+        settled = {"liveness": "unverifiable", "stage": "settled", "state": "succeeded"}
+        self.assertEqual(s(settled), "idle")  # seen live: a PM done with its task
         self.assertIsNone(s(dict(WORKING, liveness="exited")))
         self.assertIsNone(s(dict(WORKING, terminalState="released")))
 

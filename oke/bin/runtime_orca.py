@@ -98,6 +98,10 @@ def status_of(show):
         return None
     if show.get("terminalState") in ("released", "closed"):
         return None
+    # A settled task waits for the next one; Orca then often reports liveness
+    # "unverifiable" and no activity for a chat worker (seen live).
+    if show.get("stage") == "settled" and show.get("activity") in (None, "idle"):
+        return "idle"
     return STATUS.get(show.get("activity"), "working")
 
 
