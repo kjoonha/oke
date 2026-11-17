@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { promptRole } from './register'
 
 type Run = { argv: readonly string[] }
 
@@ -465,10 +466,20 @@ test('a reviewer writes only its own folder and runs only read-only git', async 
     expect((await call(bad)).deny).toMatch(/^OKe reviewers/)
   }
   for (const ok of [{ tool: 'Write', file_path: '\\oke\\jobs\\j\\w1\\report.md' }, { tool: 'Read', file_path: '/repo/a' },
-    { tool: 'Bash', command: 'git -C r diff main...HEAD' }, { tool: 'Bash', command: 'git log --oneline -5' }]) {
+    { tool: 'Bash', command: 'git -C r diff main...HEAD' }, { tool: 'Bash', command: 'git log --oneline -5' },
+    { tool: 'Bash', command: '"C:/o/orca.exe" orchestration send --type worker_done --body "pass; no findings"' }]) {
     expect((await call(ok)).deny).toBeUndefined()
   }
   tickRole = 'worker'
+})
+
+test('the first or revive prompt names the role and folder', () => {
+  expect(promptRole('You are a dispatched worker...\nUse the oke:reviewer skill. Your assignment file is '
+    + 'C:/oke/jobs/j/j-rv/assignment.md. Read it first, then follow it.'))
+    .toEqual({ role: 'reviewer', folder: 'C:/oke/jobs/j/j-rv' })
+  expect(promptRole('You were restarted after a crash. Use the oke:pm skill. Re-read your assignment file '
+    + '/h/repos/r/pm/assignment.md and your board.md')).toEqual({ role: 'pm', folder: '/h/repos/r/pm' })
+  expect(promptRole('please use the oke skill')).toBeNull()
 })
 
 test('the orchestrator notifies once when a new item waits on the person', async ($, on) => {
