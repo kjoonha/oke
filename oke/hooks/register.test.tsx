@@ -442,6 +442,35 @@ test('a PM, worker or reviewer cannot run git commands that lose or publish work
   expect(ran.length).toBe(8)
 })
 
+test('inside Orca the terminal handle is the place', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { ORCA_TERMINAL_HANDLE: 'structworker_1' })
+  const runs: Run[] = []
+  engine(on, runs, [])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(runs[0]?.argv[runs[0].argv.indexOf('--pane') + 1]).toBe('structworker_1')
+})
+
+test('a reviewer writes only its own folder and runs only read-only git', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { ORCA_TERMINAL_HANDLE: 'structworker_2' })
+  tickRole = 'reviewer'
+  engine(on, [], [])
+  on('tool.call', () => ({ result: { stdout: '' } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const call = (e: any) => $.tool.call(e as any) as Promise<any>
+  for (const bad of [{ tool: 'Edit', file_path: '/repo/calc.py' }, { tool: 'Write', file_path: '/oke/jobs/j/w1x/report.md' },
+    { tool: 'Bash', command: 'python -c "open(1)"' }, { tool: 'Bash', command: 'git diff --output=x' },
+    { tool: 'Bash', command: 'git diff && rm -rf .' }, { tool: 'Bash', command: 'git apply p.diff' }]) {
+    expect((await call(bad)).deny).toMatch(/^OKe reviewers/)
+  }
+  for (const ok of [{ tool: 'Write', file_path: '\\oke\\jobs\\j\\w1\\report.md' }, { tool: 'Read', file_path: '/repo/a' },
+    { tool: 'Bash', command: 'git -C r diff main...HEAD' }, { tool: 'Bash', command: 'git log --oneline -5' }]) {
+    expect((await call(ok)).deny).toBeUndefined()
+  }
+  tickRole = 'worker'
+})
+
 test('the orchestrator notifies once when a new item waits on the person', async ($, on) => {
   const clock = mock.clock(on)
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })

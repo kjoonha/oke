@@ -204,6 +204,24 @@ export function gitDenied(command: string): string | null {
     + 'Merges go through `oke job merge`; if you really need it, report a question instead.' : null
 }
 
+const REVIEWER_GIT = /^\s*git(?:\s+(?:-C\s+\S+|-c\s+\S+|--no-pager))*\s+(?:diff|log|show|status)\b/
+
+/** The refusal for a reviewer's tool call that could change the repository, else null.
+ * The reviewer's launch flags say the same; this holds where no flags reach the agent
+ * (Orca starts it itself). It writes only its own folder (report, board). */
+export function reviewerDenied(tool: string, input: any, own: string | null): string | null {
+  if (tool === 'Edit' || tool === 'Write' || tool === 'NotebookEdit') {
+    const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const target = norm(String(input.file_path ?? input.notebook_path ?? ''))
+    if (own && target.startsWith(norm(own) + '/')) return null
+    return 'OKe reviewers change nothing: write only report.md and board.md in your own folder.'
+  }
+  if (tool !== 'Bash') return null
+  const cmd = unquoted(String(input.command ?? ''))
+  if (REVIEWER_GIT.test(cmd) && !/[;&|`<>]|\$\(|--output/.test(cmd)) return null
+  return 'OKe reviewers run only read-only git: git diff, log, show or status, one command, without --output.'
+}
+
 /** The ledger's merge state beside the job name. */
 const LEDGER: Record<string, [string, string]> = {
   unverified: ['unverified', 'yellow'],
@@ -452,9 +470,10 @@ async function openBoard($: any) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    // herdr pane, else this Claude session (OKe without herdr runs children as --bg sessions)
+    // herdr pane, else Orca terminal or chat, else this Claude session (bg children)
     // the process env has no session id (seen live): ask the session itself
-    pane = (await $.env.get('HERDR_PANE_ID')) || `session:${await $.session.id()}`
+    pane = (await $.env.get('HERDR_PANE_ID')) || (await $.env.get('ORCA_TERMINAL_HANDLE'))
+      || `session:${await $.session.id()}`
     if (!pane) return r
     await $.command.register({ name: 'oke-board', description: 'Show the OKe agents and their boards' })
     // A process that died during a backoff leaves its marker; this one starts clean.
@@ -490,6 +509,10 @@ export const register: Register = on => {
   on('tool.call', async ($, e: any, next) => {
       if (e.tool === 'Bash' && (role === 'pm' || role === 'worker' || role === 'reviewer')) {
         const denied = gitDenied(String(e.command ?? ''))
+        if (denied) return { deny: denied }
+      }
+      if (role === 'reviewer') {
+        const denied = reviewerDenied(e.tool, e, folder)
         if (denied) return { deny: denied }
       }
       const ran: any = await next(e)

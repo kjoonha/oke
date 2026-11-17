@@ -34,7 +34,7 @@ Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`.
 ## Start
 
 1. Run `$OKE status`.
-2. `herdr.inside` false: say OKe cannot start its agents here, stop. (Outside herdr OKe runs them as background sessions, and this is true.)
+2. `herdr.inside` false: say OKe cannot start its agents here, stop. (Outside herdr OKe runs them as background sessions, or as Orca workers inside Orca, and this is true.)
 3. `herdr.missing` not empty: name the missing herdr commands, stop (only in a herdr pane).
 4. `orchestrator_conflict` set: say which pane already runs the orchestrator, stop.
 5. Run `$OKE status --claim`.
@@ -249,5 +249,6 @@ With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merg
 
 - Write a decision or a user instruction into the assignment or intake file the moment you get it. Your context can be compacted; the files cannot.
 - After compaction, run `$OKE status` and the queue, and start a wait for each PM with open jobs.
-- `$OKE attach <agent>` prints `"attached": false` and a `hint` when OKe cannot show the agent itself (background sessions): give the user that command to run in a terminal. `$OKE keys` fails there too: for a dialog, offer only that command.
+- `$OKE attach <agent>` prints `"attached": false` and a `hint` when OKe cannot show the agent itself (background sessions, Orca workers): give the user that hint. `$OKE keys` fails there too: for a dialog, offer only that command.
+- Inside Orca, Orca also wakes you with its own messages from your PMs (`worker_done`, `escalation`). They only wake you: read the PM's report.md and handle it as the wait would, then start the wait again. Never answer them with `orca orchestration` commands. OKe needs Orca's Agent Orchestration setting on, and the OKe plugin installed in Claude Code (Orca starts the agents itself, without OKe's `--plugin-dir`).
 - Do not send text starting with `/` through `$OKE send` from Git Bash; it is rewritten into a Windows path.
