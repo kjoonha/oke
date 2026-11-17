@@ -6,6 +6,8 @@ export type BoardNode = {
   report: string | null
   board: string
   revives: number
+  /** US dollars the agent's session has cost, from its usage.json; null before its first turn. */
+  cost?: number | null
   /** The agent's own task list (TaskCreate/TaskUpdate/TodoWrite), from its todos.json. */
   todos: Todo[]
 }
@@ -35,6 +37,8 @@ declare module 'claude-code' {
       expanded: Shaped<string[]>
       since: Shaped<Record<string, Since>>
       todos: Shaped<Todo[]>
+      /** Whether the band's folded job rows are open. */
+      bandOpen: Shaped<boolean>
     }
   }
 }

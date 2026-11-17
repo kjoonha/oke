@@ -1283,10 +1283,14 @@ def board_node(role, name, key, record, agents):
     # the agent's own task list, written by its OKe mod
     todos = read_json(os.path.join(folder, "todos.json"), []) if folder else []
     todos = [t for t in todos if isinstance(t, dict)] if isinstance(todos, list) else []
+    # what the agent's session has cost so far, written by its OKe mod after each turn
+    usage = read_json(os.path.join(folder, "usage.json"), {}) if folder else {}
+    cost = usage.get("usd") if isinstance(usage, dict) else None
     return {"agent": name, "role": role, "status": a.get("agent_status") if a else "dead",
             "pane": (a or {}).get("pane_id") or record.get("pane"),
             "report": (report or {}).get("type"), "board": board,
             "revives": record.get("revives", 0),
+            "cost": cost if isinstance(cost, (int, float)) else None,
             "todos": [{"content": str(t.get("content", "")), "status": str(t.get("status", "pending"))}
                       for t in todos]}
 
@@ -1363,6 +1367,9 @@ def cmd_tick(args):
         role, name, key, record = me
         out["role"], out["agent"] = role, name
         out["folder"] = agent_folder(role, name, key, record)
+        if role in ("worker", "reviewer"):  # for the status line
+            out["job"] = record.get("job")
+            out["seq"] = (read_header(os.path.join(out["folder"], "assignment.md")) or {}).get("seq")                 if out["folder"] else None
         if role == "orchestrator":
             targets = [r for r in records(state) if r[0] == "pm"]
         elif role == "pm":
