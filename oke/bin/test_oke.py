@@ -120,7 +120,7 @@ class TestState(Base):
         self.write("home/config.json", '{"autonomy": "full", "models": {"worker": "haiku"}}')
         c = oke.load_config()
         self.assertEqual(c["autonomy"], "full")
-        self.assertEqual(c["models"], {"pm": "opus", "worker": "haiku", "reviewer": "sonnet"})
+        self.assertEqual(c["models"], {"pm": "opus", "worker": "haiku", "reviewer": "opus"})
         self.assertFalse(c["wiki_path"].startswith("~"))
 
     def test_broken_state_is_set_aside(self):
@@ -571,7 +571,7 @@ class TestSpawn(SpawnBase):
         c["autonomy"] = "balanced"
         args = oke.launch_args("worker", c, "/h", "/p")
         self.assertIn("bypassPermissions", args)
-        self.assertEqual(args[args.index("--model") + 1], "sonnet")
+        self.assertEqual(args[args.index("--model") + 1], "opus")
         self.assertNotIn("--bare", args)
         r = oke.launch_args("reviewer", c, "/h", "/p")
         self.assertNotIn("bypassPermissions", r)
@@ -610,9 +610,9 @@ class TestSpawn(SpawnBase):
         # effort follows the user's session settings, as OMC's agents inherit it
         self.assertEqual(lean["effortLevel"], "high")
         self.assertEqual(lean["modelSettings"], {"claude-opus-5-5": {"effortLevel": "medium"}})
-        self.assertEqual(args[args.index("--model") + 1], "sonnet")
-        picked = oke.launch_args("worker", c, self.home, "/p", header={"model": "opus"})
-        self.assertEqual(picked[picked.index("--model") + 1], "opus")  # the job's assignment chose it
+        self.assertEqual(args[args.index("--model") + 1], "opus")
+        picked = oke.launch_args("worker", c, self.home, "/p", header={"model": "sonnet"})
+        self.assertEqual(picked[picked.index("--model") + 1], "sonnet")  # the job's assignment chose it
         self.assertEqual(lean["env"], {"PYTHONUTF8": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                                        "OKE_HOME": oke.oke_home()})
         # the OKe folders come from the settings file: --add-dir stops at a trust dialog

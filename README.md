@@ -48,7 +48,7 @@ herdr pane 에서 Claude Code 를 켜고 `/oke:start`. 그 세션이 orchestrato
 {
   "autonomy": "balanced",
   "wiki_path": "~/.oke/wiki",
-  "models": {"pm": "opus", "worker": "sonnet", "reviewer": "sonnet"},
+  "models": {"pm": "opus", "worker": "opus", "reviewer": "opus"},
   "agents": {"worker": "claude", "reviewer": "claude"},
   "interview_threshold": 0.2,
   "interview_max_rounds": 10,

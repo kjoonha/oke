@@ -63,7 +63,7 @@ def load_config():
     config = {
         "autonomy": "balanced",
         "wiki_path": os.path.join(home, "wiki"),
-        "models": {"pm": "opus", "worker": "sonnet", "reviewer": "sonnet"},
+        "models": {"pm": "opus", "worker": "opus", "reviewer": "opus"},
         "agents": {"worker": "claude", "reviewer": "claude"},  # which CLI runs each role
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
         "max_review_rounds": 10,  # a job's reviews stop there and the PM asks the user; null: no limit
@@ -528,7 +528,7 @@ def cmd_rt(args):
 def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header=None):
     """`header` is the agent's assignment header: its `tools:`, `mcp:` and `plugins:`
     (comma separated) are what the PM switched on for this job."""
-    model = (header or {}).get("model") or config["models"].get(role, "sonnet")
+    model = (header or {}).get("model") or config["models"].get(role, "opus")
     args = ["--model", model, "--plugin-dir", plugin_dir]
     # Measured: the user's plugins, hooks and MCP servers add about 36k tokens to every
     # child's context. Without a settings file, start as before so the herdr hook stays.
