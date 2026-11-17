@@ -209,13 +209,15 @@ When the user gives a job up: give the PM `kind: cancel` (steps 2, 4, 5 and 6 of
 |---|---|---|
 | Intake done | Assign `kind: plan` | `planning` |
 | PM reports the plan (`report_done`, phase `planning`) | Read `<job_dir>/plan.md`. If its 검증 명령 section is empty, send it back (`kind: plan`, say why). Otherwise it becomes a `plan` item | `awaiting_approval` |
-| User approves | Assign `kind: execute` | `working` |
+| User approves | Assign `kind: execute`; its 이번 지시 names the lane (`lane: <lane>`) | `working` |
 | User wants changes | Assign `kind: plan` with the requested changes | `planning` |
-| PM reports work reviewed (`report_done`, phase `working` or `reviewing`) | It becomes a `merge` item | `awaiting_merge` |
+| PM reports work reviewed (`report_done`, phase `working` or `reviewing`) | Lane `trivial`: the user approved the merge with the plan, so assign `kind: merge` now and tell the user in one line. Otherwise it becomes a `merge` item | `merging` for `trivial`, else `awaiting_merge` |
 | User says merge | Assign `kind: merge` | `merging` |
 | PM reports merged (`report_done`, phase `merging`) | Update the shared wiki from the report's 배운 것 (공용) (see "Shared wiki"), `$OKE job phase <job> done`, `$OKE job archive <job>`, tell the user what changed | |
 
 Plan approval question: put a short summary of the plan in the option `preview`, mention the plan file path, and offer: approve / request changes / discuss in the PM pane (then `$OKE attach <pm>` and defer).
+
+The plan's lane (`lane:` at the top of its 접근, also on the board) changes this question. `trivial`: one line of plan, and the offer is approve and merge / approve, ask me before the merge / request changes. "Ask me before the merge" makes it `small`: run `$OKE job lane <job> small` before you assign `kind: execute`. A lane you think is wrong (too small for what the plan touches): say so in the question. When a trivial job's PM asks because the job grew, the user's answer approves the merge or not: treat a yes as a `merge` item answered merge.
 
 Merge question: summary, branch name, number of changed files, and the checks recorded so far (`$OKE ledger show <job>`: who checked which commit, pass or fail). Offer: merge / hold / look myself. A merge counts as done only after the PM verified it on the merged result (`merge: verified` in the ledger); when the PM reports merged, check that before `job phase done`. When the PM asks because the main branch moved on during the check, the user may accept the merge as it is: put that answer into the PM's assignment; the PM records it with `--accept`.
 

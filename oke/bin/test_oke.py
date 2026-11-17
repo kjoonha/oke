@@ -189,6 +189,24 @@ class TestState(Base):
         other = self.git_repo("other/api")
         self.assertEqual(os.path.basename(oke.wiki_dir(oke.repo_key(other))), oke.repo_name(oke.repo_key(other)))
 
+    def test_lane_is_set_while_planning_and_trivial_merges_without_a_second_ask(self):
+        repo = self.git_repo("r")
+        for job in ("tiny", "grew", "big"):
+            self.assertEqual(self.cli("job", "new", job, "--repo", repo), 0)
+            self.advance(job, "planning")
+        for job in ("tiny", "grew"):
+            self.assertEqual(self.cli("job", "lane", job, "trivial"), 0, self.err)
+        self.assertNotEqual(self.cli("job", "lane", "tiny", "huge"), 0)  # not a lane
+        self.assertEqual(oke.load_state()["jobs"]["tiny"]["lane"], "trivial")
+        for job in ("tiny", "grew", "big"):
+            self.advance(job, "working")
+        self.assertEqual(self.cli("job", "phase", "tiny", "merging"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "big", "merging"), 1)  # normal: the user approves first
+        self.assertEqual(self.cli("job", "lane", "big", "small"), 1)  # no shrinking once work started
+        self.assertEqual(self.cli("job", "lane", "grew", "small"), 0, self.err)  # a lane may grow
+        self.assertEqual(self.cli("job", "phase", "grew", "merging"), 1)  # and loses its merge approval
+        self.assertEqual(self.cli("job", "lane", "tiny", "normal"), 1)  # not once merging
+
     def test_job_new_phase_archive(self):
         repo = self.git_repo("r")
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 0)
@@ -564,7 +582,12 @@ class TestSpawn(SpawnBase):
         self.assertEqual(lean["autoCompactWindow"], 400000)
         self.assertEqual(lean["env"], {"PYTHONUTF8": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                                        "OKE_HOME": oke.oke_home()})
-        self.assertNotIn("--setting-sources", oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p"))
+        # the OKe folders come from the settings file: --add-dir stops at a trust dialog
+        self.assertEqual(lean["permissions"]["additionalDirectories"], [self.home, c["wiki_path"]])
+        self.assertNotIn("--add-dir", args)
+        plain = oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p")
+        self.assertNotIn("--setting-sources", plain)
+        self.assertEqual(plain.count("--add-dir"), 2)
         self.assertNotIn("Edit", args[args.index("--tools") + 1].split(","))
         for role in ("pm", "worker", "reviewer"):
             tools = oke.launch_args(role, c, self.home, "/p")

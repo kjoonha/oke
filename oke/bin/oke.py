@@ -405,7 +405,7 @@ def header_list(header, field):
     return [x.strip() for x in str((header or {}).get(field) or "").split(",") if x.strip()]
 
 
-def write_lean_settings(folder, plugins=()):
+def write_lean_settings(folder, plugins=(), dirs=()):
     """Settings for a lean child: only the user's herdr hooks (herdr learns the session
     id from them, revive needs it), env, and the plugins its assignment asks for.
     Returns the file path, or None if unwritable."""
@@ -424,6 +424,10 @@ def write_lean_settings(folder, plugins=()):
         settings["autoCompactWindow"] = user["autoCompactWindow"]
     if plugins:
         settings["enabledPlugins"] = dict((p, True) for p in plugins)
+    if dirs:
+        # `--add-dir` stops every new session at a trust dialog for a folder never
+        # trusted (seen live with a fresh OKe home); this settings key does not
+        settings["permissions"] = {"additionalDirectories": list(dirs)}
     path = os.path.join(folder, "lean-settings.json")
     try:
         with io.open(path, "w", encoding="utf-8") as f:
@@ -496,13 +500,14 @@ def cmd_rt(args):
 def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header=None):
     """`header` is the agent's assignment header: its `tools:`, `mcp:` and `plugins:`
     (comma separated) are what the PM switched on for this job."""
-    args = ["--model", config["models"].get(role, "sonnet"),
-            "--add-dir", home, "--add-dir", config["wiki_path"],
-            "--plugin-dir", plugin_dir]
+    args = ["--model", config["models"].get(role, "sonnet"), "--plugin-dir", plugin_dir]
     # Measured: the user's plugins, hooks and MCP servers add about 36k tokens to every
     # child's context. Without a settings file, start as before so the herdr hook stays.
     folder = folder or home
-    settings = config.get("lean_launch", True) and write_lean_settings(folder, header_list(header, "plugins"))
+    dirs = [home, config["wiki_path"]]
+    settings = config.get("lean_launch", True) and write_lean_settings(folder, header_list(header, "plugins"), dirs)
+    if not settings:
+        args += ["--add-dir", home, "--add-dir", config["wiki_path"]]
     if settings:
         args += ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", settings]
         tools = ROLE_TOOLS.get(role, ROLE_TOOLS["worker"])
@@ -1356,6 +1361,7 @@ def board_tree(state, agents, only_key=None):
             info = state["jobs"][job]
             waiting = pending_item(job, info)
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
+                         "lane": info.get("lane") or "normal",
                          "merge": merge_state(job)[0],
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None})
         tree.append({"repo": repo_name(key), "key": key, "jobs": jobs,
@@ -2094,6 +2100,10 @@ def cmd_ledger(args):
 # Phases that pass a user gate may only be entered from the phase before that gate
 # (or stay). Not proof of a user's approval, but a PM or an orchestrator slip cannot
 # skip the approval step. Phases not listed here are free.
+# trivial: a subagent does the work, one approval covers plan and merge;
+# small: a worker pane, a review subagent; normal: worker and reviewer panes
+LANES = ("trivial", "small", "normal")
+
 PHASE_FROM = {
     "planning": ("intake", "planning", "awaiting_approval", "working", "reviewing", "awaiting_merge"),
     "working": ("awaiting_approval", "working", "reviewing", "awaiting_merge", "merging"),
@@ -2218,6 +2228,9 @@ def job_locked(args):
             return fail("bad phase %r: one of %s" % (args.phase, ", ".join(PHASES)))
         now = state["jobs"][args.slug].get("phase")
         allowed = PHASE_FROM.get(args.phase)
+        if args.phase == "merging" and state["jobs"][args.slug].get("lane") == "trivial":
+            # the user approved the plan and the merge in one go
+            allowed = allowed + ("working", "reviewing")
         if allowed is not None and now not in allowed:
             return fail("job %s cannot go from %s to %s: allowed only from %s"
                         % (args.slug, now, args.phase, ", ".join(allowed)))
@@ -2230,6 +2243,16 @@ def job_locked(args):
             if problem:
                 return fail(problem)
         state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
+        save_state(state)
+        return 0
+    if args.action == "lane":
+        info = state["jobs"][args.slug]
+        grows = LANES.index(args.lane) > LANES.index(info.get("lane") or "normal")
+        if info.get("phase") not in ("intake", "planning", "awaiting_approval") and not (
+                grows and info.get("phase") in ("working", "reviewing")):
+            return fail("job %s: in phase %s a lane can only grow, before the merge"
+                        % (args.slug, info.get("phase")))
+        state["jobs"][args.slug]["lane"] = args.lane
         save_state(state)
         return 0
     if args.action == "defer":
@@ -2433,6 +2456,9 @@ def build_parser():
     archive.add_argument("slug")
     defer = job_sub.add_parser("defer")
     defer.add_argument("slug")
+    lane = job_sub.add_parser("lane", help="the job's size lane, which the PM decides while planning")
+    lane.add_argument("slug")
+    lane.add_argument("lane", choices=LANES)
     merge = job_sub.add_parser("merge")
     merge.add_argument("slug")
     job_sub.add_parser("tree", help="the tree a review of a job without a worktree names").add_argument("slug")
