@@ -14,6 +14,7 @@ const board = atom({ plugin: 'oke', key: 'board' } as const, [] as BoardRepo[], 
 const expanded = atom({ plugin: 'oke', key: 'expanded' } as const, [] as string[], { shape: 'expanded-1' })
 const since = atom({ plugin: 'oke', key: 'since' } as const, {} as Record<string, Since>, { shape: 'since-1' })
 const todos = atom({ plugin: 'oke', key: 'todos' } as const, [] as Todo[], { shape: 'todos-1' })
+const bandOpen = atom({ plugin: 'oke', key: 'bandOpen' } as const, false as boolean, { shape: 'band-open-1' })
 
 // Module state starts over on a reload; session.start runs again then.
 let pane: string | undefined
@@ -218,7 +219,7 @@ type Self = { model: string; percent?: number; cost?: number }
 /** The status line: for orchestrator and PM the work they watch, for a child its own job. */
 function statusParts(role: string, tree: BoardRepo[], self: Self): Part[] {
   const own = [
-    self.percent !== undefined ? { text: `ctx ${self.percent}%`, drop: 3 } : null,
+    self.percent !== undefined ? { text: `ctx ${self.percent}%`, drop: 2 } : null,
     self.cost !== undefined ? { text: usd(self.cost), drop: 4 } : null,
   ]
   if (role === 'worker' || role === 'reviewer') {
@@ -229,20 +230,29 @@ function statusParts(role: string, tree: BoardRepo[], self: Self): Part[] {
       ...own,
     ].filter((p): p is Part => p !== null)
   }
-  const jobs = tree.flatMap(r => r.jobs).filter(j => j.phase !== 'done' && j.phase !== 'failed')
   const waiting = tree.flatMap(r => r.jobs).filter(j => j.pending).length
-  const all = nodes(tree)
-  const dead = all.filter(n => n.status === 'dead').length
   return [
     { text: `OKe ${role}`, drop: 0 },
-    waiting ? { text: `내 차례 ${waiting}`, drop: 1 } : null,
-    all.length ? { text: `살아있음 ${all.length - dead}/${all.length}`, drop: 2 } : null,
+    waiting ? { text: `waiting on you ${waiting}`, drop: 1 } : null,
     ...own,
-    ...jobs.map((j, i) => {
-      const cost = j.agents.reduce((sum, n) => sum + (n.cost ?? 0), 0)
-      return { text: `${j.job} ${STEPS[step(j)] ?? '끝'}${cost ? ` ${usd(cost)}` : ''}`, drop: 6 + i }
-    }),
   ].filter((p): p is Part => p !== null)
+}
+
+const STEPS_EN = ['plan', 'approve', 'work', 'review', 'merge', 'verify']
+const isOpen = (j: BoardJob) => j.phase !== 'done' && j.phase !== 'failed'
+/** More open jobs than this fold under one row the person clicks open. */
+const FOLD_AT = 3
+
+/** The org chart under the status line: a repo with its PM, then one row per open job
+ * with its step, its cost and its agents. A PM sees its own repo, so no repo row. */
+function orgRows(role: string, tree: BoardRepo[]): { repo?: BoardRepo; job?: BoardJob; last: boolean }[] {
+  const rows: { repo?: BoardRepo; job?: BoardJob; last: boolean }[] = []
+  for (const repo of tree) {
+    const jobs = repo.jobs.filter(isOpen)
+    if (role === 'orchestrator' && (repo.pm || jobs.length)) rows.push({ repo, last: false })
+    jobs.forEach((job, i) => rows.push({ job, last: i === jobs.length - 1 }))
+  }
+  return rows
 }
 
 async function selfUsage($: any): Promise<Self> {
@@ -254,32 +264,51 @@ async function selfUsage($: any): Promise<Self> {
   }
 }
 
-// ---------------------------------------------------------------- conductor band
-// A 10x8 pixel conductor drawn as a 10x4 Raster: each cell's upper half block takes
-// the top pixel as its foreground and the bottom pixel as its background.
+// ---------------------------------------------------------------- mascot band
+// A 12x8 pixel blob with headphones and a neon visor, drawn as a 12x4 Raster: each
+// cell's upper half block takes the top pixel as its foreground, the bottom as background.
 type Mood = 'conduct' | 'rest' | 'wave' | 'stop'
-const W = 10
+const W = 12
 const DEFAULT = 0x01000000
 const PALETTE: Record<string, number> = {
-  h: 0x3b2a20, s: 0xf2c9a0, k: 0x23233a, w: 0xffffff, b: 0xf5f5f5, n: 0xffd24a, z: 0x8a8fa8, r: 0xe04848, '!': 0xffb020,
+  p: 0xff7ad9, c: 0xb9a6ff, v: 0x2de2e6, w: 0xffffff, m: 0xff5c8a, d: 0x2b2140,
+  n: 0xffe66d, y: 0x6ff7ff, h: 0xff4d8d, z: 0x8a8fa8, r: 0xff5c5c,
 }
-const BODY = ['..kwwk....', '..kkkk....', '..k..k....']
+const BLOB = [
+  '..pppppp....',
+  '.p.cccc.p...',
+  '.pccccccp...',
+  '.pvwvvwvp...',
+  '..cccccc....',
+  '..ccmmcc....',
+  '..cccccc....',
+  '..c....c....',
+]
+/** `frame` with pixels set at [row, col, color]. */
+function put(frame: string[], dots: [number, number, string][]): string[] {
+  const rows = frame.map(r => r.split(''))
+  for (const [r, c, ch] of dots) rows[r]![c] = ch
+  return rows.map(r => r.join(''))
+}
+/** The blob bobbed one pixel down, its feet squashed. */
+const BOB = ['............', ...BLOB.slice(0, 7)]
+const SLEEPY = put(BLOB, [[3, 2, 'd'], [3, 3, 'd'], [3, 4, 'c'], [3, 5, 'c'], [3, 6, 'd'], [3, 7, 'd']])
 const FRAMES: Record<Mood, string[][]> = {
   conduct: [
-    ['...hh....n', '..hssh..b.', '...ss..b..', '..kwwkkw..', '.skwwk....', ...BODY],
-    ['...hh.....', '..hssh....', '...ss....n', '..kwwk....', '.skwwkkw..', '..kwwk..b.', '..kkkk...b', '..k..k....'],
-    ['.n.hh.....', '..hssh..b.', '...ss..b..', '..kwwkkw..', '.skwwk....', ...BODY],
-    ['...hh.....', '..hssh...n', '...ss.....', '..kwwk....', '.skwwkkw..', '..kwwk..b.', '..kkkk...b', '..k..k....'],
+    put(BLOB, [[0, 10, 'n'], [2, 11, 'y'], [5, 9, 'w']]),
+    put(BOB, [[1, 11, 'y'], [3, 10, 'n'], [0, 9, 'w']]),
+    put(BLOB, [[1, 9, 'y'], [4, 11, 'n'], [0, 11, 'w']]),
+    put(BOB, [[0, 10, 'n'], [2, 9, 'w'], [5, 11, 'y']]),
   ],
   rest: [
-    ['...hh.....', '..hssh..z.', '...ss.....', '..kwwk....', '.skwwks...', ...BODY],
-    ['...hh...z.', '..hssh....', '...ss.....', '..kwwk....', '.skwwks...', ...BODY],
+    put(SLEEPY, [[2, 10, 'z']]),
+    put(SLEEPY, [[1, 10, 'z'], [0, 11, 'z']]),
   ],
   wave: [
-    ['...hh..s.!', '..hssh.k..', '...ss..k..', '..kwwkk...', '.skwwk....', ...BODY],
-    ['...hh...s!', '..hssh..k.', '...ss..k..', '..kwwkk...', '.skwwk....', ...BODY],
+    put(BLOB, [[4, 8, 'c'], [3, 9, 'c'], [2, 10, 'c'], [0, 10, 'h'], [0, 11, 'h']]),
+    put(BLOB, [[4, 8, 'c'], [4, 9, 'c'], [3, 10, 'c'], [1, 11, 'h']]),
   ],
-  stop: [['...hh.....', '..hssh....', '...ss.....', '..rwwr....', '.srwwrs...', '..rwwr....', '..rrrr....', '..r..r....']],
+  stop: [put(BLOB.map(r => r.replace(/c/g, 'r')), [[3, 3, 'd'], [3, 6, 'd']])],
 }
 
 function cells(pixels: string[]): string {
@@ -373,19 +402,64 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (!role || e.props.hasSurvey) return next(e)
-    const { Box, Text, Raster } = $.ui.resolve(e) as any
+    const { Box, Text, Raster, Button } = $.ui.resolve(e) as any
     const tree = await read($, board)
+    const unfolded = await read($, bandOpen)
     mood = moodOf(tree, e.props.isWorking)
     bandId = e.requestId
-    const words: Record<Mood, string> = { conduct: '연주 중', rest: '쉬는 중', wave: '내 차례!', stop: '멈춤' }
-    const columns = (e as any).viewport?.columns as number | undefined
-    const line = fit(statusParts(role, tree, await selfUsage($)), columns ? columns - W - 1 : undefined)
+    const words: Record<Mood, [string, string | undefined]> = {
+      conduct: ['♫ vibing', 'magenta'], rest: ['☾ chilling', 'cyan'], wave: ['✦ your turn!', 'yellow'], stop: ['✗ stuck', 'red'],
+    }
+    const width = e.props.bodyColumns - W - 1
+    const line = fit(statusParts(role, tree, await selfUsage($)), width)
+
+    const agentDots = (job: BoardJob) => job.agents.map(n => {
+      const [mark, , color] = STATUS[n.status] ?? ['·', n.status, undefined]
+      const name = n.agent.startsWith(`${job.job}-`) ? n.agent.slice(job.job.length + 1) : n.agent
+      return <Text color={color} dimColor={n.status === 'idle'}>{` ${name}${mark}`}</Text>
+    })
+    const org = role === 'worker' || role === 'reviewer' ? [] : orgRows(role, tree)
+    const jobCount = org.filter(r => r.job).length
+    const folded = jobCount > FOLD_AT && !unfolded
+    // folded, the repos and their PMs stay: who is alive is still on screen
+    const chart = org.filter(r => !folded || r.repo).map(r => {
+      if (r.repo) {
+        const pm = r.repo.pm
+        const [mark, , color] = pm ? STATUS[pm.status] ?? ['·', pm.status, undefined] : ['', '', undefined]
+        return (
+          <Text wrap="truncate-end">
+            <Text bold>{r.repo.repo.replace(/-[0-9a-f]{6}$/, '')}</Text>
+            {pm ? <Text color={color} dimColor={pm.status === 'idle'}>{` PM${mark}`}</Text> : ''}
+          </Text>
+        )
+      }
+      const job = r.job as BoardJob
+      const cost = job.agents.reduce((sum, n) => sum + (n.cost ?? 0), 0)
+      return (
+        <Text wrap="truncate-end">
+          <Text dimColor>{role === 'orchestrator' ? (r.last ? '└ ' : '├ ') : '• '}</Text>
+          {job.job}
+          <Text color={job.pending ? 'yellow' : 'cyan'}>{` ${job.pending ? 'waiting' : STEPS_EN[step(job)] ?? 'done'}`}</Text>
+          {cost ? <Text dimColor>{` ${usd(cost)}`}</Text> : ''}
+          {agentDots(job)}
+        </Text>
+      )
+    })
+    const working = org.filter(r => r.job?.agents.some(n => n.status === 'working')).length
+    const toggle = jobCount > FOLD_AT
+      ? [<Button key="jobs" plain onPress={() => void update($, bandOpen, v => !v)}>
+          <Text dimColor>{`${unfolded ? '▾' : '▸'} ${jobCount} jobs · ${working} working`}</Text>
+        </Button>]
+      : []
+    const [word, color] = words[mood]
     return (
       <Box flexDirection="row">
         <Raster key="conductor" columns={W} rows={4} cells={frameCells(mood, frame)} />
         <Box flexDirection="column" marginLeft={1}>
-          <Text bold color={mood === 'stop' ? 'red' : mood === 'wave' ? 'yellow' : undefined}>{`♪ ${words[mood]}`}</Text>
+          <Text bold color={color}>{word}</Text>
           <Text dimColor>{line}</Text>
+          {chart}
+          {toggle}
         </Box>
       </Box>
     )

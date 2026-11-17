@@ -37,6 +37,8 @@ declare module 'claude-code' {
       expanded: Shaped<string[]>
       since: Shaped<Record<string, Since>>
       todos: Shaped<Todo[]>
+      /** Whether the band's folded job rows are open. */
+      bandOpen: Shaped<boolean>
     }
   }
 }

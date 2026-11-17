@@ -15,10 +15,11 @@ const BOARD = [{
 }]
 
 let tickRole = 'worker'
+let tickBoard: unknown = BOARD
 
 function answer(args: readonly string[]) {
   if (args[0] === 'tick') {
-    return { role: tickRole, folder: '/oke/jobs/j/w1', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : BOARD, revived: {} }
+    return { role: tickRole, folder: '/oke/jobs/j/w1', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : tickBoard, revived: {} }
   }
   if (args[0] === 'api-retry' && args.includes('--clear')) return { action: 'cleared' }
   if (args.includes('authentication_failed')) return { action: 'give_up', limit: 20 }
@@ -210,30 +211,30 @@ test('task tool calls are written to the agent folder', async ($, on) => {
   expect(JSON.parse(last.text)).toEqual([{ id: '1', content: 'write sub', status: 'in_progress' }])
 })
 
-test('the band shows the conductor in an OKe session', async ($, on) => {
+const BAND = {
+  plugin: 'oke', component: 'AbovePrompt', requestId: 'band', surface: 'terminal',
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 20, bodyColumns: 80,
+    scroll: { offset: 0, bodyRows: 20 }, view: {} },
+} as any
+const wide = (bodyColumns: number) => ({ ...BAND, props: { ...BAND.props, bodyColumns } })
+
+test('the band shows the mascot, the status line and the org chart', async ($, on) => {
   mock.clock(on)
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
   tickRole = 'orchestrator'
   engine(on, [], [])
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  const ui = await $.ui.mount({
-    plugin: 'oke', component: 'AbovePrompt', requestId: 'band', surface: 'terminal',
-    props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 20, bodyColumns: 60,
-      scroll: { offset: 0, bodyRows: 20 }, view: {} },
-  } as any)
+  const ui = await $.ui.mount(BAND)
   expect(await ui.find({ key: 'conductor' })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /내 차례!/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: 'OKe orchestrator · 내 차례 1 · 살아있음 2/2 · ctx 34% · $1.20 · calc-sub 작업 $0.40' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /your turn!/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'OKe orchestrator · waiting on you 1 · ctx 34% · $1.20' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^toy$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /└ calc-sub waiting \$0\.40 w1●/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /calc-add/ })).toBeFalsy()  // done: off the chart
   await ui.unmount()
   tickRole = 'worker'
 })
-
-const BAND = {
-  plugin: 'oke', component: 'AbovePrompt', requestId: 'band', surface: 'terminal',
-  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 20, bodyColumns: 60,
-    scroll: { offset: 0, bodyRows: 20 }, view: {} },
-} as any
 
 test('a narrow band drops the least needed parts of the status line first', async ($, on) => {
   mock.clock(on)
@@ -242,9 +243,31 @@ test('a narrow band drops the least needed parts of the status line first', asyn
   engine(on, [], [])
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  const ui = await $.ui.mount({ ...BAND, viewport: { columns: 40, rows: 20 } })
-  expect(await ui.find({ type: 'Text', text: 'OKe orchestrator · 내 차례 1' })).toBeTruthy()
+  const ui = await $.ui.mount(wide(50))
+  expect(await ui.find({ type: 'Text', text: 'OKe orchestrator · waiting on you 1' })).toBeTruthy()
   await ui.unmount()
+  tickRole = 'worker'
+})
+
+test('more than three open jobs fold under one row that opens them', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  const job = (name: string) => ({ job: name, phase: 'working', merge: 'none', pending: null, agents: [{
+    agent: `${name}-w1`, role: 'worker', status: 'working', pane: null, report: null, board: '', revives: 0, todos: [] }] })
+  tickBoard = [{ repo: 'toy-6b0484', key: 'k', pm: null, jobs: ['a', 'b', 'c', 'd'].map(job) }]
+  engine(on, [], [])
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: '▸ 4 jobs · 4 working' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /├ a work/ })).toBeFalsy()
+  expect(await ui.find({ type: 'Text', text: /^toy$/ })).toBeTruthy()  // the repo row stays
+  await ui.press({ key: 'jobs' })
+  expect(await ui.find({ type: 'Text', text: /├ a work w1●/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /└ d work/ })).toBeTruthy()
+  await ui.unmount()
+  tickBoard = BOARD
   tickRole = 'worker'
 })
 
@@ -254,7 +277,7 @@ test('a worker status line shows its job, seq, model, context and cost', async (
   engine(on, [], [])
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  const ui = await $.ui.mount(BAND)
+  const ui = await $.ui.mount(wide(120))
   expect(await ui.find({ type: 'Text', text: 'OKe worker · calc-sub #2 · sonnet-5-5 · ctx 34% · $1.20' })).toBeTruthy()
   await ui.unmount()
 })
