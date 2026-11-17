@@ -16,11 +16,14 @@ const BOARD = [{
 
 let tickRole = 'worker'
 let tickBoard: unknown = BOARD
+let answeredNow: string[] = []
+let autoCompact = true
 
 function answer(args: readonly string[]) {
   if (args[0] === 'tick') {
     return { role: tickRole, folder: '/oke/jobs/j/w1', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : tickBoard, revived: {} }
   }
+  if (args[0] === 'boundary') return { role: tickRole, answered: answeredNow }
   if (args[0] === 'api-retry' && args.includes('--clear')) return { action: 'cleared' }
   if (args.includes('authentication_failed')) return { action: 'give_up', limit: 20 }
   return { action: 'retry', delay: 30, limit: 20 }
@@ -34,7 +37,7 @@ function engine(on: any, runs: Run[], prompts: string[]) {
   on('command.register', () => ({ value: { command: 'oke-board' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.id', () => ({ value: 'sid-1' }))
-  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000, percent: 34 }, rateLimits: [], cost: { usd: 1.2 } } }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000, percent: 34, breakdown: { isAutoCompactEnabled: autoCompact } }, rateLimits: [], cost: { usd: 1.2 } } }))
   on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('prompt.submit', (_: any, e: any) => {
@@ -316,5 +319,74 @@ test('the orchestrator board shows its own todo list', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /✓ intake calc-pow/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /▸ relay plan/ })).toBeTruthy()
   await ui.unmount()
+  tickRole = 'worker'
+})
+
+test('a worker compacts once at each new task boundary', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  engine(on, [], [])
+  on('fs.write', () => ({ value: undefined }))
+  const compacts: any[] = []
+  on('session.compact', (_: any, e: any) => {
+    compacts.push(e)
+    return { skip: 'test' }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await clock.advance(10)
+  expect(compacts.length).toBe(0)  // no report yet
+  answeredNow = ['calc-sub:1']
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await clock.advance(10)
+  expect(compacts.length).toBe(1)
+  expect(compacts[0].instructions).toMatch(/task boundary/)
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await clock.advance(10)
+  expect(compacts.length).toBe(1)  // the same boundary
+  answeredNow = []
+})
+
+test('auto-compact turned off by the person wins over a boundary', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  engine(on, [], [])
+  on('fs.write', () => ({ value: undefined }))
+  autoCompact = false
+  const compacts: any[] = []
+  on('session.compact', (_: any, e: any) => {
+    compacts.push(e)
+    return { skip: 'test' }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  answeredNow = ['calc-sub:1']
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await clock.advance(10)
+  expect(compacts.length).toBe(0)
+  answeredNow = []
+  autoCompact = true
+})
+
+test('the orchestrator never compacts by itself', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  const runs: Run[] = []
+  engine(on, runs, [])
+  const compacts: any[] = []
+  on('session.compact', (_: any, e: any) => {
+    compacts.push(e)
+    return { skip: 'test' }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  answeredNow = ['calc-sub:1']
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await clock.advance(10)
+  expect(compacts.length).toBe(0)
+  expect(runs.some(r => r.argv.includes('boundary'))).toBe(false)
+  answeredNow = []
   tickRole = 'worker'
 })
