@@ -127,12 +127,18 @@ async function clearRetry($: any) {
   if ((await oke($, ['api-retry', '--pane', pane, '--clear'])) !== null) attempt = 0
 }
 
+/** The board's colors: the mascot's neon pastels, bright enough on a dark terminal. */
+const INK = {
+  pink: '#ff7ad9', lavender: '#b9a6ff', cyan: '#5fe3ea', green: '#7ee8a6', yellow: '#ffd866',
+  red: '#ff6b6b', magenta: '#e58bff', white: '#f4f1ff', dim: '#6b6880', ink: '#1a1626',
+}
+
 /** herdr agent status: mark, word, color. */
 const STATUS: Record<string, [string, string, string | undefined]> = {
-  working: ['●', 'working', 'green'],
+  working: ['●', 'working', INK.green],
   idle: ['○', 'idle', undefined],
-  blocked: ['!', 'blocked', 'yellow'],
-  dead: ['✗', 'dead', 'red'],
+  blocked: ['!', 'blocked', INK.yellow],
+  dead: ['✗', 'dead', INK.red],
 }
 
 /** `oke pending` kinds, as the person reads them. */
@@ -183,21 +189,32 @@ function elapsed(ms: number): string {
 
 /** How a todo shows on the board: mark and color by status. */
 const TODO: Record<string, [string, string | undefined]> = {
-  completed: ['✓', 'green'],
-  in_progress: ['▸', 'yellow'],
+  completed: ['✓', INK.green],
+  in_progress: ['▸', INK.pink],
   pending: ['○', undefined],
 }
 
 const TODO_ORDER = ['in_progress', 'pending', 'completed']
 
-/** The `## 지금` section of a board.md: how the agent's current work goes, at most 3 lines. */
-function nowLines(board: string): string[] {
-  const lines = board.split(/\r?\n/)
-  const at = lines.findIndex(l => /^##\s*지금/.test(l.trim()))
+/** The lines of one `## <title>` section of a board.md, an empty marker (없음, none, -) dropped. */
+function section(board: string, title: string, max: number): string[] {
+  const lines = board.split(/\r?\n/).map(l => l.trim())
+  const at = lines.findIndex(l => l.startsWith('##') && l.slice(2).replace(/\(.*$/, '').trim() === title)
   if (at < 0) return []
-  const end = lines.findIndex((l, i) => i > at && l.trim().startsWith('## '))
-  return lines.slice(at + 1, end < 0 ? undefined : end).map(l => l.trim()).filter(Boolean).slice(0, 3)
+  const end = lines.findIndex((l, i) => i > at && l.startsWith('## '))
+  return lines.slice(at + 1, end < 0 ? undefined : end)
+    .map(l => l.replace(/^[-*]\s+/, ''))
+    .filter(l => l && !/^(없음|none|-)$/i.test(l))
+    .slice(0, max)
 }
+
+/** board.md sections shown under an agent's todos: title, mark, label, color. */
+const NOTES: [string, string, string, string][] = [
+  ['결정 필요', '?', 'decide', INK.yellow],
+  ['막힌 것', '✗', 'blocked', INK.red],
+  ['확인 필요', '!', 'check', INK.magenta],
+  ['결정', '◆', 'decided', INK.cyan],
+]
 
 const TASK_TOOLS = ['TaskCreate', 'TaskUpdate', 'TodoWrite']
 
@@ -569,16 +586,25 @@ export const register: Register = on => {
     if (tree.length === 0 && mine.length === 0) return <Text dimColor>No OKe work yet.</Text>
 
     // in progress first, each with how it goes (board.md's 지금), then planned, then done
-    const todoRows = (list: Todo[], indent: string, now: string[] = []) => TODO_ORDER.flatMap(status =>
+    const todoRows = (list: Todo[], now: string[] = []) => TODO_ORDER.flatMap(status =>
       list.filter(t => (TODO[t.status] ? t.status : 'pending') === status).flatMap(t => {
         const [tm, tc] = TODO[status]!
         return [
           <Text color={tc} dimColor={status === 'completed'} bold={status === 'in_progress'}>
-            {`${indent}${tm} ${t.content}`}
+            {`${tm} ${t.content}`}
           </Text>,
-          ...(status === 'in_progress' ? now : []).map((line, i) => <Text color="cyan">{`${indent}    ${i ? '  ' : '└ '}${line}`}</Text>),
+          ...(status === 'in_progress' ? now : []).map((line, i) => (
+            <Text color={INK.cyan} italic>{`  ${i ? '  ' : '└ '}${line}`}</Text>
+          )),
         ]
       }))
+    // a label chip on its own color, then the line: scanned by color, read in plain text
+    const chip = (label: string, color: string) => <Text backgroundColor={color} color={INK.ink} bold>{` ${label} `}</Text>
+    const progress = (list: Todo[]) => {
+      const done = list.filter(t => t.status === 'completed').length
+      const bar = '▰'.repeat(done) + '▱'.repeat(Math.max(0, list.length - done))
+      return <Text color={INK.green}>{` ${bar.length <= 12 ? bar : ''} ${done}/${list.length}`}</Text>
+    }
 
     const toggle = (agent: string) =>
       void update($, expanded, list => (list.includes(agent) ? list.filter(a => a !== agent) : [...list, agent]))
@@ -590,81 +616,109 @@ export const register: Register = on => {
 
     // One row per agent, the row itself toggles it open: a second row of buttons per
     // agent doubled the height, and buttons beside text squeezed it away (seen live).
-    const agentRows = (n: BoardNode, indent: string, name: string) => {
+    const agentBlock = (n: BoardNode, name: string) => {
       const t = times[n.agent]
       const [mark, word, color] = STATUS[n.status] ?? ['·', n.status, undefined]
       const extra = [n.report ? `report ${n.report}` : '', n.revives ? `revived ${n.revives}x` : ''].filter(Boolean)
       const isOpen = open.includes(n.agent)
-      const rows = [
-        <Button key={`open-${n.agent}`} plain onPress={() => toggle(n.agent)}>
-          {indent}
-          <Text color={color} dimColor={n.status === 'idle'}>{`${mark} `}</Text>
-          <Text bold>{name}</Text>
-          <Text color={color} dimColor={n.status === 'idle'}>{` ${word}`}</Text>
-          <Text dimColor>{`${t ? ` ${elapsed(now - t.at)}` : ''}${extra.length ? ` · ${extra.join(', ')}` : ''}`}</Text>
-        </Button>,
-      ]
-      rows.push(...todoRows(n.todos ?? [], `${indent}  `, nowLines(n.board)))
-      if (isOpen) {
-        rows.push(
-          <Box flexDirection="row">
-            <Text>{`${indent}  `}</Text>
-            <Button key={`go-${n.agent}`} label="go" onPress={() => void focus(n.agent)} />
-          </Box>,
-        )
-        for (const line of (n.board || '(no board.md)').split('\n')) {
-          rows.push(<Text dimColor>{`${indent}  ${line}`}</Text>)
-        }
-      }
-      return rows
+      const notes = NOTES.flatMap(([title, mark, label, noteColor]) =>
+        section(n.board, title, 5).map(line => (
+          <Text>{chip(`${mark} ${label}`, noteColor)}<Text>{` ${line}`}</Text></Text>
+        )))
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Button key={`open-${n.agent}`} plain onPress={() => toggle(n.agent)}>
+            <Text color={color} dimColor={n.status === 'idle'}>{`${mark} `}</Text>
+            <Text bold color={INK.white}>{name}</Text>
+            <Text color={color} dimColor={n.status === 'idle'}>{` ${word}`}</Text>
+            <Text dimColor>{`${t ? ` ${elapsed(now - t.at)}` : ''}${extra.length ? ` · ${extra.join(', ')}` : ''}`}</Text>
+            <Text dimColor>{isOpen ? '  ▾' : '  ▸'}</Text>
+          </Button>
+          <Box flexDirection="column" paddingLeft={2}>
+            {todoRows(n.todos ?? [], section(n.board, '지금', 3))}
+            {notes}
+            {isOpen
+              ? [
+                  <Box flexDirection="row" marginTop={1}>
+                    <Button key={`go-${n.agent}`} label="go" onPress={() => void focus(n.agent)} />
+                  </Box>,
+                  <Box flexDirection="column" borderStyle="single" borderColor={INK.dim} paddingX={1}>
+                    {(n.board || '(no board.md)').split('\n').map(line => (
+                      <Text dimColor={!line.startsWith('##')} color={line.startsWith('##') ? INK.lavender : undefined} bold={line.startsWith('##')}>
+                        {line || ' '}
+                      </Text>
+                    ))}
+                  </Box>,
+                ]
+              : []}
+          </Box>
+        </Box>
+      )
     }
 
-    const rows = []
+    const cards = []
     const waiting = tree.flatMap(repo => repo.jobs.filter(j => j.pending))
     if (waiting.length) {
-      rows.push(<Text bold color="yellow">{`waiting on you ${waiting.length}`}</Text>)
-      for (const j of waiting) {
-        rows.push(<Text color="yellow">{`  ▸ ${j.job}: ${PENDING[j.pending as string] ?? j.pending}`}</Text>)
-      }
-      rows.push(<Text> </Text>)
+      cards.push(
+        <Box flexDirection="column" borderStyle="round" borderColor={INK.yellow} paddingX={1}>
+          <Text bold color={INK.yellow}>{`✦ waiting on you ${waiting.length}`}</Text>
+          {waiting.map(j => <Text>{`▸ ${j.job}: ${PENDING[j.pending as string] ?? j.pending}`}</Text>)}
+        </Box>,
+      )
     }
     if (mine.length) {
       const done = mine.filter(t => t.status === 'completed').length
-      rows.push(<Text bold>{`OKe todo ${done}/${mine.length}`}</Text>)
-      rows.push(...todoRows(mine, '  '))
-      rows.push(<Text> </Text>)
+      cards.push(
+        <Box flexDirection="column" borderStyle="round" borderColor={INK.lavender} paddingX={1} marginTop={waiting.length ? 1 : 0}>
+          <Text><Text bold color={INK.lavender}>{`OKe todo ${done}/${mine.length}`}</Text>{progress(mine)}</Text>
+          {todoRows(mine)}
+        </Box>,
+      )
     }
     for (const repo of tree) {
-      rows.push(<Text bold>{repo.repo.replace(/-[0-9a-f]{6}$/, '')}</Text>)
-      if (repo.pm) rows.push(...agentRows(repo.pm, '  ', 'PM'))
+      const finished = repo.jobs.filter(j => j.phase === 'done' || j.phase === 'failed')
+      cards.push(
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold color={INK.pink}>{`▍${repo.repo.replace(/-[0-9a-f]{6}$/, '')}`}</Text>
+          {repo.pm ? <Box flexDirection="column" paddingLeft={1}>{agentBlock(repo.pm, 'PM')}</Box> : []}
+        </Box>,
+      )
       for (const job of repo.jobs) {
-        if (job.phase === 'done' || job.phase === 'failed') {
-          rows.push(<Text dimColor color={job.phase === 'failed' ? 'red' : undefined}>
-            {`  ${job.phase === 'done' ? '✓' : '✗'} ${job.job} ${job.phase === 'done' ? 'done' : 'failed'}`}
-          </Text>)
-          continue
-        }
+        if (finished.includes(job)) continue
         const [label, labelColor] = LEDGER[job.merge] ?? ['', undefined]
-        rows.push(
-          <Text>
-            <Text bold>{`  ${job.job}`}</Text>
-            {label ? <Text color={labelColor}>{` ${label}`}</Text> : ''}
-          </Text>,
-        )
         const at = step(job)
-        rows.push(
-          <Text>
-            {'    '}
-            {STEPS.map((s, i) => (
-              <Text color={i < at ? 'green' : undefined} dimColor={i > at} bold={i === at} inverse={i === at}>
-                {i ? ` ${s}` : s}
-              </Text>
-            ))}
+        const hurt = job.agents.some(n => n.status === 'dead')
+        cards.push(
+          <Box flexDirection="column" borderStyle="round" borderColor={job.pending ? INK.yellow : hurt ? INK.red : INK.lavender} paddingX={1} marginTop={1}>
+            <Text>
+              <Text bold color={INK.white}>{job.job}</Text>
+              {label ? <Text color={labelColor}>{`  ${label}`}</Text> : ''}
+            </Text>
+            <Text>
+              {STEPS.flatMap((s, i) => [
+                i ? <Text color={INK.dim}>{' › '}</Text> : '',
+                <Text
+                  color={i === at ? INK.ink : i < at ? INK.green : undefined}
+                  backgroundColor={i === at ? INK.cyan : undefined}
+                  dimColor={i > at}
+                  bold={i === at}
+                >
+                  {i === at ? ` ${s} ` : s}
+                </Text>,
+              ])}
+            </Text>
+            {job.agents.map(n => agentBlock(n, n.agent.startsWith(`${job.job}-`) ? n.agent.slice(job.job.length + 1) : n.agent))}
+          </Box>,
+        )
+      }
+      for (const job of finished) {
+        cards.push(
+          <Text dimColor color={job.phase === 'failed' ? INK.red : undefined}>
+            {`  ${job.phase === 'done' ? '✓' : '✗'} ${job.job} ${job.phase === 'done' ? 'done' : 'failed'}`}
           </Text>,
         )
-        for (const n of job.agents) rows.push(...agentRows(n, '    ', n.agent.startsWith(`${job.job}-`) ? n.agent.slice(job.job.length + 1) : n.agent))
       }
     }
-    return <Box flexDirection="column">{rows}</Box>
+    return <Box flexDirection="column">{cards}</Box>
   })
 }
