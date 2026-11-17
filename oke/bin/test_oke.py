@@ -207,27 +207,31 @@ class TestState(Base):
         self.assertEqual(self.cli("job", "phase", "grew", "merging"), 1)  # and loses its merge approval
         self.assertEqual(self.cli("job", "lane", "tiny", "normal"), 1)  # not once merging
 
-    def test_job_budget_counts_workers_and_reviewers_not_the_pm(self):
+    def test_review_rounds_stop_at_the_limit_until_the_user_allows_more(self):
         repo = self.git_repo("r")
         self.assertEqual(self.cli("job", "new", "j", "--repo", repo), 0)
-        d = os.path.join(self.home, "jobs", "j")
-        for agent, usd in (("j-w1", 3.0), ("j-rv", 2.5), ("pm", 9.0)):
-            os.makedirs(os.path.join(d, agent), exist_ok=True)
-            with open(os.path.join(d, agent, "usage.json"), "w") as f:
-                json.dump({"usd": usd}, f)
-        self.assertEqual(oke.job_cost("j"), 5.5)
+        rv = os.path.join(self.home, "jobs", "j", "j-rv")
+        os.makedirs(rv)
+        with open(os.path.join(rv, "assignment.md"), "w") as f:
+            f.write("agent: j-rv\nrole: reviewer\nseq: 11\n---\n")
+        self.assertEqual(oke.review_round("j"), 11)
         info = oke.load_state()["jobs"]["j"]
-        self.assertIn("$5.50 of its $5.00 budget", oke.over_budget("j", info, oke.load_config()))
-        self.assertIsNone(oke.over_budget("j", info, dict(oke.load_config(), job_budget_usd=None)))
-        self.assertEqual(self.cli("job", "budget", "j", "8"), 0, self.err)
-        self.assertEqual(json.loads(self.out.strip().splitlines()[-1]), {"job": "j", "cost": 5.5, "budget": 8.0})
-        self.assertIsNone(oke.over_budget("j", oke.load_state()["jobs"]["j"], oke.load_config()))
-        # a revived worker's mod counts from zero: what it cost before is banked first
-        oke.bank_usage(os.path.join(d, "j-w1"))
-        with open(os.path.join(d, "j-w1", "usage.json"), "w") as f:
+        self.assertIsNone(oke.over_rounds("j", info, oke.load_config(), 10))
+        self.assertIn("review round 11 is past its limit of 10", oke.over_rounds("j", info, oke.load_config(), 11))
+        self.assertEqual(self.cli("job", "rounds", "j", "15"), 0, self.err)
+        self.assertEqual(json.loads(self.out.strip().splitlines()[-1]), {"job": "j", "round": 11, "limit": 15})
+        self.assertIsNone(oke.over_rounds("j", oke.load_state()["jobs"]["j"], oke.load_config(), 11))
+        self.assertNotEqual(self.cli("job", "rounds", "j", "0"), 0)
+
+    def test_a_revived_agents_cost_adds_to_what_its_folder_cost_before(self):
+        d = os.path.join(self.home, "jobs", "j", "j-w1")
+        os.makedirs(d)
+        with open(os.path.join(d, "usage.json"), "w") as f:
+            json.dump({"usd": 3.0}, f)
+        oke.bank_usage(d)  # a new session's mod counts from zero
+        with open(os.path.join(d, "usage.json"), "w") as f:
             json.dump({"usd": 1.0}, f)
-        self.assertEqual(oke.job_cost("j"), 6.5)
-        self.assertNotEqual(self.cli("job", "budget", "j", "-1"), 0)
+        self.assertEqual(oke.folder_cost(d), 4.0)
 
     def test_job_new_phase_archive(self):
         repo = self.git_repo("r")

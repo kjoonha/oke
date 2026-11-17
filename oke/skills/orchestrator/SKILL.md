@@ -219,9 +219,9 @@ Plan approval question: put a short summary of the plan in the option `preview`,
 
 The plan's lane (`lane:` at the top of its 접근, also on the board) changes this question. `trivial`: one line of plan, and the offer is approve and merge / approve, ask me before the merge / request changes. "Ask me before the merge" makes it `small`: run `$OKE job lane <job> small` before you assign `kind: execute`. A lane you think is wrong (too small for what the plan touches): say so in the question. When a trivial job's PM asks because the job grew, the user's answer approves the merge or not: treat a yes as a `merge` item answered merge.
 
-Merge question: summary, branch name, number of changed files, the job's cost (`$OKE job budget <job>`), and the checks recorded so far (`$OKE ledger show <job>`: who checked which commit, pass or fail). Offer: merge / hold / look myself. A merge counts as done only after the PM verified it on the merged result (`merge: verified` in the ledger); when the PM reports merged, check that before `job phase done`. When the PM asks because the main branch moved on during the check, the user may accept the merge as it is: put that answer into the PM's assignment; the PM records it with `--accept`.
+Merge question: summary, branch name, number of changed files, and the checks recorded so far (`$OKE ledger show <job>`: who checked which commit, pass or fail). Offer: merge / hold / look myself. A merge counts as done only after the PM verified it on the merged result (`merge: verified` in the ledger); when the PM reports merged, check that before `job phase done`. When the PM asks because the main branch moved on during the check, the user may accept the merge as it is: put that answer into the PM's assignment; the PM records it with `--accept`.
 
-A job's workers stop getting new work once its workers and reviewers cost more than its budget (reviews still run) (`job_budget_usd` in `$OKE_HOME/config.json`, default $5); the PM then asks. When the user raises it, run `$OKE job budget <job> <usd>` before you give the PM the answer.
+A job's reviews stop after 10 rounds (`max_review_rounds` in `$OKE_HOME/config.json`); the PM then asks with the open findings. When the user allows more, run `$OKE job rounds <job> <n>` before you give the PM the answer.
 
 ## Shared wiki
 

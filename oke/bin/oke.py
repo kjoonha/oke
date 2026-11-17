@@ -66,7 +66,7 @@ def load_config():
         "models": {"pm": "opus", "worker": "sonnet", "reviewer": "sonnet"},
         "agents": {"worker": "claude", "reviewer": "claude"},  # which CLI runs each role
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
-        "job_budget_usd": 5.0,  # a job's workers and reviewers stop getting work past it; null: no limit
+        "max_review_rounds": 10,  # a job's reviews stop there and the PM asks the user; null: no limit
     }
     try:
         with io.open(os.path.join(home, "config.json"), encoding="utf-8") as f:
@@ -692,7 +692,7 @@ def cmd_spawn(args):
             return fail("unknown job %r in assignment" % header.get("job"))
         if job["phase"] not in ("working", "reviewing", "merging"):
             return fail("plan not approved: job %s is in phase %s" % (header["job"], job["phase"]))
-        over = role == "worker" and over_budget(header["job"], job, config)
+        over = role == "reviewer" and over_rounds(header["job"], job, config, int(header["seq"]))
         if over:
             return fail(over)
         key = job["repo"]
@@ -1106,25 +1106,26 @@ def records(state):
     return out
 
 
-def job_cost(job):
-    """What a job's workers and reviewers have cost (their OKe mods write it after each
-    turn). shortcut: the PM's own turns and its subagents are not in it (one PM serves
-    many jobs); count them per job if a trivial job ever runs up a bill."""
+def review_round(job):
+    """The review round a job is in: the highest seq among its reviewers' assignments
+    (each new review, by a pane or a subagent, is a new seq)."""
     d = os.path.join(oke_home(), "jobs", job)
-    return round(sum(folder_cost(os.path.join(d, name)) for name in (os.listdir(d) if os.path.isdir(d) else [])
-                     if name != "pm"), 4)
+    seqs = [0]
+    for name in os.listdir(d) if os.path.isdir(d) else []:
+        if re.search(r"-rv\d*$", name):
+            header = read_header(os.path.join(d, name, "assignment.md")) or {}
+            if str(header.get("seq", "")).isdigit():
+                seqs.append(int(header["seq"]))
+    return max(seqs)
 
 
-def over_budget(job, info, config):
-    """The refusal when a job has spent its budget, else None."""
-    budget = info.get("budget", config.get("job_budget_usd"))
-    if budget is None:
+def over_rounds(job, info, config, seq):
+    """The refusal when review round `seq` is past the job's limit, else None."""
+    limit = info.get("review_rounds", config.get("max_review_rounds"))
+    if limit is None or seq <= limit:
         return None
-    cost = job_cost(job)
-    if cost < budget:
-        return None
-    return ("job %s has spent $%.2f of its $%.2f budget: ask the user, who may raise it "
-            "(`oke job budget %s <usd>`)" % (job, cost, budget, job))
+    return ("job %s: review round %d is past its limit of %d: report a question with the open "
+            "findings; the user may allow more (`oke job rounds %s <n>`)" % (job, seq, limit, job))
 
 
 def find_target(state, name):
@@ -2298,15 +2299,15 @@ def job_locked(args):
         state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
         save_state(state)
         return 0
-    if args.action == "budget":
+    if args.action == "rounds":
         info = state["jobs"][args.slug]
-        if args.usd is not None:
-            if args.usd < 0:
-                return fail("a budget is 0 or more dollars")
-            info["budget"] = args.usd
+        if args.n is not None:
+            if args.n < 1:
+                return fail("a review round limit is 1 or more")
+            info["review_rounds"] = args.n
             save_state(state)
-        print(json.dumps({"job": args.slug, "cost": job_cost(args.slug),
-                          "budget": info.get("budget", load_config().get("job_budget_usd"))}))
+        print(json.dumps({"job": args.slug, "round": review_round(args.slug),
+                          "limit": info.get("review_rounds", load_config().get("max_review_rounds"))}))
         return 0
     if args.action == "lane":
         info = state["jobs"][args.slug]
@@ -2377,10 +2378,11 @@ def cmd_send(args):
         return fail("unknown agent: %s" % args.agent)
     if found[0] == "orchestrator":
         return fail("the orchestrator has no inbox: a PM reports to it instead")
-    # only new work is stopped: a reviewer may still review what is done
-    child_job = state["jobs"].get(found[3].get("job")) if found[0] == "worker" else None
+    child_job = state["jobs"].get(found[3].get("job")) if found[0] == "reviewer" else None
     if child_job is not None:
-        over = over_budget(found[3]["job"], child_job, load_config())
+        header = read_header(os.path.join(agent_folder(*found), "assignment.md")) or {}
+        seq = int(header["seq"]) if str(header.get("seq", "")).isdigit() else 0
+        over = over_rounds(found[3]["job"], child_job, load_config(), seq)
         if over:
             return fail(over)
     sender = "user"
@@ -2525,9 +2527,9 @@ def build_parser():
     archive.add_argument("slug")
     defer = job_sub.add_parser("defer")
     defer.add_argument("slug")
-    budget = job_sub.add_parser("budget", help="show a job's cost and budget, or set the budget")
-    budget.add_argument("slug")
-    budget.add_argument("usd", nargs="?", type=float)
+    rounds = job_sub.add_parser("rounds", help="show a job's review round and limit, or set the limit")
+    rounds.add_argument("slug")
+    rounds.add_argument("n", nargs="?", type=int)
     lane = job_sub.add_parser("lane", help="the job's size lane, which the PM decides while planning")
     lane.add_argument("slug")
     lane.add_argument("lane", choices=LANES)
