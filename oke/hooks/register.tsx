@@ -28,6 +28,8 @@ let ticking = false
 let attempt = 0
 let lastError = ''
 let pending: { cancel: () => void } | null = null
+let job: string | null = null
+let seq: number | null = null
 
 /** Run `oke.py <args>` and parse its JSON line; null when it failed. */
 async function oke($: any, args: string[]): Promise<any> {
@@ -59,6 +61,8 @@ async function tick($: any) {
     if (!out) return
     role = out.role
     folder = out.folder ?? null
+    job = out.job ?? null
+    seq = out.seq ?? null
     eventsOffset = out.events_offset
     if (role === 'orchestrator') {
       for (const line of out.events as string[]) $.ui.toast(`OKe: ${line.replace(/^\S+ /, '')}`, { timeoutMs: 8000 })
@@ -176,6 +180,78 @@ function applyTask(list: Todo[], tool: string, input: any, result: any): Todo[] 
   return list.map(t => (t.id === input.taskId
     ? { ...t, content: input.subject ?? t.content, status: input.status ?? t.status }
     : t))
+}
+
+// ---------------------------------------------------------------- status line
+/** One piece of the status line; a higher `drop` goes first when the line is too wide. */
+type Part = { text: string; drop: number }
+
+/** Terminal cells a string takes: Hangul and CJK take two. */
+function cellWidth(s: string): number {
+  let n = 0
+  for (const ch of s) {
+    const c = ch.codePointAt(0) ?? 0
+    n += (c >= 0x1100 && c <= 0x115f) || (c >= 0x3130 && c <= 0x318f) || (c >= 0x4e00 && c <= 0x9fff)
+      || (c >= 0xac00 && c <= 0xd7a3) ? 2 : 1
+  }
+  return n
+}
+
+const SEP = ' · '
+
+/** The parts in their order, the least needed dropped until the line fits `width`. */
+function fit(parts: Part[], width: number | undefined): string {
+  let kept = parts
+  const len = (list: Part[]) => cellWidth(list.map(p => p.text).join(SEP))
+  while (width && kept.length > 1 && len(kept) > width) {
+    const worst = Math.max(...kept.map(p => p.drop))
+    const at = kept.map(p => p.drop).lastIndexOf(worst)
+    kept = kept.filter((_, i) => i !== at)
+  }
+  return kept.map(p => p.text).join(SEP)
+}
+
+const usd = (n: number) => `$${n.toFixed(2)}`
+
+type Self = { model: string; percent?: number; cost?: number }
+
+/** The status line: for orchestrator and PM the work they watch, for a child its own job. */
+function statusParts(role: string, tree: BoardRepo[], self: Self): Part[] {
+  const own = [
+    self.percent !== undefined ? { text: `ctx ${self.percent}%`, drop: 3 } : null,
+    self.cost !== undefined ? { text: usd(self.cost), drop: 4 } : null,
+  ]
+  if (role === 'worker' || role === 'reviewer') {
+    return [
+      { text: `OKe ${role}`, drop: 0 },
+      job ? { text: `${job}${seq !== null ? ` #${seq}` : ''}`, drop: 1 } : null,
+      { text: self.model.replace(/^claude-/, ''), drop: 5 },
+      ...own,
+    ].filter((p): p is Part => p !== null)
+  }
+  const jobs = tree.flatMap(r => r.jobs).filter(j => j.phase !== 'done' && j.phase !== 'failed')
+  const waiting = tree.flatMap(r => r.jobs).filter(j => j.pending).length
+  const all = nodes(tree)
+  const dead = all.filter(n => n.status === 'dead').length
+  return [
+    { text: `OKe ${role}`, drop: 0 },
+    waiting ? { text: `내 차례 ${waiting}`, drop: 1 } : null,
+    all.length ? { text: `살아있음 ${all.length - dead}/${all.length}`, drop: 2 } : null,
+    ...own,
+    ...jobs.map((j, i) => {
+      const cost = j.agents.reduce((sum, n) => sum + (n.cost ?? 0), 0)
+      return { text: `${j.job} ${STEPS[step(j)] ?? '끝'}${cost ? ` ${usd(cost)}` : ''}`, drop: 6 + i }
+    }),
+  ].filter((p): p is Part => p !== null)
+}
+
+async function selfUsage($: any): Promise<Self> {
+  try {
+    const u = await $.session.usage()
+    return { model: await $.session.model(), percent: u.context?.percent, cost: u.cost?.usd }
+  } catch {
+    return { model: '' }
+  }
 }
 
 // ---------------------------------------------------------------- conductor band
@@ -301,14 +377,9 @@ export const register: Register = on => {
     const tree = await read($, board)
     mood = moodOf(tree, e.props.isWorking)
     bandId = e.requestId
-    const jobs = tree.flatMap(r => r.jobs)
-    const waiting = jobs.filter(j => j.pending).length
-    const busy = nodes(tree).filter(n => n.status === 'working').length
-    const open = jobs.filter(j => j.phase !== 'done' && j.phase !== 'failed').length
     const words: Record<Mood, string> = { conduct: '연주 중', rest: '쉬는 중', wave: '내 차례!', stop: '멈춤' }
-    const line = role === 'worker' || role === 'reviewer'
-      ? `OKe ${role}`
-      : `OKe ${role} · job ${open} · 작업 ${busy}${waiting ? ` · 내 차례 ${waiting}` : ''}`
+    const columns = (e as any).viewport?.columns as number | undefined
+    const line = fit(statusParts(role, tree, await selfUsage($)), columns ? columns - W - 1 : undefined)
     return (
       <Box flexDirection="row">
         <Raster key="conductor" columns={W} rows={4} cells={frameCells(mood, frame)} />
@@ -336,12 +407,25 @@ export const register: Register = on => {
     // The person typed during a backoff: their turn replaces the retry.
     pending?.cancel()
     pending = null
+    // a new assignment's seq for the status line; workers and reviewers do not tick otherwise
+    if (role === 'worker' || role === 'reviewer') void tick($)
     return next(e)
   })
 
   on('turn.complete', async ($, e: any, next) => {
     const r = await next(e)
     if (!pane) return r
+    if (folder) {
+      // the job's cost on the PM's and the orchestrator's status line
+      const self = await selfUsage($)
+      if (self.cost !== undefined) {
+        try {
+          await $.fs.write(`${folder}/usage.json`.replace(/\\/g, '/'), JSON.stringify({ usd: self.cost }))
+        } catch {
+          // the job's cost just lags
+        }
+      }
+    }
     if (e.reason !== 'error') {
       if (attempt > 0 || e.reason === 'aborted') await clearRetry($)
       return r

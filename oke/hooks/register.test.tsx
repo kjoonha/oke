@@ -6,7 +6,7 @@ const BOARD = [{
   repo: 'toy-6b0484', key: 'k', pm: null,
   jobs: [{ job: 'calc-sub', phase: 'working', merge: 'rolled_back', pending: 'question', agents: [{
     agent: 'calc-sub-w1', role: 'worker', status: 'working', pane: 'w7:p9', report: null,
-    board: '## 지금\nwriting sub', revives: 1, todos: [
+    board: '## 지금\nwriting sub', revives: 1, cost: 0.4, todos: [
       { content: 'write sub', status: 'completed' }, { content: 'test sub', status: 'in_progress' },
       { content: 'docs', status: 'pending' }] }] },
   { job: 'calc-add', phase: 'done', merge: 'verified', pending: null, agents: [{
@@ -18,7 +18,7 @@ let tickRole = 'worker'
 
 function answer(args: readonly string[]) {
   if (args[0] === 'tick') {
-    return { role: tickRole, folder: '/oke/jobs/j/w1', events: [], events_offset: 0, board: tickRole === 'worker' ? null : BOARD, revived: {} }
+    return { role: tickRole, folder: '/oke/jobs/j/w1', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : BOARD, revived: {} }
   }
   if (args[0] === 'api-retry' && args.includes('--clear')) return { action: 'cleared' }
   if (args.includes('authentication_failed')) return { action: 'give_up', limit: 20 }
@@ -33,6 +33,8 @@ function engine(on: any, runs: Run[], prompts: string[]) {
   on('command.register', () => ({ value: { command: 'oke-board' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.id', () => ({ value: 'sid-1' }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000, percent: 34 }, rateLimits: [], cost: { usd: 1.2 } } }))
+  on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('prompt.submit', (_: any, e: any) => {
     prompts.push(e.text)
@@ -222,9 +224,56 @@ test('the band shows the conductor in an OKe session', async ($, on) => {
   } as any)
   expect(await ui.find({ key: 'conductor' })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /내 차례!/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /OKe orchestrator · job 1 · 작업 1 · 내 차례 1/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: 'OKe orchestrator · 내 차례 1 · 살아있음 2/2 · ctx 34% · $1.20 · calc-sub 작업 $0.40' })).toBeTruthy()
   await ui.unmount()
   tickRole = 'worker'
+})
+
+const BAND = {
+  plugin: 'oke', component: 'AbovePrompt', requestId: 'band', surface: 'terminal',
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 20, bodyColumns: 60,
+    scroll: { offset: 0, bodyRows: 20 }, view: {} },
+} as any
+
+test('a narrow band drops the least needed parts of the status line first', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  engine(on, [], [])
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...BAND, viewport: { columns: 40, rows: 20 } })
+  expect(await ui.find({ type: 'Text', text: 'OKe orchestrator · 내 차례 1' })).toBeTruthy()
+  await ui.unmount()
+  tickRole = 'worker'
+})
+
+test('a worker status line shows its job, seq, model, context and cost', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  engine(on, [], [])
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount(BAND)
+  expect(await ui.find({ type: 'Text', text: 'OKe worker · calc-sub #2 · sonnet-5-5 · ctx 34% · $1.20' })).toBeTruthy()
+  await ui.unmount()
+})
+
+test('a finished turn writes the session cost to the agent folder', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  engine(on, [], [])
+  const writes: { path: string; text: string }[] = []
+  on('fs.write', (_: any, e: any) => {
+    writes.push({ path: e.path, text: e.text })
+    return { value: undefined }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  const usage = writes.find(w => /usage\.json$/.test(w.path))
+  expect(usage?.path.replace(/\\/g, '/')).toMatch(/\/oke\/jobs\/j\/w1\/usage\.json$/)
+  expect(JSON.parse(usage!.text)).toEqual({ usd: 1.2 })
 })
 
 test('the orchestrator board shows its own todo list', async ($, on) => {

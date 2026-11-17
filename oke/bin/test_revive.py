@@ -470,6 +470,16 @@ class TestTick(ReviveBase):
         worker = self.tick("w1:p5", [AG("fix-a-w1", pane="w1:p5"), AG("pm-toy", pane="w1:p3")])
         self.assertEqual(os.path.normcase(worker["folder"]), os.path.normcase(self.child_dir))
 
+    def test_board_shows_cost_and_tick_names_job_and_seq(self):
+        self.write_file(os.path.join(self.child_dir, "usage.json"), json.dumps({"usd": 0.42}))
+        self.write_file(os.path.join(self.child_dir, "assignment.md"), "seq: 3\n---\nbody\n")
+        out = self.tick("w7:p1", [AG(None, pane="w7:p1", session="s-o"), AG("pm-toy", pane="w1:p3"),
+                                  AG("fix-a-w1", pane="w1:p5")], "--board")
+        self.assertEqual(out["board"][0]["jobs"][0]["agents"][0]["cost"], 0.42)
+        self.assertIsNone(out["board"][0]["pm"]["cost"])  # no turn yet
+        worker = self.tick("w1:p5", [AG("fix-a-w1", pane="w1:p5"), AG("pm-toy", pane="w1:p3")])
+        self.assertEqual((worker["job"], worker["seq"]), ("fix-a", 3))
+
 
 class TestApiRetry(ReviveBase):
     def retry(self, pane, *args):
