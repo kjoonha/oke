@@ -148,10 +148,10 @@ test('the board lists an agent and expands its board.md', async ($, on) => {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ key: 'open-calc-sub-w1' }))?.text).toMatch(/● w1 working .*revived 1x/)
-    expect(await ui.find({ type: 'Text', text: /writing sub/ })).toBeFalsy()
+    expect(await ui.find({ type: 'Text', text: /## 지금/ })).toBeFalsy()
     expect(await ui.find({ key: 'go-calc-sub-w1' })).toBeFalsy()
     await ui.press({ key: 'open-calc-sub-w1' })
-    expect(await ui.find({ type: 'Text', text: /writing sub/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /## 지금/ })).toBeTruthy()
     expect(await ui.find({ key: 'go-calc-sub-w1' })).toBeTruthy()
     await ui.press({ key: 'open-calc-sub-w1' })
     await ui.unmount()
@@ -189,6 +189,12 @@ test('the board marks done, current and open todos apart', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /✓ write sub/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /▸ test sub/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /○ docs/ })).toBeTruthy()
+  // in progress first with how it goes from board.md's 지금, then planned, then done
+  const texts = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
+  const at = (re: RegExp) => texts.findIndex((t: string) => re.test(t))
+  expect(texts[at(/▸ test sub/) + 1]).toMatch(/^\s+└ writing sub$/)
+  expect(at(/▸ test sub/)).toBeLessThan(at(/○ docs/))
+  expect(at(/○ docs/)).toBeLessThan(at(/✓ write sub/))
   await ui.unmount()
   tickRole = 'worker'
 })

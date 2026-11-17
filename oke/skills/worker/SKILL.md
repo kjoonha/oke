@@ -35,7 +35,7 @@ Use `python` if `python3` does not exist. Put the details in `board.md` first. T
 
 ## Board
 
-Rewrite `board.md` in your folder when you start and finish each unit of work:
+Rewrite `board.md` in your folder when you start and finish each unit of work. The board shows `## 지금` under your task in progress, so rewrite it each time you move to another task: how that task goes now, in one to three lines.
 
 ```
 agent: <you>
