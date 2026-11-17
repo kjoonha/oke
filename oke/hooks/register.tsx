@@ -104,33 +104,33 @@ async function clearRetry($: any) {
 
 /** herdr agent status: mark, word, color. */
 const STATUS: Record<string, [string, string, string | undefined]> = {
-  working: ['●', '작업 중', 'green'],
-  idle: ['○', '대기', undefined],
-  blocked: ['!', '막힘', 'yellow'],
-  dead: ['✗', '죽음', 'red'],
+  working: ['●', 'working', 'green'],
+  idle: ['○', 'idle', undefined],
+  blocked: ['!', 'blocked', 'yellow'],
+  dead: ['✗', 'dead', 'red'],
 }
 
 /** `oke pending` kinds, as the person reads them. */
 const PENDING: Record<string, string> = {
-  plan: '계획 승인',
-  merge: 'merge 승인',
-  question: 'PM 질문',
-  blocked: 'PM 막힘',
-  failed: 'PM 실패 보고',
-  silent: 'PM 응답 없음',
-  report_done: 'PM 보고 확인',
-  unsent: '지시 안 보냄',
-  legacy: '확인 필요',
+  plan: 'approve the plan',
+  merge: 'approve the merge',
+  question: 'PM asks',
+  blocked: 'PM is blocked',
+  failed: 'PM reports a failure',
+  silent: 'PM is silent',
+  report_done: 'read the PM report',
+  unsent: 'assignment not sent',
+  legacy: 'needs a look',
 }
 
 /** The ledger's merge state beside the job name. */
 const LEDGER: Record<string, [string, string]> = {
-  unverified: ['검증 대기', 'yellow'],
-  verified: ['검증 ✓', 'green'],
+  unverified: ['unverified', 'yellow'],
+  verified: ['verified ✓', 'green'],
   rolled_back: ['rollback ✗', 'red'],
 }
 
-const STEPS = ['계획', '승인', '작업', '리뷰', '병합', '검증']
+const STEPS = ['plan', 'approve', 'work', 'review', 'merge', 'verify']
 const PHASE_STEP: Record<string, number> = {
   intake: 0, planning: 0, awaiting_approval: 1, working: 2, reviewing: 3, awaiting_merge: 4, merging: 4,
 }
@@ -238,7 +238,6 @@ function statusParts(role: string, tree: BoardRepo[], self: Self): Part[] {
   ].filter((p): p is Part => p !== null)
 }
 
-const STEPS_EN = ['plan', 'approve', 'work', 'review', 'merge', 'verify']
 const isOpen = (j: BoardJob) => j.phase !== 'done' && j.phase !== 'failed'
 /** More open jobs than this fold under one row the person clicks open. */
 const FOLD_AT = 3
@@ -439,7 +438,7 @@ export const register: Register = on => {
         <Text wrap="truncate-end">
           <Text dimColor>{role === 'orchestrator' ? (r.last ? '└ ' : '├ ') : '• '}</Text>
           {job.job}
-          <Text color={job.pending ? 'yellow' : 'cyan'}>{` ${job.pending ? 'waiting' : STEPS_EN[step(job)] ?? 'done'}`}</Text>
+          <Text color={job.pending ? 'yellow' : 'cyan'}>{` ${job.pending ? 'waiting' : STEPS[step(job)] ?? 'done'}`}</Text>
           {cost ? <Text dimColor>{` ${usd(cost)}`}</Text> : ''}
           {agentDots(job)}
         </Text>
@@ -554,7 +553,7 @@ export const register: Register = on => {
     const agentRows = (n: BoardNode, indent: string, name: string) => {
       const t = times[n.agent]
       const [mark, word, color] = STATUS[n.status] ?? ['·', n.status, undefined]
-      const extra = [n.report ? `보고 ${n.report}` : '', n.revives ? `revived ${n.revives}x` : ''].filter(Boolean)
+      const extra = [n.report ? `report ${n.report}` : '', n.revives ? `revived ${n.revives}x` : ''].filter(Boolean)
       const isOpen = open.includes(n.agent)
       const rows = [
         <Button key={`open-${n.agent}`} plain onPress={() => toggle(n.agent)}>
@@ -570,7 +569,7 @@ export const register: Register = on => {
         rows.push(
           <Box flexDirection="row">
             <Text>{`${indent}  `}</Text>
-            <Button key={`go-${n.agent}`} label="이동" onPress={() => void focus(n.agent)} />
+            <Button key={`go-${n.agent}`} label="go" onPress={() => void focus(n.agent)} />
           </Box>,
         )
         for (const line of (n.board || '(no board.md)').split('\n')) {
@@ -583,7 +582,7 @@ export const register: Register = on => {
     const rows = []
     const waiting = tree.flatMap(repo => repo.jobs.filter(j => j.pending))
     if (waiting.length) {
-      rows.push(<Text bold color="yellow">{`내 차례 ${waiting.length}`}</Text>)
+      rows.push(<Text bold color="yellow">{`waiting on you ${waiting.length}`}</Text>)
       for (const j of waiting) {
         rows.push(<Text color="yellow">{`  ▸ ${j.job}: ${PENDING[j.pending as string] ?? j.pending}`}</Text>)
       }
@@ -591,7 +590,7 @@ export const register: Register = on => {
     }
     if (mine.length) {
       const done = mine.filter(t => t.status === 'completed').length
-      rows.push(<Text bold>{`오케 할 일 ${done}/${mine.length}`}</Text>)
+      rows.push(<Text bold>{`OKe todo ${done}/${mine.length}`}</Text>)
       rows.push(...todoRows(mine, '  '))
       rows.push(<Text> </Text>)
     }
@@ -601,7 +600,7 @@ export const register: Register = on => {
       for (const job of repo.jobs) {
         if (job.phase === 'done' || job.phase === 'failed') {
           rows.push(<Text dimColor color={job.phase === 'failed' ? 'red' : undefined}>
-            {`  ${job.phase === 'done' ? '✓' : '✗'} ${job.job} ${job.phase === 'done' ? '끝' : '실패'}`}
+            {`  ${job.phase === 'done' ? '✓' : '✗'} ${job.job} ${job.phase === 'done' ? 'done' : 'failed'}`}
           </Text>)
           continue
         }
