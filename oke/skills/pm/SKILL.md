@@ -144,6 +144,7 @@ seq: 1
 ```
 
    Add `kind: codex` or `kind: opencode` to the header only when the intake asks for that agent; otherwise leave `kind` out and `$OKE_HOME/config.json` (`agents`) decides. The reviewer's assignment takes a `kind` the same way.
+   The model comes from `$OKE_HOME/config.json` (`models`: one per role) and the effort from the user's own settings. Add `model: opus` (or `haiku`) to a worker's or reviewer's header only when this job needs a stronger or a cheaper model than its role's; for your subagents, pass `model` to the Agent tool the same way.
    A claude child starts lean: none of the user's plugins or MCP servers, and only the core built-in tools, always on whatever you write (`$OKE extras` lists them per role, plus the MCP servers and plugins the user has). Each costs tokens on every turn of that child, so add only what this job needs, as comma-separated header lines: `tools: WebFetch` (a built-in tool), `mcp: codegraph` (an MCP server), `plugins: <name@marketplace>`. Leave them out when the job needs nothing extra. The reviewer's assignment takes them the same way.
    `commit: yes` only with a worktree and autonomy `balanced` or `full`. Without a worktree the worker must not commit: a commit there is already on the main branch, before the user was asked about the merge.
 3. `$OKE spawn <that file> --pane <place>`. Without a worktree: `$OKE spawn <that file>` (it starts next to you).
@@ -165,6 +166,7 @@ When a child's wait finishes, act on its first line:
 | `{"deliver": {"to": ..., "text": ...}}` | The child runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again |
 | `deliver_failed` | Your message to the child could not be typed in three times. Report `failed` for that job and name the child |
 | exit code 1 or 2 | herdr failed or is unreachable. Report `failed` with the stderr text. Do not treat the child as gone |
+| `spawn` or `send` refused: "review round N is past its limit" | The job used up its review rounds (`max_review_rounds` in `$OKE_HOME/config.json`, default 10). Report `question` for that job with the open findings and how the rounds went. The user may allow more; the orchestrator runs `$OKE job rounds <job> <n>` and gives you `kind: answer` |
 
 **A new instruction for a child:** edit its assignment (`이번 지시`, `seq` + 1), `$OKE send <child> "Assignment updated (seq <n>). Re-read <its assignment path>."`, then start its wait with the new seq. The wait types the message in once the child is idle, so start the wait last. A message must not start with `/`.
 
@@ -174,7 +176,7 @@ When a child's wait finishes, act on its first line:
 
 Every new instruction to the reviewer (another round, a rebase) repeats this: commit the worker's changes if needed, and put the new `commit:` (without a worktree: a new `tree:`) and range in its assignment. `$OKE job merge` refuses a branch whose tip is not the commit the passing review named.
 
-- `verdict: changes`: pass the findings to the worker as a new instruction, wait, then give the reviewer a new instruction to review again, the whole diff each time. Repeat until `verdict: pass`: there is no round limit. One exception stops the loop: a finding comes back that the worker already answered in an earlier round (it fixed it, or explained why it is not a problem). Then the two disagree; report `question` with that finding and both sides instead of another round.
+- `verdict: changes`: pass the findings to the worker as a new instruction, wait, then give the reviewer a new instruction to review again, the whole diff each time. Repeat until `verdict: pass`, up to the job's review round limit (10 unless the user allowed more; `$OKE job rounds <job>` shows the round and the limit). A reviewer pane past the limit is refused by `spawn` and `send`; before each review subagent call, check `$OKE job rounds <job>` yourself, and past the limit report `question` as in the table above. A finding that comes back after the worker answered it is not a reason to stop early: pass it on with the worker's earlier answer, and let the reviewer decide again. At the limit, the `question` lists the open findings and, for each one that came back, both sides.
 - `verdict: pass`: run `git -C <cwd> status --short` and compare it with the worker's report: the reviewer must not have changed anything (with a worktree it must be clean: the work was committed before the review). Report `done` for the job: summary, branch, number of changed files (`git diff --stat <base>...oke/<job>`, or `git diff --stat HEAD` when uncommitted), the worktree path, and the workers' 배운 것.
 
 ### kind: merge

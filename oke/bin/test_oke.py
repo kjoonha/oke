@@ -207,6 +207,32 @@ class TestState(Base):
         self.assertEqual(self.cli("job", "phase", "grew", "merging"), 1)  # and loses its merge approval
         self.assertEqual(self.cli("job", "lane", "tiny", "normal"), 1)  # not once merging
 
+    def test_review_rounds_stop_at_the_limit_until_the_user_allows_more(self):
+        repo = self.git_repo("r")
+        self.assertEqual(self.cli("job", "new", "j", "--repo", repo), 0)
+        rv = os.path.join(self.home, "jobs", "j", "j-rv")
+        os.makedirs(rv)
+        with open(os.path.join(rv, "assignment.md"), "w") as f:
+            f.write("agent: j-rv\nrole: reviewer\nseq: 11\n---\n")
+        self.assertEqual(oke.review_round("j"), 11)
+        info = oke.load_state()["jobs"]["j"]
+        self.assertIsNone(oke.over_rounds("j", info, oke.load_config(), 10))
+        self.assertIn("review round 11 is past its limit of 10", oke.over_rounds("j", info, oke.load_config(), 11))
+        self.assertEqual(self.cli("job", "rounds", "j", "15"), 0, self.err)
+        self.assertEqual(json.loads(self.out.strip().splitlines()[-1]), {"job": "j", "round": 11, "limit": 15})
+        self.assertIsNone(oke.over_rounds("j", oke.load_state()["jobs"]["j"], oke.load_config(), 11))
+        self.assertNotEqual(self.cli("job", "rounds", "j", "0"), 0)
+
+    def test_a_revived_agents_cost_adds_to_what_its_folder_cost_before(self):
+        d = os.path.join(self.home, "jobs", "j", "j-w1")
+        os.makedirs(d)
+        with open(os.path.join(d, "usage.json"), "w") as f:
+            json.dump({"usd": 3.0}, f)
+        oke.bank_usage(d)  # a new session's mod counts from zero
+        with open(os.path.join(d, "usage.json"), "w") as f:
+            json.dump({"usd": 1.0}, f)
+        self.assertEqual(oke.folder_cost(d), 4.0)
+
     def test_job_new_phase_archive(self):
         repo = self.git_repo("r")
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 0)
@@ -561,7 +587,8 @@ class TestSpawn(SpawnBase):
         with open(os.path.join(conf, "settings.json"), "w") as f:
             json.dump({"hooks": {"SessionStart": [other, herdr_group], "Stop": [other]},
                        "env": {"PYTHONUTF8": "1"}, "enabledPlugins": {"x@y": True},
-                       "autoCompactWindow": 400000}, f)
+                       "autoCompactWindow": 400000, "effortLevel": "high",
+                       "modelSettings": {"claude-opus-5-5": {"effortLevel": "medium"}}}, f)
         old = os.environ.get("CLAUDE_CONFIG_DIR")
         os.environ["CLAUDE_CONFIG_DIR"] = conf
         try:
@@ -580,6 +607,12 @@ class TestSpawn(SpawnBase):
             lean = json.load(f)
         self.assertEqual(lean["hooks"], {"SessionStart": [herdr_group]})
         self.assertEqual(lean["autoCompactWindow"], 400000)
+        # effort follows the user's session settings, as OMC's agents inherit it
+        self.assertEqual(lean["effortLevel"], "high")
+        self.assertEqual(lean["modelSettings"], {"claude-opus-5-5": {"effortLevel": "medium"}})
+        self.assertEqual(args[args.index("--model") + 1], "sonnet")
+        picked = oke.launch_args("worker", c, self.home, "/p", header={"model": "opus"})
+        self.assertEqual(picked[picked.index("--model") + 1], "opus")  # the job's assignment chose it
         self.assertEqual(lean["env"], {"PYTHONUTF8": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                                        "OKE_HOME": oke.oke_home()})
         # the OKe folders come from the settings file: --add-dir stops at a trust dialog

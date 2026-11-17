@@ -66,6 +66,7 @@ def load_config():
         "models": {"pm": "opus", "worker": "sonnet", "reviewer": "sonnet"},
         "agents": {"worker": "claude", "reviewer": "claude"},  # which CLI runs each role
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
+        "max_review_rounds": 10,  # a job's reviews stop there and the PM asks the user; null: no limit
     }
     try:
         with io.open(os.path.join(home, "config.json"), encoding="utf-8") as f:
@@ -325,7 +326,32 @@ def first_prompt(kind, role, path):
             "Read it first.").format(role=role, plugin=plugin, path=path)
 
 
+def folder_cost(folder):
+    """What the agents that ran in `folder` cost: this session's figure (its mod rewrites
+    usage.json after each turn) plus what earlier sessions there banked."""
+    total = 0.0
+    for name in ("usage.json", "usage-prev.json"):
+        usage = read_json(os.path.join(folder, name), {})
+        usd = usage.get("usd") if isinstance(usage, dict) else None
+        if isinstance(usd, (int, float)):
+            total += usd
+    return round(total, 4)
+
+
+def bank_usage(folder):
+    """Before a new session starts in `folder`: its mod counts from zero again, so keep
+    what the last one cost."""
+    if not folder or not os.path.exists(os.path.join(folder, "usage.json")):
+        return
+    try:
+        write_json_atomic(os.path.join(folder, "usage-prev.json"), {"usd": folder_cost(folder)})
+        os.remove(os.path.join(folder, "usage.json"))
+    except (IOError, OSError):
+        pass  # the cost just reads lower
+
+
 def agent_command(kind, role, config, home, plugin_dir, folder, resume=None):
+    bank_usage(folder)
     """herdr's --kind and the CLI arguments for one worker or reviewer."""
     if kind == "claude":
         header = read_header(os.path.join(folder, "assignment.md")) if folder else None
@@ -420,8 +446,10 @@ def write_lean_settings(folder, plugins=(), dirs=()):
     env.pop("CLAUDE_CODE_PLUGIN_DIRS", None)  # the user's own mods would load in every child
     env["OKE_HOME"] = oke_home()  # the skills say $OKE_HOME; a herdr pane does not inherit it
     settings = {"hooks": hooks, "env": env}
-    if "autoCompactWindow" in user:  # the user's compaction setting holds in children too
-        settings["autoCompactWindow"] = user["autoCompactWindow"]
+    # the user's compaction and effort settings hold in children too
+    for name in ("autoCompactWindow", "effortLevel", "modelSettings"):
+        if name in user:
+            settings[name] = user[name]
     if plugins:
         settings["enabledPlugins"] = dict((p, True) for p in plugins)
     if dirs:
@@ -500,7 +528,8 @@ def cmd_rt(args):
 def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header=None):
     """`header` is the agent's assignment header: its `tools:`, `mcp:` and `plugins:`
     (comma separated) are what the PM switched on for this job."""
-    args = ["--model", config["models"].get(role, "sonnet"), "--plugin-dir", plugin_dir]
+    model = (header or {}).get("model") or config["models"].get(role, "sonnet")
+    args = ["--model", model, "--plugin-dir", plugin_dir]
     # Measured: the user's plugins, hooks and MCP servers add about 36k tokens to every
     # child's context. Without a settings file, start as before so the herdr hook stays.
     folder = folder or home
@@ -663,6 +692,9 @@ def cmd_spawn(args):
             return fail("unknown job %r in assignment" % header.get("job"))
         if job["phase"] not in ("working", "reviewing", "merging"):
             return fail("plan not approved: job %s is in phase %s" % (header["job"], job["phase"]))
+        over = role == "reviewer" and over_rounds(header["job"], job, config, int(header["seq"]))
+        if over:
+            return fail(over)
         key = job["repo"]
 
     if any(a.get("name") == agent for a in list_agents()):
@@ -1074,6 +1106,28 @@ def records(state):
     return out
 
 
+def review_round(job):
+    """The review round a job is in: the highest seq among its reviewers' assignments
+    (each new review, by a pane or a subagent, is a new seq)."""
+    d = os.path.join(oke_home(), "jobs", job)
+    seqs = [0]
+    for name in os.listdir(d) if os.path.isdir(d) else []:
+        if re.search(r"-rv\d*$", name):
+            header = read_header(os.path.join(d, name, "assignment.md")) or {}
+            if str(header.get("seq", "")).isdigit():
+                seqs.append(int(header["seq"]))
+    return max(seqs)
+
+
+def over_rounds(job, info, config, seq):
+    """The refusal when review round `seq` is past the job's limit, else None."""
+    limit = info.get("review_rounds", config.get("max_review_rounds"))
+    if limit is None or seq <= limit:
+        return None
+    return ("job %s: review round %d is past its limit of %d: report a question with the open "
+            "findings; the user may allow more (`oke job rounds %s <n>`)" % (job, seq, limit, job))
+
+
 def find_target(state, name):
     for role, n, key, rec in records(state):
         if n == name or (role == "orchestrator" and name == rec.get("agent")):
@@ -1336,8 +1390,8 @@ def board_node(role, name, key, record, agents):
     todos = read_json(os.path.join(folder, "todos.json"), []) if folder else []
     todos = [t for t in todos if isinstance(t, dict)] if isinstance(todos, list) else []
     # what the agent's session has cost so far, written by its OKe mod after each turn
-    usage = read_json(os.path.join(folder, "usage.json"), {}) if folder else {}
-    cost = usage.get("usd") if isinstance(usage, dict) else None
+    cost = folder_cost(folder) if folder and (os.path.exists(os.path.join(folder, "usage.json"))
+                                              or os.path.exists(os.path.join(folder, "usage-prev.json"))) else None
     return {"agent": name, "role": role, "status": a.get("agent_status") if a else "dead",
             "pane": (a or {}).get("pane_id") or record.get("pane"),
             "report": (report or {}).get("type"), "board": board,
@@ -2245,6 +2299,16 @@ def job_locked(args):
         state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
         save_state(state)
         return 0
+    if args.action == "rounds":
+        info = state["jobs"][args.slug]
+        if args.n is not None:
+            if args.n < 1:
+                return fail("a review round limit is 1 or more")
+            info["review_rounds"] = args.n
+            save_state(state)
+        print(json.dumps({"job": args.slug, "round": review_round(args.slug),
+                          "limit": info.get("review_rounds", load_config().get("max_review_rounds"))}))
+        return 0
     if args.action == "lane":
         info = state["jobs"][args.slug]
         grows = LANES.index(args.lane) > LANES.index(info.get("lane") or "normal")
@@ -2314,6 +2378,13 @@ def cmd_send(args):
         return fail("unknown agent: %s" % args.agent)
     if found[0] == "orchestrator":
         return fail("the orchestrator has no inbox: a PM reports to it instead")
+    child_job = state["jobs"].get(found[3].get("job")) if found[0] == "reviewer" else None
+    if child_job is not None:
+        header = read_header(os.path.join(agent_folder(*found), "assignment.md")) or {}
+        seq = int(header["seq"]) if str(header.get("seq", "")).isdigit() else 0
+        over = over_rounds(found[3]["job"], child_job, load_config(), seq)
+        if over:
+            return fail(over)
     sender = "user"
     pane = runtime().whoami()
     if pane:
@@ -2456,6 +2527,9 @@ def build_parser():
     archive.add_argument("slug")
     defer = job_sub.add_parser("defer")
     defer.add_argument("slug")
+    rounds = job_sub.add_parser("rounds", help="show a job's review round and limit, or set the limit")
+    rounds.add_argument("slug")
+    rounds.add_argument("n", nargs="?", type=int)
     lane = job_sub.add_parser("lane", help="the job's size lane, which the PM decides while planning")
     lane.add_argument("slug")
     lane.add_argument("lane", choices=LANES)

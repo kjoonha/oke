@@ -221,6 +221,8 @@ The plan's lane (`lane:` at the top of its 접근, also on the board) changes th
 
 Merge question: summary, branch name, number of changed files, and the checks recorded so far (`$OKE ledger show <job>`: who checked which commit, pass or fail). Offer: merge / hold / look myself. A merge counts as done only after the PM verified it on the merged result (`merge: verified` in the ledger); when the PM reports merged, check that before `job phase done`. When the PM asks because the main branch moved on during the check, the user may accept the merge as it is: put that answer into the PM's assignment; the PM records it with `--accept`.
 
+A job's reviews stop after 10 rounds (`max_review_rounds` in `$OKE_HOME/config.json`); the PM then asks with the open findings. When the user allows more, run `$OKE job rounds <job> <n>` before you give the PM the answer.
+
 ## Shared wiki
 
 Knowledge that holds beyond one repository (company rules, shared tools, how deploys work) lives in the `shared_wiki` folder, which `job new` prints. Only you write it; every PM and worker reads it.
