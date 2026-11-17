@@ -62,6 +62,7 @@ on: <what you wait for, when type is waiting>
 ## 검증 출력
 ## 질문
 ## 배운 것
+## 배운 것 (공용)   (in the done report after a merge: what holds beyond this repository, or 없음)
 ```
 
    `waiting` means "I am idle on purpose for this job". Write it whenever you end a turn with a background wait running for that job. Without it the orchestrator thinks you forgot the job. Leave a report that already has the current `seq` and a final type alone until the job's next assignment, with one exception: if a child stops at a dialog while that report is an open `question`, overwrite it with `blocked` and copy the open question into its 질문 section. After the dialog's `kind: dialog`, report the question again if it is still open.
@@ -85,7 +86,7 @@ Never `$OKE spawn` a name that is already in `children.json`. If `git -C <repo> 
 
 ### kind: plan
 
-Read `$OKE_HOME/jobs/<job>/intake.md`, the repository, and `<wiki>/index.md` if it exists. Do not change the repository. Write `$OKE_HOME/jobs/<job>/plan.md`:
+Read `$OKE_HOME/jobs/<job>/intake.md`, the repository, and `<wiki>/index.md` and `<shared_wiki>/index.md` where they exist. Do not change the repository. Write `$OKE_HOME/jobs/<job>/plan.md`:
 
 ```
 job: <job>
@@ -110,6 +111,7 @@ role: worker
 parent: <you>
 cwd: <worktree path, or the repository>
 wiki: <wiki>
+shared_wiki: <shared_wiki>
 job: <job>
 commit: yes | no
 seq: 1
@@ -174,7 +176,7 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
    1. Give the worker a new instruction, with `commit: yes` in its header from now on: "Rebase `oke/<job>` onto `<base branch>`. Resolve the conflicts so that both changes keep their purpose. Run the 검증 명령 again, commit, and report." Write this job's report as `waiting` and wait. A dead worker is revived by the wait.
    2. Worker `done`: give the reviewer a new instruction to review what the rebase changed, with `commit:` set to the rebased tip (`job merge` refuses until that review passes). `verdict: pass`: back to step 3. `changes`: as in the review rounds.
    3. Worker `question` or `failed`, or the merge conflicts again after the rebase: report `question` for the job with the conflicting files. The user decides.
-5. Update the wiki from the reports' 배운 것 (see below).
+5. Update the wiki from the reports' 배운 것 (see below). What holds beyond this repository goes into your done report's 배운 것 (공용) instead.
 6. Remove the worktree once it is merged: `$OKE worktree --remove <its id>`. First look at `git status --short` there. Changed tracked files: keep the worktree and say so. Untracked files: judge them. Byproducts of builds and checks (caches such as `__pycache__`, compiled files, test logs) do not stop the removal. Anything that looks like work (source, docs, data) keeps the worktree: list those files in your report.
 7. Close the worker and reviewer: `$OKE close <pane>` (the `pane` that `spawn` printed).
 8. Report `done` for the job. If a merge waited for this one, start it now.
@@ -204,7 +206,7 @@ A child may send you `URGENT <job>: ...` while it keeps working. Decide:
 
 ## Wiki
 
-Only you write it. Folder: the `wiki` path from your standing assignment.
+Only you write it. Folder: the `wiki` path from the job's assignment (it may differ from an older standing assignment). Never write `shared_wiki`: the orchestrator keeps it.
 
 - `index.md`: one line per page, with a link.
 - `log.md`: append `<date> <job>: <what you added>`.

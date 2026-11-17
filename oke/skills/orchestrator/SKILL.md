@@ -61,7 +61,7 @@ The OKe mod in every agent does this without you:
 
 1. Settle the repository path (ask only if it is unclear).
 2. Pick a job name: lowercase letters, digits and `-`, at most 24 characters, starting with a letter. It must differ from every open job.
-3. `$OKE job new <job> --repo <path>`. It prints `job_dir`, `repo`, `pm_dir`, `pm_job_dir`, `pm_agent`, `wiki`. Use these values as they are; do not build the paths yourself. If it fails because the name or its branch already exists, pick another name (add `-2`).
+3. `$OKE job new <job> --repo <path>`. It prints `job_dir`, `repo`, `pm_dir`, `pm_job_dir`, `pm_agent`, `wiki`, `shared_wiki`. Use these values as they are; do not build the paths yourself. If it fails because the name or its branch already exists, pick another name (add `-2`).
 4. Interview the user until the request is clear (see "Interview"). `$OKE job phase <job> planning` refuses a job whose interview is not done.
 5. Write `<job_dir>/intake.md`:
 
@@ -114,6 +114,7 @@ role: pm
 parent: orchestrator
 cwd: <repo path>
 wiki: <wiki from job new>
+shared_wiki: <shared_wiki from job new>
 seq: 1
 ---
 ## 목표
@@ -130,6 +131,7 @@ role: pm
 job: <job>
 cwd: <repo path>
 wiki: <wiki>
+shared_wiki: <shared_wiki>
 seq: <n>
 ---
 ## 목표
@@ -211,11 +213,21 @@ When the user gives a job up: give the PM `kind: cancel` (steps 2, 4, 5 and 6 of
 | User wants changes | Assign `kind: plan` with the requested changes | `planning` |
 | PM reports work reviewed (`report_done`, phase `working` or `reviewing`) | It becomes a `merge` item | `awaiting_merge` |
 | User says merge | Assign `kind: merge` | `merging` |
-| PM reports merged (`report_done`, phase `merging`) | `$OKE job phase <job> done`, `$OKE job archive <job>`, tell the user what changed | |
+| PM reports merged (`report_done`, phase `merging`) | Update the shared wiki from the report's 배운 것 (공용) (see "Shared wiki"), `$OKE job phase <job> done`, `$OKE job archive <job>`, tell the user what changed | |
 
 Plan approval question: put a short summary of the plan in the option `preview`, mention the plan file path, and offer: approve / request changes / discuss in the PM pane (then `$OKE attach <pm>` and defer).
 
 Merge question: summary, branch name, number of changed files, and the checks recorded so far (`$OKE ledger show <job>`: who checked which commit, pass or fail). Offer: merge / hold / look myself. A merge counts as done only after the PM verified it on the merged result (`merge: verified` in the ledger); when the PM reports merged, check that before `job phase done`. When the PM asks because the main branch moved on during the check, the user may accept the merge as it is: put that answer into the PM's assignment; the PM records it with `--accept`.
+
+## Shared wiki
+
+Knowledge that holds beyond one repository (company rules, shared tools, how deploys work) lives in the `shared_wiki` folder, which `job new` prints. Only you write it; every PM and worker reads it.
+
+- `index.md`: one line per page, with a link.
+- `log.md`: append `<date> <job>: <what you added>`.
+- `<topic>.md`: one topic per page.
+
+Add what a PM report's 배운 것 (공용) states and you believe, and what the user tells you to keep. Fix a page that turned out wrong. Facts about one repository stay in that repository's wiki, which its PM keeps.
 
 ## Autonomy
 
