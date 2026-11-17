@@ -146,7 +146,7 @@ When a child's wait finishes, act on its first line:
 
 Every new instruction to the reviewer (another round, a rebase) repeats this: commit the worker's changes if needed, and put the new `commit:` (without a worktree: a new `tree:`) and range in its assignment. `$OKE job merge` refuses a branch whose tip is not the commit the passing review named.
 
-- `verdict: changes`: pass the findings to the worker as a new instruction, wait, then give the reviewer a new instruction to review again. At most 3 rounds; after that report `question` with the open findings.
+- `verdict: changes`: pass the findings to the worker as a new instruction, wait, then give the reviewer a new instruction to review again, the whole diff each time. Repeat until `verdict: pass`: there is no round limit. One exception stops the loop: a finding comes back that the worker already answered in an earlier round (it fixed it, or explained why it is not a problem). Then the two disagree; report `question` with that finding and both sides instead of another round.
 - `verdict: pass`: run `git -C <cwd> status --short` and compare it with the worker's report: the reviewer must not have changed anything (with a worktree it must be clean: the work was committed before the review). Report `done` for the job: summary, branch, number of changed files (`git diff --stat <base>...oke/<job>`, or `git diff --stat HEAD` when uncommitted), the worktree path, and the workers' 배운 것.
 
 ### kind: merge
