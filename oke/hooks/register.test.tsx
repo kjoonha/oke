@@ -396,3 +396,23 @@ test('the orchestrator never compacts by itself', async ($, on) => {
   answeredNow = []
   tickRole = 'worker'
 })
+
+test('the board shows decided, to decide, to check and blocked from board.md', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  tickBoard = [{ repo: 'toy-6b0484', key: 'k', jobs: [], pm: {
+    agent: 'pm-toy', role: 'pm', status: 'working', pane: null, report: null, revives: 0, todos: [],
+    board: 'agent: pm-toy\n---\n## 지금\nplanning\n## 결정        (decided, with why)\n- JWT over sessions: no shared store\n'
+      + '## 결정 필요\nuser: keep the old endpoint?\n## 확인 필요\n없음\n## 막힌 것\nnone' } }]
+  engine(on, [], [])
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /◆ decided: JWT over sessions: no shared store$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /\? decide: user: keep the old endpoint\?$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /check:|blocked:/ })).toBeFalsy()  // 없음 and none are empty
+  await ui.unmount()
+  tickBoard = BOARD
+  tickRole = 'worker'
+})

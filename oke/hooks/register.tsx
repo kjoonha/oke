@@ -190,14 +190,25 @@ const TODO: Record<string, [string, string | undefined]> = {
 
 const TODO_ORDER = ['in_progress', 'pending', 'completed']
 
-/** The `## 지금` section of a board.md: how the agent's current work goes, at most 3 lines. */
-function nowLines(board: string): string[] {
-  const lines = board.split(/\r?\n/)
-  const at = lines.findIndex(l => /^##\s*지금/.test(l.trim()))
+/** The lines of one `## <title>` section of a board.md, an empty marker (없음, none, -) dropped. */
+function section(board: string, title: string, max: number): string[] {
+  const lines = board.split(/\r?\n/).map(l => l.trim())
+  const at = lines.findIndex(l => l.startsWith('##') && l.slice(2).replace(/\(.*$/, '').trim() === title)
   if (at < 0) return []
-  const end = lines.findIndex((l, i) => i > at && l.trim().startsWith('## '))
-  return lines.slice(at + 1, end < 0 ? undefined : end).map(l => l.trim()).filter(Boolean).slice(0, 3)
+  const end = lines.findIndex((l, i) => i > at && l.startsWith('## '))
+  return lines.slice(at + 1, end < 0 ? undefined : end)
+    .map(l => l.replace(/^[-*]\s+/, ''))
+    .filter(l => l && !/^(없음|none|-)$/i.test(l))
+    .slice(0, max)
 }
+
+/** board.md sections shown under an agent's todos: title, mark, label, color. */
+const NOTES: [string, string, string, string][] = [
+  ['결정 필요', '?', 'decide', 'yellow'],
+  ['막힌 것', '✗', 'blocked', 'red'],
+  ['확인 필요', '!', 'check', 'magenta'],
+  ['결정', '◆', 'decided', 'cyan'],
+]
 
 const TASK_TOOLS = ['TaskCreate', 'TaskUpdate', 'TodoWrite']
 
@@ -604,7 +615,12 @@ export const register: Register = on => {
           <Text dimColor>{`${t ? ` ${elapsed(now - t.at)}` : ''}${extra.length ? ` · ${extra.join(', ')}` : ''}`}</Text>
         </Button>,
       ]
-      rows.push(...todoRows(n.todos ?? [], `${indent}  `, nowLines(n.board)))
+      rows.push(...todoRows(n.todos ?? [], `${indent}  `, section(n.board, '지금', 3)))
+      for (const [title, mark, label, color] of NOTES) {
+        for (const line of section(n.board, title, 5)) {
+          rows.push(<Text color={color}>{`${indent}  ${mark} ${label}: ${line}`}</Text>)
+        }
+      }
       if (isOpen) {
         rows.push(
           <Box flexDirection="row">
