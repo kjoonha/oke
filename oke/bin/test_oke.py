@@ -582,7 +582,12 @@ class TestSpawn(SpawnBase):
         self.assertEqual(lean["autoCompactWindow"], 400000)
         self.assertEqual(lean["env"], {"PYTHONUTF8": "1", "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
                                        "OKE_HOME": oke.oke_home()})
-        self.assertNotIn("--setting-sources", oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p"))
+        # the OKe folders come from the settings file: --add-dir stops at a trust dialog
+        self.assertEqual(lean["permissions"]["additionalDirectories"], [self.home, c["wiki_path"]])
+        self.assertNotIn("--add-dir", args)
+        plain = oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p")
+        self.assertNotIn("--setting-sources", plain)
+        self.assertEqual(plain.count("--add-dir"), 2)
         self.assertNotIn("Edit", args[args.index("--tools") + 1].split(","))
         for role in ("pm", "worker", "reviewer"):
             tools = oke.launch_args(role, c, self.home, "/p")
