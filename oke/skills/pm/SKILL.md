@@ -34,7 +34,7 @@ New instructions arrive as a prompt starting with `OKe inbox:`. It holds one or 
 ## Always
 
 1. Read your standing assignment first, then the job assignment each message names. Your folder is the folder of the standing assignment.
-2. Keep `board.md` in your folder current. Rewrite the whole file when you start or finish a step:
+2. Keep `board.md` in your folder current. Rewrite the whole file when you start or finish a step. The board shows `## 지금` under your task in progress, so rewrite it each time you move to another task: how that task goes now, in one to three lines.
 
 ```
 agent: <you>

@@ -188,6 +188,17 @@ const TODO: Record<string, [string, string | undefined]> = {
   pending: ['○', undefined],
 }
 
+const TODO_ORDER = ['in_progress', 'pending', 'completed']
+
+/** The `## 지금` section of a board.md: how the agent's current work goes, at most 3 lines. */
+function nowLines(board: string): string[] {
+  const lines = board.split(/\r?\n/)
+  const at = lines.findIndex(l => /^##\s*지금/.test(l.trim()))
+  if (at < 0) return []
+  const end = lines.findIndex((l, i) => i > at && l.trim().startsWith('## '))
+  return lines.slice(at + 1, end < 0 ? undefined : end).map(l => l.trim()).filter(Boolean).slice(0, 3)
+}
+
 const TASK_TOOLS = ['TaskCreate', 'TaskUpdate', 'TodoWrite']
 
 /** Apply one task tool call to the list, as the tool itself did. */
@@ -557,14 +568,17 @@ export const register: Register = on => {
     const now = Date.now()
     if (tree.length === 0 && mine.length === 0) return <Text dimColor>No OKe work yet.</Text>
 
-    const todoRows = (list: Todo[], indent: string) => list.map(t => {
-      const [tm, tc] = TODO[t.status] ?? ['○', undefined]
-      return (
-        <Text color={tc} dimColor={t.status === 'completed'} bold={t.status === 'in_progress'}>
-          {`${indent}${tm} ${t.content}`}
-        </Text>
-      )
-    })
+    // in progress first, each with how it goes (board.md's 지금), then planned, then done
+    const todoRows = (list: Todo[], indent: string, now: string[] = []) => TODO_ORDER.flatMap(status =>
+      list.filter(t => (TODO[t.status] ? t.status : 'pending') === status).flatMap(t => {
+        const [tm, tc] = TODO[status]!
+        return [
+          <Text color={tc} dimColor={status === 'completed'} bold={status === 'in_progress'}>
+            {`${indent}${tm} ${t.content}`}
+          </Text>,
+          ...(status === 'in_progress' ? now : []).map((line, i) => <Text color="cyan">{`${indent}    ${i ? '  ' : '└ '}${line}`}</Text>),
+        ]
+      }))
 
     const toggle = (agent: string) =>
       void update($, expanded, list => (list.includes(agent) ? list.filter(a => a !== agent) : [...list, agent]))
@@ -590,7 +604,7 @@ export const register: Register = on => {
           <Text dimColor>{`${t ? ` ${elapsed(now - t.at)}` : ''}${extra.length ? ` · ${extra.join(', ')}` : ''}`}</Text>
         </Button>,
       ]
-      rows.push(...todoRows(n.todos ?? [], `${indent}  `))
+      rows.push(...todoRows(n.todos ?? [], `${indent}  `, nowLines(n.board)))
       if (isOpen) {
         rows.push(
           <Box flexDirection="row">
