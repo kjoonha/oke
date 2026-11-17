@@ -222,6 +222,12 @@ class TestState(Base):
         self.assertEqual(self.cli("job", "budget", "j", "8"), 0, self.err)
         self.assertEqual(json.loads(self.out.strip().splitlines()[-1]), {"job": "j", "cost": 5.5, "budget": 8.0})
         self.assertIsNone(oke.over_budget("j", oke.load_state()["jobs"]["j"], oke.load_config()))
+        # a revived worker's mod counts from zero: what it cost before is banked first
+        oke.bank_usage(os.path.join(d, "j-w1"))
+        with open(os.path.join(d, "j-w1", "usage.json"), "w") as f:
+            json.dump({"usd": 1.0}, f)
+        self.assertEqual(oke.job_cost("j"), 6.5)
+        self.assertNotEqual(self.cli("job", "budget", "j", "-1"), 0)
 
     def test_job_new_phase_archive(self):
         repo = self.git_repo("r")

@@ -428,16 +428,18 @@ test('a PM, worker or reviewer cannot run git commands that lose or publish work
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   for (const bad of ['git push origin main', 'git -C "C:/a b/r" push --force', 'cd r && git reset --hard HEAD~1',
-    'git -c core.x=1 clean -fd', 'git branch -D oke/j', 'git stash drop']) {
+    'git -c core.x=1 clean -fd', 'git branch -D oke/j', 'git stash drop', 'git -c "a=b c" push',
+    'git clean --force', 'git checkout -f main', 'x=$(git push)']) {
     const out: any = await $.tool.call({ tool: 'Bash', command: bad } as any)
     expect(out.deny).toMatch(/^OKe blocks `git /)
   }
   for (const ok of ['git -C r diff main...HEAD', 'git -C r commit -m "push the button"', 'git rebase main',
-    'git -C r reset HEAD file.py', 'git checkout -- calc.py']) {
+    'git -C r reset HEAD file.py', 'git checkout -- calc.py', 'git commit -m "why we avoid git push"',
+    'grep -rn "git reset --hard" .', "git commit -F - <<'EOF'\nnever git push here\nEOF"]) {
     const out: any = await $.tool.call({ tool: 'Bash', command: ok } as any)
     expect(out.deny).toBeUndefined()
   }
-  expect(ran.length).toBe(5)
+  expect(ran.length).toBe(8)
 })
 
 test('the orchestrator notifies once when a new item waits on the person', async ($, on) => {
@@ -448,7 +450,7 @@ test('the orchestrator notifies once when a new item waits on the person', async
   const notes: string[] = []
   on('ui.notify', (_: any, e: any) => {
     notes.push(JSON.stringify(e))
-    return { value: { isSent: true, channel: 'terminal' } }
+    return { value: { isSent: true as const, channel: 'terminal_bell' as const } }
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const merge = (b: any) => [{ ...b[0], jobs: [b[0].jobs[0], { ...b[0].jobs[1], phase: 'awaiting_merge', pending: 'merge' }] }]

@@ -326,7 +326,32 @@ def first_prompt(kind, role, path):
             "Read it first.").format(role=role, plugin=plugin, path=path)
 
 
+def folder_cost(folder):
+    """What the agents that ran in `folder` cost: this session's figure (its mod rewrites
+    usage.json after each turn) plus what earlier sessions there banked."""
+    total = 0.0
+    for name in ("usage.json", "usage-prev.json"):
+        usage = read_json(os.path.join(folder, name), {})
+        usd = usage.get("usd") if isinstance(usage, dict) else None
+        if isinstance(usd, (int, float)):
+            total += usd
+    return round(total, 4)
+
+
+def bank_usage(folder):
+    """Before a new session starts in `folder`: its mod counts from zero again, so keep
+    what the last one cost."""
+    if not folder or not os.path.exists(os.path.join(folder, "usage.json")):
+        return
+    try:
+        write_json_atomic(os.path.join(folder, "usage-prev.json"), {"usd": folder_cost(folder)})
+        os.remove(os.path.join(folder, "usage.json"))
+    except (IOError, OSError):
+        pass  # the cost just reads lower
+
+
 def agent_command(kind, role, config, home, plugin_dir, folder, resume=None):
+    bank_usage(folder)
     """herdr's --kind and the CLI arguments for one worker or reviewer."""
     if kind == "claude":
         header = read_header(os.path.join(folder, "assignment.md")) if folder else None
@@ -667,7 +692,7 @@ def cmd_spawn(args):
             return fail("unknown job %r in assignment" % header.get("job"))
         if job["phase"] not in ("working", "reviewing", "merging"):
             return fail("plan not approved: job %s is in phase %s" % (header["job"], job["phase"]))
-        over = over_budget(header["job"], job, config)
+        over = role == "worker" and over_budget(header["job"], job, config)
         if over:
             return fail(over)
         key = job["repo"]
@@ -1085,16 +1110,9 @@ def job_cost(job):
     """What a job's workers and reviewers have cost (their OKe mods write it after each
     turn). shortcut: the PM's own turns and its subagents are not in it (one PM serves
     many jobs); count them per job if a trivial job ever runs up a bill."""
-    total = 0.0
     d = os.path.join(oke_home(), "jobs", job)
-    for name in os.listdir(d) if os.path.isdir(d) else []:
-        if name == "pm":
-            continue
-        usage = read_json(os.path.join(d, name, "usage.json"), {})
-        usd = usage.get("usd") if isinstance(usage, dict) else None
-        if isinstance(usd, (int, float)):
-            total += usd
-    return round(total, 4)
+    return round(sum(folder_cost(os.path.join(d, name)) for name in (os.listdir(d) if os.path.isdir(d) else [])
+                     if name != "pm"), 4)
 
 
 def over_budget(job, info, config):
@@ -1371,8 +1389,8 @@ def board_node(role, name, key, record, agents):
     todos = read_json(os.path.join(folder, "todos.json"), []) if folder else []
     todos = [t for t in todos if isinstance(t, dict)] if isinstance(todos, list) else []
     # what the agent's session has cost so far, written by its OKe mod after each turn
-    usage = read_json(os.path.join(folder, "usage.json"), {}) if folder else {}
-    cost = usage.get("usd") if isinstance(usage, dict) else None
+    cost = folder_cost(folder) if folder and (os.path.exists(os.path.join(folder, "usage.json"))
+                                              or os.path.exists(os.path.join(folder, "usage-prev.json"))) else None
     return {"agent": name, "role": role, "status": a.get("agent_status") if a else "dead",
             "pane": (a or {}).get("pane_id") or record.get("pane"),
             "report": (report or {}).get("type"), "board": board,
@@ -2283,6 +2301,8 @@ def job_locked(args):
     if args.action == "budget":
         info = state["jobs"][args.slug]
         if args.usd is not None:
+            if args.usd < 0:
+                return fail("a budget is 0 or more dollars")
             info["budget"] = args.usd
             save_state(state)
         print(json.dumps({"job": args.slug, "cost": job_cost(args.slug),
@@ -2357,7 +2377,8 @@ def cmd_send(args):
         return fail("unknown agent: %s" % args.agent)
     if found[0] == "orchestrator":
         return fail("the orchestrator has no inbox: a PM reports to it instead")
-    child_job = state["jobs"].get(found[3].get("job")) if found[0] in ("worker", "reviewer") else None
+    # only new work is stopped: a reviewer may still review what is done
+    child_job = state["jobs"].get(found[3].get("job")) if found[0] == "worker" else None
     if child_job is not None:
         over = over_budget(found[3]["job"], child_job, load_config())
         if over:
