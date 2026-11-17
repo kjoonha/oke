@@ -169,9 +169,9 @@ test('the board puts what waits on the user first and folds finished jobs', asyn
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /waiting on you 1/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /calc-sub: PM asks/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /^toy$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /calc-sub rollback ✗/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /plan approve work review merge verify/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^▍toy$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /calc-sub\s+rollback ✗/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /plan ›\s*approve\s*›\s*work\s*›\s*review\s*›\s*merge\s*›\s*verify/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /✓ calc-add done/ })).toBeTruthy()
   expect(await ui.find({ key: 'open-calc-add-w1' })).toBeFalsy()
   await ui.unmount()
@@ -409,9 +409,9 @@ test('the board shows decided, to decide, to check and blocked from board.md', a
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /◆ decided: JWT over sessions: no shared store$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /\? decide: user: keep the old endpoint\?$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /check:|blocked:/ })).toBeFalsy()  // 없음 and none are empty
+  expect(await ui.find({ type: 'Text', text: /◆ decided\s+JWT over sessions: no shared store$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /\? decide\s+user: keep the old endpoint\?$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /check|blocked/ })).toBeFalsy()  // 없음 and none are empty
   await ui.unmount()
   tickBoard = BOARD
   tickRole = 'worker'
