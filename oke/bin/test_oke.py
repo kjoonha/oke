@@ -167,6 +167,28 @@ class TestState(Base):
         self.assertEqual(len(oke.slug("a" * 40)), 24)
         self.assertEqual(oke.slug("--a--b--"), "a-b")
 
+    def test_wiki_name_from_the_origin_url(self):
+        for url in ("https://github.com/TeamA/api.git", "git@github.com:TeamA/api.git",
+                    "ssh://git@host:22/TeamA/api/", "https://host/group/TeamA/api"):
+            self.assertEqual(oke.wiki_name("/x/api/.git", url), "teama-api")
+        self.assertEqual(oke.wiki_name("/x/my_api/.git", ""), "my-api")
+
+    def test_wiki_folder_moves_from_the_old_name_and_keeps_out_strangers(self):
+        repo = self.git_repo("api")
+        key = oke.repo_key(repo)
+        root = oke.load_config()["wiki_path"]
+        old = os.path.join(root, oke.repo_name(key))
+        os.makedirs(old)
+        with open(os.path.join(old, "index.md"), "w") as f:
+            f.write("- [Testing](testing.md)\n")
+        path = oke.wiki_dir(key)
+        self.assertEqual(os.path.basename(path), "api")
+        self.assertTrue(os.path.exists(os.path.join(path, "index.md")))
+        self.assertFalse(os.path.exists(old))
+        self.assertEqual(oke.wiki_dir(key), path)  # its own folder, every time
+        other = self.git_repo("other/api")
+        self.assertEqual(os.path.basename(oke.wiki_dir(oke.repo_key(other))), oke.repo_name(oke.repo_key(other)))
+
     def test_job_new_phase_archive(self):
         repo = self.git_repo("r")
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 0)
@@ -175,7 +197,8 @@ class TestState(Base):
         self.assertTrue(info["job_dir"].endswith("/jobs/fix-a"))
         self.assertRegex(info["pm_dir"], r"/repos/r-[0-9a-f]{6}/pm$")
         self.assertRegex(info["pm_agent"], r"^pm-r-[0-9a-f]{6}$")
-        self.assertRegex(info["wiki"], r"/wiki/r-[0-9a-f]{6}$")
+        self.assertTrue(info["wiki"].endswith("/wiki/r"))
+        self.assertTrue(info["shared_wiki"].endswith("/wiki/_shared"))
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 1)
         self.assertEqual(self.cli("job", "phase", "fix-a", "nonsense"), 1)
         self.assertEqual(self.cli("job", "phase", "nope", "planning"), 1)

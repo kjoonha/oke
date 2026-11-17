@@ -556,6 +556,51 @@ def repo_name(key):
     return "%s-%s" % (slug(name, 18), hashlib.sha1(key.encode("utf-8")).hexdigest()[:6])
 
 
+def remote_url(key):
+    """The repository's origin URL, or "" without one."""
+    p = subprocess.run(["git", "--git-dir", native_path(key), "config", "--get", "remote.origin.url"],
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return p.stdout.decode("utf-8", "replace").strip() if p.returncode == 0 else ""
+
+
+def wiki_name(key, url):
+    """A repository's wiki folder name, the same on every machine and checkout path:
+    `owner-repo` from the origin URL, else the repository's own name."""
+    parts = [x for x in re.split(r"[/:]", re.sub(r"(\.git)?/*$", "", url)) if x] if url else []
+    if len(parts) >= 2:
+        return "%s-%s" % (slug(parts[-2], 18), slug(parts[-1]))
+    return re.sub(r"-[0-9a-f]{6}$", "", repo_name(key))
+
+
+WIKI_MARK = ".oke-repo"
+
+
+def wiki_dir(key):
+    """The repository's wiki folder, made if missing. The folder notes whose it is:
+    another repository with the same name gets the name plus a hash instead. A wiki
+    under the older `<name>-<hash>` folder moves to the new name."""
+    root = load_config()["wiki_path"]
+    url = remote_url(key)
+    owner = url or key
+    path = os.path.join(root, wiki_name(key, url))
+    try:
+        with io.open(os.path.join(path, WIKI_MARK), encoding="utf-8") as f:
+            if f.read().strip() != owner:
+                path = os.path.join(root, repo_name(key))  # the name is taken
+    except (IOError, OSError):
+        pass
+    old = os.path.join(root, repo_name(key))
+    if old != path and os.path.isdir(old) and not os.path.exists(path):
+        os.rename(old, path)
+    if not os.path.isdir(path):
+        os.makedirs(path)
+    mark = os.path.join(path, WIKI_MARK)
+    if not os.path.exists(mark):
+        with io.open(mark, "w", encoding="utf-8") as f:
+            f.write(owner + "\n")
+    return path
+
+
 def pm_dir(key):
     return os.path.join(oke_home(), "repos", repo_name(key), "pm")
 
@@ -2162,7 +2207,8 @@ def job_locked(args):
                           "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
                           "pm_dir": pm_dir(key).replace("\\", "/"),
                           "pm_agent": "pm-" + repo_name(key),
-                          "wiki": os.path.join(load_config()["wiki_path"], repo_name(key)).replace("\\", "/")},
+                          "wiki": wiki_dir(key).replace("\\", "/"),
+                          "shared_wiki": os.path.join(load_config()["wiki_path"], "_shared").replace("\\", "/")},
                          ensure_ascii=False))
         return 0
     if args.slug not in state["jobs"]:
