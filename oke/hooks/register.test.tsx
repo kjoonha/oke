@@ -4,7 +4,7 @@ type Run = { argv: readonly string[] }
 
 const BOARD = [{
   repo: 'toy-6b0484', key: 'k', pm: null,
-  jobs: [{ job: 'calc-sub', phase: 'working', merge: 'rolled_back', pending: 'question', agents: [{
+  jobs: [{ job: 'calc-sub', phase: 'working', merge: 'rolled_back', pending: 'question', lane: 'small', agents: [{
     agent: 'calc-sub-w1', role: 'worker', status: 'working', pane: 'w7:p9', report: null,
     board: '## 지금\nwriting sub', revives: 1, cost: 0.4, todos: [
       { content: 'write sub', status: 'completed' }, { content: 'test sub', status: 'in_progress' },
@@ -170,7 +170,7 @@ test('the board puts what waits on the user first and folds finished jobs', asyn
   expect(await ui.find({ type: 'Text', text: /waiting on you 1/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /calc-sub: PM asks/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^▍toy$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /calc-sub\s+rollback ✗/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /calc-sub · small\s+rollback ✗/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /plan ›\s*approve\s*›\s*work\s*›\s*review\s*›\s*merge\s*›\s*verify/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /✓ calc-add done/ })).toBeTruthy()
   expect(await ui.find({ key: 'open-calc-add-w1' })).toBeFalsy()

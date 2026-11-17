@@ -189,6 +189,20 @@ class TestState(Base):
         other = self.git_repo("other/api")
         self.assertEqual(os.path.basename(oke.wiki_dir(oke.repo_key(other))), oke.repo_name(oke.repo_key(other)))
 
+    def test_lane_is_set_while_planning_and_trivial_merges_without_a_second_ask(self):
+        repo = self.git_repo("r")
+        for job in ("tiny", "big"):
+            self.assertEqual(self.cli("job", "new", job, "--repo", repo), 0)
+            self.advance(job, "planning")
+        self.assertEqual(self.cli("job", "lane", "tiny", "trivial"), 0, self.err)
+        self.assertNotEqual(self.cli("job", "lane", "tiny", "huge"), 0)  # not a lane
+        self.assertEqual(oke.load_state()["jobs"]["tiny"]["lane"], "trivial")
+        for job in ("tiny", "big"):
+            self.advance(job, "working")
+        self.assertEqual(self.cli("job", "lane", "big", "small"), 1)  # too late
+        self.assertEqual(self.cli("job", "phase", "tiny", "merging"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "big", "merging"), 1)  # normal: the user approves first
+
     def test_job_new_phase_archive(self):
         repo = self.git_repo("r")
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 0)

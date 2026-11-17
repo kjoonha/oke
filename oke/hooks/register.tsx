@@ -692,6 +692,7 @@ export const register: Register = on => {
           <Box flexDirection="column" borderStyle="round" borderColor={job.pending ? INK.yellow : hurt ? INK.red : INK.lavender} paddingX={1} marginTop={1}>
             <Text>
               <Text bold color={INK.white}>{job.job}</Text>
+              {job.lane && job.lane !== 'normal' ? <Text color={INK.dim}>{` · ${job.lane}`}</Text> : ''}
               {label ? <Text color={labelColor}>{`  ${label}`}</Text> : ''}
             </Text>
             <Text>

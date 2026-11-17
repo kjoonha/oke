@@ -1356,6 +1356,7 @@ def board_tree(state, agents, only_key=None):
             info = state["jobs"][job]
             waiting = pending_item(job, info)
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
+                         "lane": info.get("lane") or "normal",
                          "merge": merge_state(job)[0],
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None})
         tree.append({"repo": repo_name(key), "key": key, "jobs": jobs,
@@ -2094,6 +2095,10 @@ def cmd_ledger(args):
 # Phases that pass a user gate may only be entered from the phase before that gate
 # (or stay). Not proof of a user's approval, but a PM or an orchestrator slip cannot
 # skip the approval step. Phases not listed here are free.
+# trivial: a subagent does the work, one approval covers plan and merge;
+# small: a worker pane, a review subagent; normal: worker and reviewer panes
+LANES = ("trivial", "small", "normal")
+
 PHASE_FROM = {
     "planning": ("intake", "planning", "awaiting_approval", "working", "reviewing", "awaiting_merge"),
     "working": ("awaiting_approval", "working", "reviewing", "awaiting_merge", "merging"),
@@ -2218,6 +2223,9 @@ def job_locked(args):
             return fail("bad phase %r: one of %s" % (args.phase, ", ".join(PHASES)))
         now = state["jobs"][args.slug].get("phase")
         allowed = PHASE_FROM.get(args.phase)
+        if args.phase == "merging" and state["jobs"][args.slug].get("lane") == "trivial":
+            # the user approved the plan and the merge in one go
+            allowed = allowed + ("working", "reviewing")
         if allowed is not None and now not in allowed:
             return fail("job %s cannot go from %s to %s: allowed only from %s"
                         % (args.slug, now, args.phase, ", ".join(allowed)))
@@ -2230,6 +2238,13 @@ def job_locked(args):
             if problem:
                 return fail(problem)
         state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
+        save_state(state)
+        return 0
+    if args.action == "lane":
+        if state["jobs"][args.slug].get("phase") not in ("intake", "planning", "awaiting_approval"):
+            return fail("job %s: the lane is decided while planning, not in phase %s"
+                        % (args.slug, state["jobs"][args.slug].get("phase")))
+        state["jobs"][args.slug]["lane"] = args.lane
         save_state(state)
         return 0
     if args.action == "defer":
@@ -2433,6 +2448,9 @@ def build_parser():
     archive.add_argument("slug")
     defer = job_sub.add_parser("defer")
     defer.add_argument("slug")
+    lane = job_sub.add_parser("lane", help="the job's size lane, which the PM decides while planning")
+    lane.add_argument("slug")
+    lane.add_argument("lane", choices=LANES)
     merge = job_sub.add_parser("merge")
     merge.add_argument("slug")
     job_sub.add_parser("tree", help="the tree a review of a job without a worktree names").add_argument("slug")
