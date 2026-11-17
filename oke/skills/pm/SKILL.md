@@ -166,7 +166,7 @@ When a child's wait finishes, act on its first line:
 | `{"deliver": {"to": ..., "text": ...}}` | The child runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again |
 | `deliver_failed` | Your message to the child could not be typed in three times. Report `failed` for that job and name the child |
 | exit code 1 or 2 | herdr failed or is unreachable. Report `failed` with the stderr text. Do not treat the child as gone |
-| `spawn` or `send` refused: "has spent $X of its $Y budget" | The job's workers and reviewers cost more than its budget. Report `question` for that job: what is left to do, and the cost so far (`$OKE job budget <job>`). The user may raise it; the orchestrator runs `$OKE job budget <job> <usd>` and gives you `kind: answer` |
+| `spawn` or `send` refused: "has spent $X of its $Y budget" | The job's workers and reviewers cost more than its budget, so no new worker work (a review still runs). Report `question` for that job: what is left to do, and the cost so far (`$OKE job budget <job>`). The user may raise it; the orchestrator runs `$OKE job budget <job> <usd>` and gives you `kind: answer` |
 
 **A new instruction for a child:** edit its assignment (`이번 지시`, `seq` + 1), `$OKE send <child> "Assignment updated (seq <n>). Re-read <its assignment path>."`, then start its wait with the new seq. The wait types the message in once the child is idle, so start the wait last. A message must not start with `/`.
 

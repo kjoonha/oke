@@ -221,7 +221,7 @@ The plan's lane (`lane:` at the top of its 접근, also on the board) changes th
 
 Merge question: summary, branch name, number of changed files, the job's cost (`$OKE job budget <job>`), and the checks recorded so far (`$OKE ledger show <job>`: who checked which commit, pass or fail). Offer: merge / hold / look myself. A merge counts as done only after the PM verified it on the merged result (`merge: verified` in the ledger); when the PM reports merged, check that before `job phase done`. When the PM asks because the main branch moved on during the check, the user may accept the merge as it is: put that answer into the PM's assignment; the PM records it with `--accept`.
 
-A job's workers and reviewers stop getting work once they cost more than its budget (`job_budget_usd` in `$OKE_HOME/config.json`, default $5); the PM then asks. When the user raises it, run `$OKE job budget <job> <usd>` before you give the PM the answer.
+A job's workers stop getting new work once its workers and reviewers cost more than its budget (reviews still run) (`job_budget_usd` in `$OKE_HOME/config.json`, default $5); the PM then asks. When the user raises it, run `$OKE job budget <job> <usd>` before you give the PM the answer.
 
 ## Shared wiki
 
