@@ -23,6 +23,8 @@ If your first prompt says you were restarted after a crash, your earlier turns a
 6. Delete the untracked files your builds and checks left behind that are not part of the work: caches (`__pycache__`, `.pytest_cache`), compiled files, test logs (`git -C <cwd> status --short` shows them). Otherwise the worktree cannot be removed. In your report, list the new files that are part of the work: the PM commits only those. Keep anything that is work; when unsure, keep it and list it in the report.
 7. Write your report and end your turn.
 
+Never push, `reset --hard`, `clean -f`, delete branches or drop stashes: OKe blocks them, and the PM merges through OKe. If you think one is needed, report `question`.
+
 ## Urgent findings
 
 If you find something your PM must know now, while you keep working (the plan misses a file, the change breaks another part, the 검증 명령 cannot pass as written), send it without ending your turn:

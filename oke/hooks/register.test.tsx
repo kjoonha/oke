@@ -416,3 +416,48 @@ test('the board shows decided, to decide, to check and blocked from board.md', a
   tickBoard = BOARD
   tickRole = 'worker'
 })
+
+test('a PM, worker or reviewer cannot run git commands that lose or publish work', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  engine(on, [], [])
+  const ran: string[] = []
+  on('tool.call', (_: any, e: any) => {
+    ran.push(e.command)
+    return { result: { stdout: '' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  for (const bad of ['git push origin main', 'git -C "C:/a b/r" push --force', 'cd r && git reset --hard HEAD~1',
+    'git -c core.x=1 clean -fd', 'git branch -D oke/j', 'git stash drop']) {
+    const out: any = await $.tool.call({ tool: 'Bash', command: bad } as any)
+    expect(out.deny).toMatch(/^OKe blocks `git /)
+  }
+  for (const ok of ['git -C r diff main...HEAD', 'git -C r commit -m "push the button"', 'git rebase main',
+    'git -C r reset HEAD file.py', 'git checkout -- calc.py']) {
+    const out: any = await $.tool.call({ tool: 'Bash', command: ok } as any)
+    expect(out.deny).toBeUndefined()
+  }
+  expect(ran.length).toBe(5)
+})
+
+test('the orchestrator notifies once when a new item waits on the person', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  engine(on, [], [])
+  const notes: string[] = []
+  on('ui.notify', (_: any, e: any) => {
+    notes.push(JSON.stringify(e))
+    return { value: { isSent: true, channel: 'terminal' } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const merge = (b: any) => [{ ...b[0], jobs: [b[0].jobs[0], { ...b[0].jobs[1], phase: 'awaiting_merge', pending: 'merge' }] }]
+  tickBoard = merge(BOARD)
+  await clock.advance(10_000)
+  await clock.advance(10_000)  // still waiting: no second notification
+  const add = notes.filter(n => n.includes('calc-add: approve the merge'))
+  expect(add.length).toBe(1)
+  expect(add[0]).toContain('"title":"OKe"')
+  tickBoard = BOARD
+  tickRole = 'worker'
+})

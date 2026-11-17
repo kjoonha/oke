@@ -144,6 +144,7 @@ seq: 1
 ```
 
    Add `kind: codex` or `kind: opencode` to the header only when the intake asks for that agent; otherwise leave `kind` out and `$OKE_HOME/config.json` (`agents`) decides. The reviewer's assignment takes a `kind` the same way.
+   The model comes from `$OKE_HOME/config.json` (`models`: one per role) and the effort from the user's own settings. Add `model: opus` (or `haiku`) to a worker's or reviewer's header only when this job needs a stronger or a cheaper model than its role's; for your subagents, pass `model` to the Agent tool the same way.
    A claude child starts lean: none of the user's plugins or MCP servers, and only the core built-in tools, always on whatever you write (`$OKE extras` lists them per role, plus the MCP servers and plugins the user has). Each costs tokens on every turn of that child, so add only what this job needs, as comma-separated header lines: `tools: WebFetch` (a built-in tool), `mcp: codegraph` (an MCP server), `plugins: <name@marketplace>`. Leave them out when the job needs nothing extra. The reviewer's assignment takes them the same way.
    `commit: yes` only with a worktree and autonomy `balanced` or `full`. Without a worktree the worker must not commit: a commit there is already on the main branch, before the user was asked about the merge.
 3. `$OKE spawn <that file> --pane <place>`. Without a worktree: `$OKE spawn <that file>` (it starts next to you).
@@ -165,6 +166,7 @@ When a child's wait finishes, act on its first line:
 | `{"deliver": {"to": ..., "text": ...}}` | The child runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again |
 | `deliver_failed` | Your message to the child could not be typed in three times. Report `failed` for that job and name the child |
 | exit code 1 or 2 | herdr failed or is unreachable. Report `failed` with the stderr text. Do not treat the child as gone |
+| `spawn` or `send` refused: "has spent $X of its $Y budget" | The job's workers and reviewers cost more than its budget. Report `question` for that job: what is left to do, and the cost so far (`$OKE job budget <job>`). The user may raise it; the orchestrator runs `$OKE job budget <job> <usd>` and gives you `kind: answer` |
 
 **A new instruction for a child:** edit its assignment (`이번 지시`, `seq` + 1), `$OKE send <child> "Assignment updated (seq <n>). Re-read <its assignment path>."`, then start its wait with the new seq. The wait types the message in once the child is idle, so start the wait last. A message must not start with `/`.
 

@@ -66,6 +66,7 @@ def load_config():
         "models": {"pm": "opus", "worker": "sonnet", "reviewer": "sonnet"},
         "agents": {"worker": "claude", "reviewer": "claude"},  # which CLI runs each role
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
+        "job_budget_usd": 5.0,  # a job's workers and reviewers stop getting work past it; null: no limit
     }
     try:
         with io.open(os.path.join(home, "config.json"), encoding="utf-8") as f:
@@ -420,8 +421,10 @@ def write_lean_settings(folder, plugins=(), dirs=()):
     env.pop("CLAUDE_CODE_PLUGIN_DIRS", None)  # the user's own mods would load in every child
     env["OKE_HOME"] = oke_home()  # the skills say $OKE_HOME; a herdr pane does not inherit it
     settings = {"hooks": hooks, "env": env}
-    if "autoCompactWindow" in user:  # the user's compaction setting holds in children too
-        settings["autoCompactWindow"] = user["autoCompactWindow"]
+    # the user's compaction and effort settings hold in children too
+    for name in ("autoCompactWindow", "effortLevel", "modelSettings"):
+        if name in user:
+            settings[name] = user[name]
     if plugins:
         settings["enabledPlugins"] = dict((p, True) for p in plugins)
     if dirs:
@@ -500,7 +503,8 @@ def cmd_rt(args):
 def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header=None):
     """`header` is the agent's assignment header: its `tools:`, `mcp:` and `plugins:`
     (comma separated) are what the PM switched on for this job."""
-    args = ["--model", config["models"].get(role, "sonnet"), "--plugin-dir", plugin_dir]
+    model = (header or {}).get("model") or config["models"].get(role, "sonnet")
+    args = ["--model", model, "--plugin-dir", plugin_dir]
     # Measured: the user's plugins, hooks and MCP servers add about 36k tokens to every
     # child's context. Without a settings file, start as before so the herdr hook stays.
     folder = folder or home
@@ -663,6 +667,9 @@ def cmd_spawn(args):
             return fail("unknown job %r in assignment" % header.get("job"))
         if job["phase"] not in ("working", "reviewing", "merging"):
             return fail("plan not approved: job %s is in phase %s" % (header["job"], job["phase"]))
+        over = over_budget(header["job"], job, config)
+        if over:
+            return fail(over)
         key = job["repo"]
 
     if any(a.get("name") == agent for a in list_agents()):
@@ -1072,6 +1079,34 @@ def records(state):
         for name, rec in sorted(read_children(key).items()):
             out.append((rec.get("role") or "worker", name, key, rec))
     return out
+
+
+def job_cost(job):
+    """What a job's workers and reviewers have cost (their OKe mods write it after each
+    turn). shortcut: the PM's own turns and its subagents are not in it (one PM serves
+    many jobs); count them per job if a trivial job ever runs up a bill."""
+    total = 0.0
+    d = os.path.join(oke_home(), "jobs", job)
+    for name in os.listdir(d) if os.path.isdir(d) else []:
+        if name == "pm":
+            continue
+        usage = read_json(os.path.join(d, name, "usage.json"), {})
+        usd = usage.get("usd") if isinstance(usage, dict) else None
+        if isinstance(usd, (int, float)):
+            total += usd
+    return round(total, 4)
+
+
+def over_budget(job, info, config):
+    """The refusal when a job has spent its budget, else None."""
+    budget = info.get("budget", config.get("job_budget_usd"))
+    if budget is None:
+        return None
+    cost = job_cost(job)
+    if cost < budget:
+        return None
+    return ("job %s has spent $%.2f of its $%.2f budget: ask the user, who may raise it "
+            "(`oke job budget %s <usd>`)" % (job, cost, budget, job))
 
 
 def find_target(state, name):
@@ -2245,6 +2280,14 @@ def job_locked(args):
         state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
         save_state(state)
         return 0
+    if args.action == "budget":
+        info = state["jobs"][args.slug]
+        if args.usd is not None:
+            info["budget"] = args.usd
+            save_state(state)
+        print(json.dumps({"job": args.slug, "cost": job_cost(args.slug),
+                          "budget": info.get("budget", load_config().get("job_budget_usd"))}))
+        return 0
     if args.action == "lane":
         info = state["jobs"][args.slug]
         grows = LANES.index(args.lane) > LANES.index(info.get("lane") or "normal")
@@ -2314,6 +2357,11 @@ def cmd_send(args):
         return fail("unknown agent: %s" % args.agent)
     if found[0] == "orchestrator":
         return fail("the orchestrator has no inbox: a PM reports to it instead")
+    child_job = state["jobs"].get(found[3].get("job")) if found[0] in ("worker", "reviewer") else None
+    if child_job is not None:
+        over = over_budget(found[3]["job"], child_job, load_config())
+        if over:
+            return fail(over)
     sender = "user"
     pane = runtime().whoami()
     if pane:
@@ -2456,6 +2504,9 @@ def build_parser():
     archive.add_argument("slug")
     defer = job_sub.add_parser("defer")
     defer.add_argument("slug")
+    budget = job_sub.add_parser("budget", help="show a job's cost and budget, or set the budget")
+    budget.add_argument("slug")
+    budget.add_argument("usd", nargs="?", type=float)
     lane = job_sub.add_parser("lane", help="the job's size lane, which the PM decides while planning")
     lane.add_argument("slug")
     lane.add_argument("lane", choices=LANES)
