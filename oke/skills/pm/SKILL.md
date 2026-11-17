@@ -114,7 +114,9 @@ The orchestrator may change the lane before it assigns `kind: execute` (the user
 
 **Work subagent (trivial).** No worker pane and no wait. Call the Agent tool with `subagent_type: general-purpose` and a prompt that holds everything a worker would get: the cwd, the change from the plan, what not to touch, the 검증 명령, and "Make the change. Do not commit. Run the 검증 명령. Answer with the files you changed and the command's output." Check its answer as a worker `report done`. Findings from the review go to a new subagent call with the findings added.
 
-**Review subagent (trivial and small).** Write the reviewer's assignment exactly as for a reviewer pane (see **Review**), but do not spawn it: call the Agent tool with `subagent_type: oke:reviewer` and the prompt `Review: <the assignment path>`. It writes `report.md` next to the assignment, which `$OKE job merge` checks as for a reviewer pane. Every new review round is a new call, after `seq` + 1 and the new `commit:` or `tree:` in the assignment.
+**Review subagent (trivial and small).** Write the reviewer's assignment exactly as for a reviewer pane (see **Review**), but do not spawn it: call the Agent tool with `subagent_type: oke:reviewer` and the prompt `Review: <the assignment path>`. It writes `report.md` next to the assignment, which `$OKE job merge` checks as for a reviewer pane. Every new review round is a new call, after `seq` + 1 and the new `commit:` or `tree:` in the assignment. The subagent is told, not forced, to change nothing: after its pass, `git status --short` must match what you saw before the call (`$OKE job merge` also refuses a tree or commit other than the one reviewed).
+
+**A job outgrows its lane.** The work or the review shows it is bigger than planned (more files, a design choice, a second `changes` round on a trivial job): `$OKE job lane <job> small` or `normal` (a lane only grows once work started) and go on in that lane. A trivial job that grows loses its merge approval: report `question` for that job saying why, and wait for the answer before the merge.
 
 ### kind: execute
 
@@ -176,6 +178,8 @@ Every new instruction to the reviewer (another round, a rebase) repeats this: co
 - `verdict: pass`: run `git -C <cwd> status --short` and compare it with the worker's report: the reviewer must not have changed anything (with a worktree it must be clean: the work was committed before the review). Report `done` for the job: summary, branch, number of changed files (`git diff --stat <base>...oke/<job>`, or `git diff --stat HEAD` when uncommitted), the worktree path, and the workers' 배운 것.
 
 ### kind: merge
+
+Lanes: where the steps below instruct the worker, a trivial job calls the work subagent again; where they instruct or close the reviewer, trivial and small jobs call the review subagent again, and there is nothing to close for a subagent.
 
 Merges go one at a time, in the order the merge assignments reached you. Finish one before you start the next. While a merge is still in progress (for example in its conflict ladder), write the next job's report as `waiting` (`on: <the job being merged>`) and start it when that one is done. A merge that waits at step 1 on a job without a worktree is not in progress: when that job's merge arrives, do it first, out of order, then the waiting one.
 

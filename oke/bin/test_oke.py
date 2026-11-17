@@ -191,17 +191,21 @@ class TestState(Base):
 
     def test_lane_is_set_while_planning_and_trivial_merges_without_a_second_ask(self):
         repo = self.git_repo("r")
-        for job in ("tiny", "big"):
+        for job in ("tiny", "grew", "big"):
             self.assertEqual(self.cli("job", "new", job, "--repo", repo), 0)
             self.advance(job, "planning")
-        self.assertEqual(self.cli("job", "lane", "tiny", "trivial"), 0, self.err)
+        for job in ("tiny", "grew"):
+            self.assertEqual(self.cli("job", "lane", job, "trivial"), 0, self.err)
         self.assertNotEqual(self.cli("job", "lane", "tiny", "huge"), 0)  # not a lane
         self.assertEqual(oke.load_state()["jobs"]["tiny"]["lane"], "trivial")
-        for job in ("tiny", "big"):
+        for job in ("tiny", "grew", "big"):
             self.advance(job, "working")
-        self.assertEqual(self.cli("job", "lane", "big", "small"), 1)  # too late
         self.assertEqual(self.cli("job", "phase", "tiny", "merging"), 0, self.err)
         self.assertEqual(self.cli("job", "phase", "big", "merging"), 1)  # normal: the user approves first
+        self.assertEqual(self.cli("job", "lane", "big", "small"), 1)  # no shrinking once work started
+        self.assertEqual(self.cli("job", "lane", "grew", "small"), 0, self.err)  # a lane may grow
+        self.assertEqual(self.cli("job", "phase", "grew", "merging"), 1)  # and loses its merge approval
+        self.assertEqual(self.cli("job", "lane", "tiny", "normal"), 1)  # not once merging
 
     def test_job_new_phase_archive(self):
         repo = self.git_repo("r")

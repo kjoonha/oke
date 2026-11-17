@@ -2241,9 +2241,12 @@ def job_locked(args):
         save_state(state)
         return 0
     if args.action == "lane":
-        if state["jobs"][args.slug].get("phase") not in ("intake", "planning", "awaiting_approval"):
-            return fail("job %s: the lane is decided while planning, not in phase %s"
-                        % (args.slug, state["jobs"][args.slug].get("phase")))
+        info = state["jobs"][args.slug]
+        grows = LANES.index(args.lane) > LANES.index(info.get("lane") or "normal")
+        if info.get("phase") not in ("intake", "planning", "awaiting_approval") and not (
+                grows and info.get("phase") in ("working", "reviewing")):
+            return fail("job %s: in phase %s a lane can only grow, before the merge"
+                        % (args.slug, info.get("phase")))
         state["jobs"][args.slug]["lane"] = args.lane
         save_state(state)
         return 0
