@@ -25,6 +25,7 @@ let folder: string | null = null
 let home: string | null = null
 let claudeDir: string | null = null
 let wiki: string | null = null
+let theme: string | null = null  // config.json `theme`: the band's characters
 let bandId: string | null = null
 let mood: Mood = 'rest'
 let frame = 0
@@ -74,6 +75,7 @@ async function tick($: any) {
     home = out.home ?? home
     claudeDir = out.claude_dir ?? claudeDir
     wiki = out.wiki ?? wiki
+    theme = out.theme ?? theme
     job = out.job ?? null
     seq = out.seq ?? null
     eventsOffset = out.events_offset
@@ -441,15 +443,44 @@ async function selfUsage($: any): Promise<Self> {
 }
 
 // ---------------------------------------------------------------- mascot band
-// A 12x8 pixel blob with headphones and a neon visor, drawn as a 12x4 Raster: each
-// cell's upper half block takes the top pixel as its foreground, the bottom as background.
+// 12x8 pixel characters drawn as a 12x4 Raster: each cell's upper half block takes the
+// top pixel as its foreground, the bottom as background. Columns 10-11 hold effects.
+// `theme` in config.json picks the set; each role has its own character and color.
 type Mood = 'conduct' | 'rest' | 'wave' | 'stop'
 const W = 12
 const DEFAULT = 0x01000000
 const PALETTE: Record<string, number> = {
   p: 0xff7ad9, c: 0xb9a6ff, v: 0x2de2e6, w: 0xffffff, m: 0xff5c8a, d: 0x2b2140,
   n: 0xffe66d, y: 0x6ff7ff, h: 0xff4d8d, z: 0x8a8fa8, r: 0xff5c5c,
+  // disco bodies for the other roles
+  e: 0x6aa0ff, g: 0x7ee8a6, O: 0xffa24d,
+  // slime (body, shine) and mushroom (cap, stem, feet); k: eyes
+  s: 0x7bd84f, l: 0xdcffc8, k: 0x1a1626, b: 0x4f9dff, B: 0xc8e4ff,
+  a: 0xff8fc8, A: 0xffdcef, i: 0xffd84a, I: 0xfff3bf,
+  o: 0xff8c2e, G: 0x4fbf55, P: 0xb38cff, t: 0xffe3b3, u: 0xe0bf8f,
 }
+/** `frame` with pixels set at [row, col, color]. */
+function put(frame: string[], dots: [number, number, string][]): string[] {
+  const rows = frame.map(r => r.split(''))
+  for (const [r, c, ch] of dots) rows[r]![c] = ch
+  return rows.map(r => r.join(''))
+}
+/** `frame` with each color letter in `map` swapped. */
+function paint(frame: string[], map: Record<string, string>): string[] {
+  return frame.map(r => r.replace(/./g, ch => map[ch] ?? ch))
+}
+/** Stuck: the whole character turns red, its eyes (k, d) stay. */
+function stuck(frame: string[]): string[] {
+  return frame.map(r => r.replace(/[^.kd]/g, 'r'))
+}
+const SPARKS: [number, number, string][][] = [
+  [[0, 10, 'n'], [2, 11, 'y'], [5, 9, 'w']],
+  [[1, 11, 'y'], [3, 10, 'n'], [0, 9, 'w']],
+  [[1, 9, 'y'], [4, 11, 'n'], [0, 11, 'w']],
+  [[0, 10, 'n'], [2, 9, 'w'], [5, 11, 'y']],
+]
+
+// disco: a blob with headphones and a neon visor; the body color tells the role
 const BLOB = [
   '..pppppp....',
   '.p.cccc.p...',
@@ -460,31 +491,118 @@ const BLOB = [
   '..cccccc....',
   '..c....c....',
 ]
-/** `frame` with pixels set at [row, col, color]. */
-function put(frame: string[], dots: [number, number, string][]): string[] {
-  const rows = frame.map(r => r.split(''))
-  for (const [r, c, ch] of dots) rows[r]![c] = ch
-  return rows.map(r => r.join(''))
+function disco(body: string): Record<Mood, string[][]> {
+  const blob = paint(BLOB, { c: body })
+  const bob = ['............', ...blob.slice(0, 7)]
+  const sleepy = put(blob, [[3, 2, 'd'], [3, 3, 'd'], [3, 4, body], [3, 5, body], [3, 6, 'd'], [3, 7, 'd']])
+  return {
+    conduct: [blob, bob, blob, bob].map((f, i) => put(f, SPARKS[i]!)),
+    rest: [put(sleepy, [[2, 10, 'z']]), put(sleepy, [[1, 10, 'z'], [0, 11, 'z']])],
+    wave: [
+      put(blob, [[4, 8, body], [3, 9, body], [2, 10, body], [0, 10, 'h'], [0, 11, 'h']]),
+      put(blob, [[4, 8, body], [4, 9, body], [3, 10, body], [1, 11, 'h']]),
+    ],
+    stop: [stuck(put(BLOB, [[3, 3, 'd'], [3, 6, 'd']]))],
+  }
 }
-/** The blob bobbed one pixel down, its feet squashed. */
-const BOB = ['............', ...BLOB.slice(0, 7)]
-const SLEEPY = put(BLOB, [[3, 2, 'd'], [3, 3, 'd'], [3, 4, 'c'], [3, 5, 'c'], [3, 6, 'd'], [3, 7, 'd']])
-const FRAMES: Record<Mood, string[][]> = {
-  conduct: [
-    put(BLOB, [[0, 10, 'n'], [2, 11, 'y'], [5, 9, 'w']]),
-    put(BOB, [[1, 11, 'y'], [3, 10, 'n'], [0, 9, 'w']]),
-    put(BLOB, [[1, 9, 'y'], [4, 11, 'n'], [0, 11, 'w']]),
-    put(BOB, [[0, 10, 'n'], [2, 9, 'w'], [5, 11, 'y']]),
-  ],
+
+// slime and mushroom: a hopping slime (s body, l shine, k eyes) and a mushroom (o cap, w spots,
+// t stem, k eyes). Each hop: rest, squash, leap (stretched), land.
+const SLIME = {
   rest: [
-    put(SLEEPY, [[2, 10, 'z']]),
-    put(SLEEPY, [[1, 10, 'z'], [0, 11, 'z']]),
+    '............',
+    '...sss......',
+    '..sssss.....',
+    '.slsssss....',
+    '.sksssks....',
+    '.sssmsss....',
+    'sssssssss...',
+    '.sssssss....',
   ],
-  wave: [
-    put(BLOB, [[4, 8, 'c'], [3, 9, 'c'], [2, 10, 'c'], [0, 10, 'h'], [0, 11, 'h']]),
-    put(BLOB, [[4, 8, 'c'], [4, 9, 'c'], [3, 10, 'c'], [1, 11, 'h']]),
+  squash: [
+    '............',
+    '............',
+    '..ssssss....',
+    '.slssssss...',
+    '.skssssks...',
+    'ssssmsssss..',
+    'ssssssssss..',
+    '.ssssssss...',
   ],
-  stop: [put(BLOB.map(r => r.replace(/c/g, 'r')), [[3, 3, 'd'], [3, 6, 'd']])],
+  leap: [
+    '...sss......',
+    '..sssss.....',
+    '.slsssss....',
+    '.sksssks....',
+    '.sssmsss....',
+    '.sssssss....',
+    '..sssss.....',
+    '............',
+  ],
+}
+const SHROOM = {
+  rest: [
+    '...oooo.....',
+    '.oooowooo...',
+    'oowoooooo...',
+    'oooooowoo...',
+    '..ttttt.....',
+    '..tktkt.....',
+    '..ttttt.....',
+    '..u...u.....',
+  ],
+  squash: [
+    '............',
+    '...oooo.....',
+    '.oooowooo...',
+    'oowoooooo...',
+    'oooooowoo...',
+    '..tktkt.....',
+    '.ttttttt....',
+    '.u.....u....',
+  ],
+  leap: [
+    '..oooo......',
+    'oooowooo....',
+    'owoooooo....',
+    'ooooowoo....',
+    '.ttttt......',
+    '.tktkt......',
+    '.ttttt......',
+    '..u.u.......',
+  ],
+}
+function hopper(sprite: typeof SLIME, map: Record<string, string>, eye: string): Record<Mood, string[][]> {
+  const [rest, squash, leap] = [sprite.rest, sprite.squash, sprite.leap].map(f => paint(f, map))
+  // eyes shut: the eye row's dark pixels turn into the skin around them
+  const sleepy = (f: string[]) => f.map(r => r.includes('k') ? r.replace(/k/g, eye) : r)
+  const shout: [number, number, string][] = [[0, 10, 'n'], [1, 10, 'n'], [2, 10, 'n'], [4, 10, 'n']]
+  return {
+    conduct: [rest!, squash!, leap!, squash!].map((f, i) => put(f, i === 2 ? SPARKS[i]! : [])),
+    rest: [put(sleepy(squash!), [[2, 10, 'z']]), put(sleepy(squash!), [[1, 10, 'z'], [0, 11, 'z']])],
+    wave: [put(leap!, shout), put(rest!, shout)],
+    stop: [stuck(rest!)],
+  }
+}
+const THEMES: Record<string, Record<string, Record<Mood, string[][]>>> = {
+  disco: { orchestrator: disco('c'), pm: disco('e'), worker: disco('g'), reviewer: disco('O') },
+  slime: {
+    orchestrator: hopper(SLIME, { s: 's', l: 'l' }, 's'),
+    pm: hopper(SLIME, { s: 'b', l: 'B' }, 'b'),
+    worker: hopper(SLIME, { s: 'a', l: 'A' }, 'a'),
+    reviewer: hopper(SLIME, { s: 'i', l: 'I' }, 'i'),
+  },
+  mushroom: {
+    orchestrator: hopper(SHROOM, { o: 'P' }, 't'),
+    pm: hopper(SHROOM, { o: 'b' }, 't'),
+    worker: hopper(SHROOM, { o: 'o' }, 't'),
+    reviewer: hopper(SHROOM, { o: 'G' }, 't'),
+  },
+}
+/** The band's frames for this session's theme and role. */
+export function framesOf(name: string | null, who: string | null): Record<Mood, string[][]> {
+  const set = THEMES[name ?? ''] ?? THEMES.disco!
+  return set[who ?? ''] ?? set.orchestrator!
 }
 
 function cells(pixels: string[]): string {
@@ -503,7 +621,7 @@ function cells(pixels: string[]): string {
 }
 
 function frameCells(m: Mood, i: number): string {
-  const list = FRAMES[m]
+  const list = framesOf(theme, role)[m]
   return cells(list[Math.floor(i) % list.length] ?? [])
 }
 

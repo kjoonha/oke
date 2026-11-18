@@ -69,6 +69,7 @@ def load_config():
         "agents": {"worker": "claude", "reviewer": "claude"},  # which CLI runs each role
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
         "max_review_rounds": 10,  # a job's reviews stop there and the PM asks the user; null: no limit
+        "theme": "disco",  # the band's characters: disco, slime or mushroom
     }
     try:
         with io.open(os.path.join(home, "config.json"), encoding="utf-8") as f:
@@ -1530,7 +1531,8 @@ def cmd_tick(args):
         out["folder"] = agent_folder(role, name, key, record)
         # the orchestrator writes only in OKe's home outside the wikis, and its own memory
         out["home"] = oke_home()
-        out["wiki"] = load_config()["wiki_path"]
+        config = load_config()
+        out["wiki"], out["theme"] = config["wiki_path"], config["theme"]
         out["claude_dir"] = os.path.abspath(native_path(claude_config_dir()))
         if role in ("worker", "reviewer"):  # for the status line
             out["job"] = record.get("job")

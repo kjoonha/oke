@@ -1,6 +1,14 @@
-# OKe
+<h1 align="center">OKe</h1>
 
-Claude Code 플러그인. 사용자는 orchestrator 한 명과만 대화한다. orchestrator 가 저장소마다 PM 을 두고, PM 이 worker 와 reviewer 를 herdr pane 에 띄워 일을 시킨다. 질문과 승인은 orchestrator 창의 팝업으로 올라온다.
+<p align="center">
+  <img src="docs/oke-band.svg" alt="OKe 캐릭터들이 일하는 모습: disco, slime, mushroom theme 의 orchestrator, PM, worker, reviewer">
+</p>
+
+<p align="center">
+  Claude Code 플러그인. 사용자는 orchestrator 한 명과만 대화한다.<br>
+  orchestrator 가 저장소마다 PM 을 두고, PM 이 worker 와 reviewer 를 herdr pane 에 띄워 일을 시킨다.<br>
+  질문과 승인은 orchestrator 창의 팝업으로 올라온다.
+</p>
 
 ## 필요한 것
 
@@ -52,9 +60,15 @@ herdr pane 에서 Claude Code 를 켜고 `/oke:start`. 그 세션이 orchestrato
   "agents": {"worker": "claude", "reviewer": "claude"},
   "interview_threshold": 0.2,
   "interview_max_rounds": 10,
-  "lean_launch": true
+  "lean_launch": true,
+  "theme": "disco"
 }
 ```
+
+- `theme`: 대화창 위 띠에 나오는 캐릭터. 역할마다 모양이나 색이 다르다.
+  - `disco` (기본): 헤드폰 낀 블롭. orchestrator 보라, PM 파랑, worker 초록, reviewer 주황.
+  - `slime`: 통통 뛰는 슬라임. orchestrator 초록, PM 파랑, worker 분홍, reviewer 노랑.
+  - `mushroom`: 통통 뛰는 버섯. orchestrator 보라, PM 파랑, worker 주황, reviewer 초록.
 
 - `autonomy`: `conservative` (worker 가 명령마다 승인을 묻는다), `balanced` (기본), `full`.
 - `agents`: worker / reviewer 를 띄울 CLI. `claude`, `codex`, `opencode`. orchestrator 와 PM 은 늘 claude 다. 제약은 `docs/superpowers/specs/2026-11-13-oke-slice4-design.md` 의 "안 되는 것".

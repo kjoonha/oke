@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { orchestratorDenied, promptRole } from './register'
+import { framesOf, orchestratorDenied, promptRole } from './register'
 
 type Run = { argv: readonly string[] }
 
@@ -545,4 +545,23 @@ test('the orchestrator notifies once when a new item waits on the person', async
   expect(add[0]).toContain('"title":"OKe"')
   tickBoard = BOARD
   tickRole = 'worker'
+})
+
+test('each theme gives every role its own 12x8 character in every mood', () => {
+  for (const theme of ['disco', 'slime', 'mushroom']) {
+    const seen = new Set<string>()
+    for (const role of ['orchestrator', 'pm', 'worker', 'reviewer']) {
+      const moods = framesOf(theme, role)
+      for (const frames of Object.values(moods)) {
+        expect(frames.length > 0).toBe(true)
+        for (const f of frames) {
+          expect(f.length).toBe(8)
+          for (const row of f) expect(/^[.a-zA-Z]{12}$/.test(row)).toBe(true)
+        }
+      }
+      seen.add(moods.conduct[0]!.join('/'))
+    }
+    expect(seen.size).toBe(4)
+  }
+  expect(framesOf('nope', 'pm')).toBe(framesOf('disco', 'pm'))
 })
