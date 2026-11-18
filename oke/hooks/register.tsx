@@ -542,6 +542,9 @@ export const register: Register = on => {
         if (denied) return { deny: denied }
       }
       const ran: any = await next(e)
+      // /oke:start in a session older than a minute: an unknown pane ticks only every 60 s,
+      // so look right after its oke call instead of leaving the band dark for up to a minute
+      if (role === null && e.tool === 'Bash' && String(e.command ?? '').includes('oke.py')) void tick($)
       const tool: string = e.tool
       if (!pane || !TASK_TOOLS.includes(tool) || ran.deny !== undefined || ran.isError) return ran
       const list = await update($, todos, old => applyTask(old, tool, e, ran.result))
