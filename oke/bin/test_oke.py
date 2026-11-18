@@ -79,7 +79,13 @@ class Base(unittest.TestCase):
         now = oke.load_state()["jobs"][name]["phase"]
         start = self.PATH.index(now) + 1 if now in self.PATH else 0
         for step in self.PATH[start:self.PATH.index(phase) + 1]:
+            if step == "done":
+                self.logged(name)
             self.assertEqual(self.cli("job", "phase", name, step), 0, self.err)
+
+    def logged(self, name):
+        """The PM's wiki line for the job, which `job phase done` asks for."""
+        self.assertEqual(self.cli("wiki", "log", "--job", name, "--note", "none"), 0, self.err)
 
     def cli(self, *args):
         out, err = io.StringIO(), io.StringIO()
@@ -304,6 +310,8 @@ class TestState(Base):
         self.advance("calc", "working")
         self.assertEqual(self.cli("job", "phase", "calc", "awaiting_merge"), 1)
         self.assertEqual(self.cli("job", "merge", "calc"), 1)
+        self.assertEqual(self.cli("job", "phase", "calc", "done"), 1)  # no wiki line yet
+        self.logged("calc")
         self.assertEqual(self.cli("job", "phase", "calc", "done"), 0, self.err)
 
     def test_research_skips_the_plan_and_the_merge(self):
@@ -314,6 +322,7 @@ class TestState(Base):
         self.assertEqual(self.cli("job", "phase", "look", "working"), 0, self.err)
         self.assertEqual(self.cli("job", "lane", "look", "small"), 1)
         self.assertEqual(self.cli("job", "phase", "look", "merging"), 1)
+        self.logged("look")
         self.assertEqual(self.cli("job", "phase", "look", "done"), 0, self.err)
 
 

@@ -201,7 +201,7 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
    1. Give the worker a new instruction, with `commit: yes` in its header from now on: "Rebase `oke/<job>` onto `<base branch>`. Resolve the conflicts so that both changes keep their purpose. Run the 검증 명령 again, commit, and report." Write this job's report as `waiting` and wait. A dead worker is revived by the wait.
    2. Worker `done`: give the reviewer a new instruction to review what the rebase changed, with `commit:` set to the rebased tip (`job merge` refuses until that review passes). `verdict: pass`: back to step 3. `changes`: as in the review rounds.
    3. Worker `question` or `failed`, or the merge conflicts again after the rebase: report `question` for the job with the conflicting files. The user decides.
-5. Update the wiki from the reports' 배운 것 (see below). What holds beyond this repository goes into your done report's 배운 것 (공용) instead.
+5. Update the wiki from the reports' 배운 것 and fix the pages they marked `wrong` (see **Wiki**). What holds beyond this repository goes into your done report's 배운 것 (공용) instead.
 6. Remove the worktree once it is merged: `$OKE worktree --remove <its id>`. First look at `git status --short` there. Changed tracked files: keep the worktree and say so. Untracked files: judge them. Byproducts of builds and checks (caches such as `__pycache__`, compiled files, test logs) do not stop the removal. Anything that looks like work (source, docs, data) keeps the worktree: list those files in your report.
 7. Close the worker and reviewer: `$OKE close <pane>` (the `pane` that `spawn` printed).
 8. Report `done` for the job. If a merge waited for this one, start it now.
@@ -239,13 +239,39 @@ A child may send you `URGENT <job>: ...` while it keeps working. Decide:
 
 ## Wiki
 
-Only you write it. Folder: the `wiki` path from the job's assignment (it may differ from an older standing assignment). Never write `shared_wiki`: the orchestrator keeps it.
+Only you write it, and only through `$OKE wiki` (never Edit or Write on its files). Never write `shared_wiki`: the orchestrator keeps it.
 
-- `index.md`: one line per page, with a link.
-- `log.md`: append `<date> <job>: <what you added>`.
+- `index.md`: one line per page: a link and what the page answers, the trigger first ("before running the tests: ..."). Workers read it first and open only the pages they need.
 - `<topic>.md`: facts about this repository that the next worker needs and cannot see quickly in the code: build and test commands, conventions, traps.
+- `log.md`: one line per change; `oke wiki` writes it.
 
-Add only what a report's 배운 것 states and you believe. Fix a page that turned out wrong.
+How to change a page: `$OKE wiki read <page> --job <job>` prints a JSON line with `base`, then the page. Write the whole new page to a file in your folder and run `$OKE wiki write <page> --job <job> --from <file> --base <base> --note "<what changed>"` (`--base new` for a new page). A refused write says why: fix that and write again.
+
+Every job ends with at least one line in `log.md`: `job phase done` refuses without it. A job that taught nothing: `$OKE wiki log --job <job> --note none`. Do it when the job's work is checked: after the merge is verified (merge step 5), before the done report of a direct job, or of a research job.
+
+Write a fact only when this job's checked work shows it (`oke wiki write --job` refuses before the merge is verified, a direct job's review passed, or for research). Each line is one rule plus one clause of why, not a story:
+
+- Keep exact names, commands, flags, paths inside the repository and numbers: a rule made vague teaches nothing.
+- No job names, dates, ticket numbers or quotes of the user.
+- One fact lives in one place: this wiki or the shared one, never both.
+- The same lesson twice is one rule: strengthen the line that is there. `oke wiki write` refuses a line that rewords another page's line; pass `--dup-ok` only when they really differ.
+- Fix a wrong line in place. Never append "UPDATE: actually ...".
+- Do not record: a failure of one machine's setup (command not found, a missing package), a transient error, a one-off task, a claim that a tool is broken, or an approach that did not work in the end.
+- A page has a cap (3000 characters, `index.md` 2000). Over it, merge or drop lines first; an old page can go to `oke wiki archive <page> --reason ..` (never delete a page).
+
+Pages marked `wrong` in a report's `## wiki` section come first: correct them from what the worker found, or archive them.
+
+### kind: curate
+
+The orchestrator asks every 10 jobs, or when the user asks. Nothing in the repository changes. `$OKE wiki status --job <job>` lists each page with its size, `uses`, `idle_days`, `wrong` and `state`. In this order:
+
+1. Pages with `wrong` above 0: fix them or archive them.
+2. Pages that say the same thing: merge them into one and archive the rest (`--reason "merged into <page>"`).
+3. `$OKE wiki prune --job <job>` lists the pages unused for 30 days; judge the list, `$OKE wiki pin <page> --job <job>` the ones that must stay, then `$OKE wiki prune --job <job> --apply`.
+4. Make `index.md` match what is left.
+5. `$OKE wiki log --job <job> --note "curated: <what changed>"`.
+
+Report `done` with what changed.
 
 ## Autonomy
 

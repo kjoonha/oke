@@ -95,6 +95,7 @@ class TestPhaseGates(SpawnBase):
 
     def test_full_autonomy_still_passes_through_the_awaiting_phases(self):
         self.job("fix-a", "planning")
+        self.logged("fix-a")
         for step in ("awaiting_approval", "working", "awaiting_merge", "merging", "done"):
             self.assertEqual(self.cli("job", "phase", "fix-a", step), 0, self.err)
 

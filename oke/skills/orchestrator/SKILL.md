@@ -137,7 +137,7 @@ seq: <n>
 ---
 ## 목표
 ## 이번 지시
-kind: plan | execute | merge | answer | dialog | cancel
+kind: plan | execute | merge | answer | dialog | cancel | research | curate
 <details: for plan, the path of intake.md; for answer, the user's answer; for dialog, see "Queue">
 ```
 
@@ -229,11 +229,13 @@ A job's reviews stop after 10 rounds (`max_review_rounds` in `$OKE_HOME/config.j
 
 Knowledge that holds beyond one repository (company rules, shared tools, how deploys work) lives in the `shared_wiki` folder, which `job new` prints. Only you write it; every PM and worker reads it.
 
-- `index.md`: one line per page, with a link.
-- `log.md`: append `<date> <job>: <what you added>`.
+- `index.md`: one line per page: a link and what the page answers, the trigger first.
 - `<topic>.md`: one topic per page.
+- `log.md`: one line per change; `oke wiki` writes it.
 
-Add what a PM report's 배운 것 (공용) states and you believe, and what the user tells you to keep. Fix a page that turned out wrong. Facts about one repository stay in that repository's wiki, which its PM keeps.
+Change it only through `$OKE wiki ... --shared`, the same way a PM changes its wiki (see the PM's **Wiki**: `wiki read`, then `wiki write --from <file> --base <base> --note ..`). Add what a PM report's 배운 것 (공용) states and you believe, and what the user tells you to keep; add `--job <job>` for a job's lessons. Fix a page that turned out wrong. No repository names or paths: facts about one repository stay in that repository's wiki, which its PM keeps (`wiki write --shared` refuses a repository's path). The PM's rules for what to write hold here too.
+
+Curation: when `job archive` prints a `curate:` line, or the user asks to clean up a wiki, give that repository's PM `kind: curate` (it needs a job: `job new <name> --repo <path> --research`, no interview needed: run `$OKE interview <job> --goal 1 --constraints 1 --criteria 1`, then phase `working`). For the shared wiki do the same yourself with `--shared`.
 
 ## Autonomy
 

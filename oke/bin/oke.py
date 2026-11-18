@@ -17,6 +17,7 @@ import time
 import runtime_bg
 import runtime_herdr
 import runtime_orca
+import wiki
 from runtime_herdr import DialogError, HerdrError, herdr, herdr_text, session_of  # noqa: F401 (tests)
 
 PHASES = ("intake", "planning", "awaiting_approval", "working", "reviewing",
@@ -2325,6 +2326,10 @@ def job_locked(args):
             # a job merged without a worktree has no ledger merge row: only OKe's merges are held
             return fail("job %s: its merge is %s, run `oke job verify` (or merge again) first"
                         % (args.slug, merge_state(args.slug)[0]))
+        if args.phase == "done" and info.get("repo") and not wiki.logged(wiki_dir(info["repo"]), args.slug):
+            return fail("job %s: the PM has not recorded what it taught. It writes the lessons with "
+                        "`oke wiki write --job %s`, or `oke wiki log --job %s --note none`"
+                        % (args.slug, args.slug, args.slug))
         if args.phase in ("planning", "working") and now == "intake":  # a re-plan needs no new interview
             problem = interview_problem(args.slug)
             if problem:
@@ -2364,6 +2369,8 @@ def job_locked(args):
     if args.action == "archive":
         src = os.path.join(home, "jobs", args.slug)
         dst = os.path.join(home, "archive", "%s-%s" % (args.slug, time.strftime("%Y%m%d-%H%M%S")))
+        key = state["jobs"][args.slug].get("repo")
+        hint = record_wiki_use(src, key) if key and os.path.isdir(src) else None
         if os.path.isdir(src):
             if not os.path.isdir(os.path.dirname(dst)):
                 os.makedirs(os.path.dirname(dst))
@@ -2371,7 +2378,125 @@ def job_locked(args):
         del state["jobs"][args.slug]
         save_state(state)
         print(dst)
+        if hint:
+            print(hint)
         return 0
+    return fail("unknown action")
+
+
+CURATE_EVERY = 10  # jobs logged in a wiki since its last curation
+
+
+def shared_wiki():
+    path = os.path.join(load_config()["wiki_path"], "_shared")
+    if not os.path.isdir(path):
+        os.makedirs(path)
+    return path
+
+
+def record_wiki_use(job_dir, key):
+    """Count what the job's reports said about wiki pages (`## wiki`); a page is the
+    repository's if it has one by that name, else the shared wiki's. Says when the
+    repository's wiki is due for a curation."""
+    entries = []
+    for name in sorted(os.listdir(job_dir)):
+        try:
+            with io.open(os.path.join(job_dir, name, "report.md"), encoding="utf-8") as f:
+                entries += wiki.report_entries(f.read())
+        except (IOError, OSError, UnicodeDecodeError):
+            pass
+    repo, shared = wiki_dir(key), shared_wiki()
+    wiki.record(repo, [e for e in entries if os.path.isfile(os.path.join(repo, e[0]))])
+    wiki.record(shared, [e for e in entries if not os.path.isfile(os.path.join(repo, e[0]))])
+    try:
+        with io.open(os.path.join(repo, "log.md"), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (IOError, OSError, UnicodeDecodeError):
+        return None
+    jobs = set()
+    for line in reversed(lines):
+        m = re.match(r"^\S+ (\S+): (curated)?", line)
+        if not m:
+            continue
+        if m.group(1) == "curate" or m.group(2):  # a curation job logs "curated: .."
+            break
+        jobs.add(m.group(1))
+    if len(jobs) >= CURATE_EVERY:
+        return ("curate: the wiki of %s took %d jobs since its last curation: give its PM `kind: curate`"
+                % (repo_name(key), len(jobs)))
+    return None
+
+
+def wiki_verified(job, info):
+    """Lessons count only from work that was checked (Hermes: learning from unchecked
+    sessions taught wrong rules)."""
+    if info.get("lane") == "research":
+        return True
+    if info.get("direct"):
+        review = latest_report(os.path.join(oke_home(), "jobs", job), r"-rv\d*$")
+        return bool(review) and review_verdict(review[1]) == "pass"
+    return merge_state(job)[0] == "verified"
+
+
+def cmd_wiki(args):
+    state = load_state()
+    label = "curate"
+    if args.job:
+        if args.job not in state["jobs"]:
+            return fail("unknown job: %s" % args.job)
+        label = args.job
+    if args.shared:
+        where = shared_wiki()
+    elif args.job:
+        where = wiki_dir(state["jobs"][args.job]["repo"])
+    elif args.repo:
+        try:
+            where = wiki_dir(repo_key(args.repo))
+        except ValueError as e:
+            return fail(str(e))
+    else:
+        return fail("name the wiki: --job <job>, --repo <path> or --shared")
+    try:
+        if args.action == "read":
+            out = wiki.read(where, args.page)
+            text = out.pop("text")
+            print(json.dumps(out))
+            if text:
+                sys.stdout.write(text if text.endswith("\n") else text + "\n")
+            return 0
+        if args.action == "write":
+            if args.job and args.page != "index.md" and not wiki_verified(args.job, state["jobs"][args.job]):
+                return fail("job %s is not verified yet (merge verified, a direct job's review passed, or "
+                            "research): write its lessons after that" % args.job)
+            with io.open(args.source, encoding="utf-8-sig") as f:
+                text = f.read()
+            if args.shared:
+                low = text.replace("\\", "/").lower()
+                keys = set(state["repos"]) | set(j.get("repo") for j in state["jobs"].values() if j.get("repo"))
+                for key in keys:
+                    checkout = os.path.dirname(key).lower()
+                    if checkout and checkout in low:
+                        return fail("the shared wiki holds what is true beyond one repository: drop the "
+                                    "path %s" % os.path.dirname(key))
+            print(json.dumps(wiki.write(where, args.page, text, args.base, label, args.note, args.dup_ok)))
+            return 0
+        if args.action == "log":
+            wiki.log(where, label, args.note)
+            return 0
+        if args.action == "status":
+            print(json.dumps(wiki.status(where), ensure_ascii=False, indent=1))
+            return 0
+        if args.action == "prune":
+            print(json.dumps({"archived" if args.apply else "due": wiki.prune(where, args.apply)}))
+            return 0
+        if args.action == "archive":
+            wiki.archive(where, args.page, args.reason, label)
+            return 0
+        if args.action in ("pin", "unpin"):
+            wiki.pin(where, args.page, args.action == "pin")
+            return 0
+    except (wiki.WikiError, IOError, OSError) as e:
+        return fail(str(e))
     return fail("unknown action")
 
 
@@ -2577,6 +2702,29 @@ def build_parser():
     verify.add_argument("command", nargs="?", help="the plan's 검증 명령, as one quoted string")
     verify.add_argument("--accept", help="the user accepts the merge without (another) check: why")
     job.set_defaults(func=cmd_job)
+
+    wk = sub.add_parser("wiki", help="read and write a wiki: capped pages, read before write, a log line per job")
+    wk_sub = wk.add_subparsers(dest="action")
+    wk_sub.required = True
+    for name in ("read", "write", "log", "status", "prune", "archive", "pin", "unpin"):
+        p = wk_sub.add_parser(name)
+        if name in ("read", "write", "archive", "pin", "unpin"):
+            p.add_argument("page")
+        p.add_argument("--job", help="the job's repository wiki; with write and log, the job the lines are for")
+        p.add_argument("--repo", help="the wiki of this repository (curation)")
+        p.add_argument("--shared", action="store_true", help="the shared wiki (only the orchestrator writes it)")
+        if name == "write":
+            p.add_argument("--from", dest="source", required=True, help="a file holding the whole new page")
+            p.add_argument("--base", required=True, help="the base `oke wiki read` printed (new for a new page)")
+            p.add_argument("--note", required=True, help="what changed, for log.md")
+            p.add_argument("--dup-ok", action="store_true", help="lines that only look like another page's")
+        if name == "log":
+            p.add_argument("--note", required=True)
+        if name == "prune":
+            p.add_argument("--apply", action="store_true", help="move them; without it only list them")
+        if name == "archive":
+            p.add_argument("--reason", required=True)
+    wk.set_defaults(func=cmd_wiki)
 
     ledger = sub.add_parser("ledger")
     ledger_sub = ledger.add_subparsers(dest="action")

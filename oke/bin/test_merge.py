@@ -272,6 +272,7 @@ class TestLedgerAndVerify(MergeBase):
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 1)
         self.assertIn("unverified", self.err)
         self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 0, self.err)
+        self.logged("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
 
     def test_a_second_merge_of_the_same_job_is_refused(self):
@@ -384,6 +385,7 @@ class TestDirectCommit(MergeBase):
         self.assertEqual(self.ledger()["merge"], "unverified")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 1)
         self.assertEqual(self.cli("job", "verify", "fix-a", "test -f d.txt"), 0, self.err)
+        self.logged("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
 
     def test_unstaged_byproducts_are_not_committed(self):

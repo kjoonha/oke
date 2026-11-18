@@ -67,7 +67,10 @@ on: <what you wait for, when type is waiting>
 ## 검증 출력     (required for done: the command and the end of its output)
 ## 질문          (required for question)
 ## 배운 것       (facts the next worker should know, about this repository or beyond it, or 없음)
+## wiki          (each wiki page you read: `- <page>.md: ok`, or `- <page>.md: wrong: <what is true instead>`; or 없음)
 ```
+
+The `## wiki` lines are how OKe learns which pages help: a page nobody reads goes to the archive after 30 days, and a `wrong` page is fixed first.
 
 - `done` only when the 검증 명령 passed. If it fails and you cannot fix it, report `failed` with the output.
 - Unclear requirement: report `question`. Do not guess what the user wants.
