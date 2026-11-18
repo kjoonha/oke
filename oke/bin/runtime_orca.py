@@ -123,14 +123,14 @@ def status_of(show):
     (no result: Orca no longer knows the dispatch)."""
     if not show:
         return None
-    if show.get("liveness") in ("exited", "lost"):
-        return None
     if show.get("terminalState") in ("released", "closed"):
         return None
-    # A settled task waits for the next one; Orca then often reports liveness
-    # "unverifiable" and no activity for a chat worker (seen live).
-    if show.get("stage") == "settled" and show.get("activity") in (None, "idle"):
+    # A settled task waits for the next one, which Orca mail starts as a follow-up in
+    # the same kept terminal: liveness then reads "exited" or "unverifiable" (seen live).
+    if show.get("stage") == "settled" and show.get("activity") in (None, "idle")             and show.get("liveness") != "lost":
         return "idle"
+    if show.get("liveness") in ("exited", "lost"):
+        return None
     return STATUS.get(show.get("activity"), "working")
 
 
@@ -177,31 +177,60 @@ class OrcaRuntime(object):
     def missing(self):
         return []
 
-    def show(self, entry):
+    def show(self, entry, name=None):
+        """worker-show of the agent's current dispatch. Orca mail to a settled worker
+        starts a follow-up dispatch with a new id in the same terminal, so a settled
+        one moves the entry (and the registry row `name`) to the terminal's owner."""
         try:
-            return run_orca(["orchestration", "worker-show", "--dispatch", entry["dispatch"]])
+            show = run_orca(["orchestration", "worker-show", "--dispatch", entry["dispatch"]])
         except HerdrError as e:
             if e.code == "herdr_unavailable":
                 raise
             return None  # unknown dispatch: gone, so the watcher revives it
+        owner = self.owner(show, entry) if show and show.get("stage") == "settled" else None
+        if not owner or owner == entry["dispatch"]:
+            return show
+        entry.setdefault("origin", entry["dispatch"])
+        entry["dispatch"] = owner
+        if name:
+            update_registry(lambda r: r.get(name) and r[name].update(dispatch=owner, origin=entry["origin"]))
+        return self.show(entry)
+
+    def owner(self, show, entry):
+        """The dispatch that now owns the entry's terminal, or None when Orca does not say."""
+        if not show.get("runId"):
+            return None
+        try:
+            rows = run_orca(["orchestration", "worker-list", "--run", show["runId"], "--limit", "100",
+                             "--full"]).get("workers") or []
+        except HerdrError as e:
+            if e.code == "herdr_unavailable":
+                raise
+            return None
+        for row in rows:
+            resource = row.get("resource") or {}
+            if resource.get("terminalHandle") == entry["handle"]:
+                return resource.get("ownerDispatchId")
+        return None
 
     def as_agent(self, name, entry, show):
         return {"name": name, "pane_id": entry["handle"], "terminal_id": entry["handle"],
                 "agent_status": status_of(show) or "gone", "cwd": entry.get("cwd"),
-                # the dispatch stands for the session: a revive finds its transcript by it
-                "agent_session": {"value": entry["dispatch"]}}
+                # the first dispatch stands for the session: Orca's preamble names it at the
+                # start of the transcript, where a revive looks for it
+                "agent_session": {"value": entry.get("origin") or entry["dispatch"]}}
 
     def agents(self):
         out = []
         for name, entry in sorted(load_registry().items()):
-            show = self.show(entry)
+            show = self.show(entry, name)
             if status_of(show):
                 out.append(self.as_agent(name, entry, show))
         return out
 
     def agent(self, name):
         entry = load_registry().get(name)
-        show = self.show(entry) if entry else {}
+        show = self.show(entry, name) if entry else {}
         if not status_of(show):
             raise HerdrError("agent_not_found", name)
         return self.as_agent(name, entry, show)
@@ -251,6 +280,7 @@ class OrcaRuntime(object):
         entry = load_registry().get(name)
         if not entry:
             raise HerdrError("agent_not_found", name)
+        self.show(entry, name)  # mail the current dispatch, not one a follow-up replaced
         run_orca(["orchestration", "send", "--to", "dispatch:" + entry["dispatch"],
                   "--subject", "OKe", "--body", text])
         return True
@@ -292,8 +322,8 @@ class OrcaRuntime(object):
         return place if self.entry_of(place)[1] else None
 
     def place_exists(self, place):
-        entry = self.entry_of(place)[1]
-        return bool(entry and status_of(self.show(entry)))
+        name, entry = self.entry_of(place)
+        return bool(entry and status_of(self.show(entry, name)))
 
     def has_claude(self, place):
         return self.place_exists(place)

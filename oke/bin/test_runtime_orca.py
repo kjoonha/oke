@@ -46,7 +46,10 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(s(dict(WORKING, activity=None)), "working")  # unknown is never dead
         settled = {"liveness": "unverifiable", "stage": "settled", "state": "succeeded"}
         self.assertEqual(s(settled), "idle")  # seen live: a PM done with its task
-        self.assertIsNone(s(dict(WORKING, liveness="exited")))
+        # seen live: a PM settled after worker_done, its terminal kept for the next mail
+        self.assertEqual(s(dict(settled, liveness="exited", terminalState="retained")), "idle")
+        self.assertIsNone(s(dict(settled, terminalState="released")))
+        self.assertIsNone(s(dict(WORKING, liveness="exited")))  # died mid-task
         self.assertIsNone(s(dict(WORKING, terminalState="released")))
         self.assertIsNone(s(None))  # Orca no longer knows the dispatch
 
@@ -97,6 +100,23 @@ class TestOrcaRuntime(OrcaBase):
             self.rt.agent("pm-toy")
         self.assertEqual(c.exception.code, "agent_not_found")
 
+    def test_a_follow_up_dispatch_takes_over_the_entry(self):
+        self.register("pm-toy", "ctx_1", "structworker_1")
+        settled = {"stage": "settled", "liveness": "unverifiable", "runId": "run_1"}
+        rows = {"workers": [{"resource": {"terminalHandle": "structworker_9", "ownerDispatchId": "ctx_8"}},
+                            {"resource": {"terminalHandle": "structworker_1", "ownerDispatchId": "ctx_2"}}]}
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(settled)],
+                   "orchestration worker-show --dispatch ctx_2": [OK(WORKING)],
+                   "orchestration worker-list": [OK(rows)],
+                   "orchestration send": [OK({"id": "msg_1"})]})
+        self.assertEqual(self.rt.agent("pm-toy")["agent_status"], "working")
+        entry = runtime_orca.load_registry()["pm-toy"]
+        self.assertEqual((entry["dispatch"], entry["origin"]), ("ctx_2", "ctx_1"))
+        self.assertEqual(self.rt.agent("pm-toy")["agent_session"], {"value": "ctx_1"})  # the transcript's id
+        self.rt.prompt("pm-toy", "go")
+        argv = self.calls()[-1]
+        self.assertEqual(argv[argv.index("--to") + 1], "dispatch:ctx_2")
+
     def test_an_unknown_dispatch_is_gone(self):
         self.register()
         self.fake({"orchestration worker-show": [ERR("dispatch_not_found")]})
@@ -122,9 +142,10 @@ class TestOrcaRuntime(OrcaBase):
 
     def test_prompt_is_orca_mail_to_the_dispatch(self):
         self.register()
-        self.fake({"orchestration send": [OK({"id": "msg_1"})]})
+        self.fake({"orchestration send": [OK({"id": "msg_1"})],
+                   "orchestration worker-show": [OK(WORKING)]})
         self.assertTrue(self.rt.prompt("fix-a-w1", "OKe inbox: go"))
-        argv = self.calls()[0]
+        argv = self.calls()[-1]
         self.assertEqual(argv[argv.index("--to") + 1], "dispatch:ctx_1")
         self.assertEqual(argv[argv.index("--body") + 1], "OKe inbox: go")
 
