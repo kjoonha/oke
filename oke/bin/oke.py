@@ -259,16 +259,19 @@ def read_events(offset):
 
 
 def repo_key(path):
-    """Normalized git common dir: the same value from a checkout and its worktrees."""
+    """Normalized git common dir: the same value from a checkout and its worktrees.
+    A folder outside git gets `<folder>/.git`, where `git init` would put it: a direct job."""
     cwd = native_path(path)
     try:
         p = subprocess.Popen(["git", "rev-parse", "--git-common-dir"], cwd=cwd,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         out, _ = p.communicate()
     except (OSError, ValueError):
-        raise ValueError("not a git repository: %s" % path)
+        raise ValueError("not a folder: %s" % path)
     if p.returncode != 0:
-        raise ValueError("not a git repository: %s" % path)
+        if not os.path.isdir(cwd):
+            raise ValueError("not a folder: %s" % path)
+        return normalize_path(os.path.join(os.path.realpath(cwd), ".git"))
     common = native_path(out.decode("utf-8", "replace").strip())
     if not os.path.isabs(common):
         common = os.path.join(cwd, common)
@@ -1425,7 +1428,7 @@ def board_tree(state, agents, only_key=None):
             info = state["jobs"][job]
             waiting = pending_item(job, info)
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
-                         "lane": info.get("lane") or "normal",
+                         "lane": info.get("lane") or "normal", "direct": bool(info.get("direct")),
                          "merge": merge_state(job)[0],
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None})
         tree.append({"repo": repo_name(key), "key": key, "jobs": jobs,
@@ -1848,6 +1851,8 @@ def merge_job(job):
     info = state["jobs"].get(job)
     if not info:
         return fail("unknown job: %s" % job)
+    if info.get("lane") == "research" or info.get("direct"):
+        return fail("job %s: %s" % (job, NO_MERGE))
     if info.get("phase") != "merging":
         return fail("job %s is in phase %s: set phase merging after the user approves the merge"
                     % (job, info.get("phase")))
@@ -2167,6 +2172,9 @@ def cmd_ledger(args):
 # trivial: a subagent does the work, one approval covers plan and merge;
 # small: a worker pane, a review subagent; normal: worker and reviewer panes
 LANES = ("trivial", "small", "normal")
+# research: the PM looks and reports, no change, no plan approval, no merge.
+# A direct job (a folder outside git) changes the files in place: no branch, no merge.
+NO_MERGE = "the job has nothing to merge (research or direct): set phase done after its report"
 
 PHASE_FROM = {
     "planning": ("intake", "planning", "awaiting_approval", "working", "reviewing", "awaiting_merge"),
@@ -2268,16 +2276,23 @@ def job_locked(args):
             key = repo_key(args.repo)
         except ValueError as e:
             return fail(str(e))
+        direct = not os.path.exists(key)
         branch = "refs/heads/oke/" + args.slug
-        if subprocess.call(["git", "-C", native_path(args.repo), "show-ref", "--verify", "--quiet", branch]) == 0:
+        if not direct and subprocess.call(["git", "-C", native_path(args.repo), "show-ref", "--verify",
+                                           "--quiet", branch]) == 0:
             return fail("branch oke/%s already exists (an earlier job): pick another job name" % args.slug)
         os.makedirs(job_dir)
         # the branch the main checkout is on now: `job merge` merges only into it
-        base = git_out(native_path(os.path.dirname(key)), "symbolic-ref", "-q", "--short", "HEAD")[1]
+        base = None if direct else git_out(native_path(os.path.dirname(key)), "symbolic-ref", "-q", "--short", "HEAD")[1]
         state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None,
                                     "phase_at": time.time(), "base": base or None}
+        if args.research:
+            state["jobs"][args.slug]["lane"] = "research"
+        if direct:
+            state["jobs"][args.slug]["direct"] = True
         save_state(state)
         print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key,
+                          "lane": "research" if args.research else None, "direct": direct,
                           "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
                           "pm_dir": pm_dir(key).replace("\\", "/"),
                           "pm_agent": "pm-" + repo_name(key),
@@ -2292,9 +2307,17 @@ def job_locked(args):
             return fail("bad phase %r: one of %s" % (args.phase, ", ".join(PHASES)))
         now = state["jobs"][args.slug].get("phase")
         allowed = PHASE_FROM.get(args.phase)
-        if args.phase == "merging" and state["jobs"][args.slug].get("lane") == "trivial":
+        info = state["jobs"][args.slug]
+        no_merge = info.get("lane") == "research" or info.get("direct")
+        if args.phase == "merging" and info.get("lane") == "trivial":
             # the user approved the plan and the merge in one go
             allowed = allowed + ("working", "reviewing")
+        if no_merge and args.phase in ("awaiting_merge", "merging"):
+            return fail("job %s: %s" % (args.slug, NO_MERGE))
+        if no_merge and args.phase == "done":
+            allowed = allowed + ("working", "reviewing")
+        if info.get("lane") == "research" and args.phase == "working":
+            allowed = allowed + ("intake", "planning")  # no plan to approve
         if allowed is not None and now not in allowed:
             return fail("job %s cannot go from %s to %s: allowed only from %s"
                         % (args.slug, now, args.phase, ", ".join(allowed)))
@@ -2302,7 +2325,7 @@ def job_locked(args):
             # a job merged without a worktree has no ledger merge row: only OKe's merges are held
             return fail("job %s: its merge is %s, run `oke job verify` (or merge again) first"
                         % (args.slug, merge_state(args.slug)[0]))
-        if args.phase == "planning" and now == "intake":  # a re-plan needs no new interview
+        if args.phase in ("planning", "working") and now == "intake":  # a re-plan needs no new interview
             problem = interview_problem(args.slug)
             if problem:
                 return fail(problem)
@@ -2321,6 +2344,8 @@ def job_locked(args):
         return 0
     if args.action == "lane":
         info = state["jobs"][args.slug]
+        if info.get("lane") == "research":
+            return fail("job %s is research: it has no size lane" % args.slug)
         grows = LANES.index(args.lane) > LANES.index(info.get("lane") or "normal")
         if info.get("phase") not in ("intake", "planning", "awaiting_approval") and not (
                 grows and info.get("phase") in ("working", "reviewing")):
@@ -2529,7 +2554,8 @@ def build_parser():
     job_sub.required = True
     new = job_sub.add_parser("new")
     new.add_argument("slug")
-    new.add_argument("--repo", required=True)
+    new.add_argument("--repo", required=True, help="a git checkout, or any folder for a direct job")
+    new.add_argument("--research", action="store_true", help="look and report: no change, no merge")
     phase = job_sub.add_parser("phase")
     phase.add_argument("slug")
     phase.add_argument("phase")

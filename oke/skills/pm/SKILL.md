@@ -210,6 +210,14 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
 
 The user gave the job up. Ignore any later wait result for that job's children (a `gone` after you close them included): write no report for it. Do not start their waits again, close its worker and reviewer (`$OKE close <pane>`), and leave its worktree and branch as they are (say so on the board). A job without a worktree leaves uncommitted files in the main checkout that would block every later merge: report nothing for the cancelled job, but name those files in the next merge's `question` at step 1 ("left by the cancelled job <job>"). Write no report: the job is closed. If a merge waited for this job, start it now.
 
+### kind: research
+
+The user wants to know something; nothing changes. Read `$OKE_HOME/jobs/<job>/intake.md` and the wikis as for a plan. Investigate yourself; for a wide search call Agent with `subagent_type: Explore`, never a worker pane. Do not change the repository. Put what will still hold next time into the repository wiki (see **Wiki**). Report `done`: the findings go in 요약 (answer the question the user asked, with `file:line` where it helps; the report may be long), sources and open points after it. There is no plan, review or merge.
+
+### Direct job (`direct: true` in `$OKE status`)
+
+The folder is not a git repository: the files change in place. Plan and execute as usual, with these differences. No worktree, and `commit: no` for the worker. Skip the git steps (`job tree`, `add`, `commit`, `status`). The reviewer's assignment has no `commit:` or `tree:`; its 이번 지시 lists the files the worker reported as changed or new, to read whole. On `verdict: pass` report `done` (files changed, the worker's 검증 출력): there is no merge, and `$OKE job merge` refuses one.
+
 ### kind: answer
 
 The user's answer to your question about that job. Continue from where you stopped. If a child of that job is still at a dialog you reported before, report `blocked` again for it (with the new seq) and do not start its wait.
