@@ -166,7 +166,7 @@ When it finishes, read the first line of its output. If the user speaks before i
 |---|---|
 | `report <type> <job>` | Start the wait again first (it keeps delivering the PM's mail while you ask the user), then run the queue |
 | `blocked` | The PM itself is at a dialog. This comes before the queue. Ask: approve once / deny / go to that pane. Send the key yourself: `$OKE keys <pm> enter` to approve, `$OKE keys <pm> esc` to deny, or `$OKE attach <pm>` (then tell the user to answer the dialog there and to tell you when done, end your turn, and continue only after the user says so). Start the wait again with `--after-blocked` added. Never send a second key for the same dialog |
-| `idle_no_report <job>` | `$OKE send <pm> --job <job> "Job <job>: re-read <pm_job_dir>/assignment.md, continue, and write <pm_job_dir>/report.md when done."` and wait again |
+| `idle_no_report <job>` | `$OKE send <pm> --job <job> "Job <job>: continue"` (its turn stopped short, like a cut-off answer: it picks up where it was) and wait again |
 | `bad_report <job> ...` | `$OKE send <pm> --job <job> "Job <job>: rewrite <pm_job_dir>/report.md in the required format."` and wait again |
 | `idle_no_report again <job>`, `bad_report again <job> ...` | The nudge did not help. Do not nudge again: the wait now leaves that job alone and `pending` lists it as `silent`. Wait again (for the other jobs), then run the queue |
 | `no_jobs` | The PM has no open job left. Do not start its wait again |

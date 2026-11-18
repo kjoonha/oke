@@ -160,7 +160,8 @@ When a child's wait finishes, act on its first line:
 | worker `report question` | Answer from the plan, the code or the wiki if you can (autonomy `balanced` or `full`). If it is about what the user wants, or autonomy is `conservative`, report `question` for that job and wait for `kind: answer` |
 | `blocked` | Report `type: blocked` for that job: name the child agent and paste the screen text. Do not start that child's wait again yet. The orchestrator answers the dialog and gives you `kind: dialog` |
 | `report blocked` | Children do not use this type. Treat it as `report question` |
-| `idle_no_report`, `bad_report` | Once: `$OKE send <child> "Re-read your assignment and write a proper report."`, then wait again. Second time: report `failed` for that job |
+| `idle_no_report` | Once: `$OKE send <child> "continue"` (its turn stopped short: it picks up where it was), then wait again. Second time: report `failed` for that job |
+| `bad_report` | Once: `$OKE send <child> "Rewrite your report.md in the format your skill gives."`, then wait again. Second time: report `failed` for that job |
 | `gone` | The child died; OKe does not restart it by itself. Report `question` for that job: name the child and ask whether to revive it or give the job up. On `kind: answer` "revive": `$OKE revive <child> --reset`, then wait again |
 | `superseded` | A newer wait on that child replaced this one. Do nothing |
 | `{"deliver": {"to": ..., "text": ...}}` | The child runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again |
