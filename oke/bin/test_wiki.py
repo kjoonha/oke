@@ -189,6 +189,32 @@ class TestWiki(SpawnBase):
         self.assertEqual([t for _, t in oke.inbox_messages("pm-" + oke.repo_name(key))], ["Job fix-b: go on"])
         self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
 
+    def test_cancel_closes_only_panes_still_the_childs_and_never_a_done_job(self):
+        key = oke.repo_key(self.repo)
+        oke.write_json_atomic(oke.children_path(key), {
+            "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p1", "terminal": "t1"},
+            "fix-a-rv": {"job": "fix-a", "role": "reviewer", "pane": "w1:p2", "terminal": "t2"}})
+        closed = []
+
+        class Stub(object):
+            def place_id(self, pane):
+                return {"w1:p1": "t1", "w1:p2": "someone-else"}[pane]  # p2 was reused
+
+            def close(self, pane):
+                closed.append(pane)
+        real = oke.runtime
+        oke.runtime = lambda *a: Stub()
+        try:
+            self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
+        finally:
+            oke.runtime = real
+        self.assertEqual(closed, ["w1:p1"])
+        self.assertIsNone(oke.read_children(key)["fix-a-rv"]["pane"])
+        state = oke.load_state()
+        state["jobs"]["fix-a"]["phase"] = "done"
+        oke.save_state(state)
+        self.assertEqual(self.cli("job", "cancel", "fix-a"), 1)
+
     def test_report_entries(self):
         text = "## 요약\n- a.md: ok\n## wiki\n- `b.md`: ok\n* c.md: wrong - stale flag\n- d.md: unused\n## 배운 것\n- e.md: ok\n"
         self.assertEqual(wiki.report_entries(text),

@@ -830,6 +830,12 @@ def look_at(agent, folder):
         info = runtime().agent(agent)
     except HerdrError as e:
         if e.code in ("agent_not_found", "pane_not_found"):
+            try:
+                found = find_target(load_state(), agent)
+                if found and live_agent(found[3], list_agents()):
+                    return None  # the runtime lost its name, its session still runs
+            except HerdrError:
+                pass  # the name lookup already said gone; the confirmations decide
             return "gone"
         raise
     remember_session(agent, info)
@@ -985,7 +991,7 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
     """No time limit: a five hour simulation is a normal wait. A herdr state read
     right after input can be stale and a report can be mid-write, so an idle
     verdict needs IDLE_CONFIRMATIONS consecutive polls."""
-    idle = 0
+    idle = gone = 0
     polls = 0
     outage = 0
     # after_blocked: a key was just sent to a dialog the caller already reported. Do not
@@ -1022,6 +1028,9 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                 result = None
         else:
             armed = True
+        gone = gone + 1 if result == "gone" else 0
+        if result == "gone" and gone < GONE_CONFIRMATIONS:
+            result = None
         if result is None:
             idle = 0
         elif result.startswith("?"):
@@ -1077,7 +1086,7 @@ def cmd_wait(args):
 # ---------------------------------------------------------------- revive
 
 DONE_PHASES = ("done", "failed")
-REVIVE_LIMIT = 3  # consecutive deaths with no new report in between
+GONE_CONFIRMATIONS = 3  # one failed look (a CLI hiccup) is not a death
 ORCH_NAME = "oke-orch"
 REVIVE_PROMPT = ("You were restarted after a crash. Use the oke:{role} skill. Re-read your "
                  "assignment file {path} and your board.md, then continue.")
@@ -1278,7 +1287,8 @@ def relaunch(state, role, key, name, record, folder):
 
 def revive(name):
     """Bring a dead OKe agent back in its own session. Returns revived, alive, busy
-    (another process is reviving it), not_needed, gave_up, failed or unknown."""
+    (another process is reviving it), not_needed, failed or unknown. Only an explicit
+    request revives: nothing in OKe restarts a dead agent by itself."""
     state = load_state()
     found = find_target(state, name)
     if found is None:
@@ -1310,12 +1320,7 @@ def revive_locked(name):
         mtime = report_mtime(folder) if folder else None
     revives = record.get("revives", 0)
     if folder and mtime != record.get("report_mtime"):
-        revives = 0  # it reported since the last revive: not a crash loop
-    if revives >= REVIVE_LIMIT:
-        if not record.get("gave_up"):
-            log_event("gave_up %s after %d restarts" % (name, revives))
-            update_record(role, key, name, {"gave_up": True})
-        return "gave_up"
+        revives = 0  # it reported since the last revive (the board shows the count)
     if folder:
         try:
             os.remove(os.path.join(folder, "api-retry.json"))  # the dead process's retry
@@ -2369,18 +2374,27 @@ def job_locked(args):
         return 0
     if args.action == "cancel":
         info = state["jobs"][args.slug]
+        if info.get("phase") == "done":
+            return fail("job %s is done (merged): nothing to cancel" % args.slug)
         info.update(phase="failed", phase_at=time.time(), cancelled=True)
         save_state(state)  # first: nothing may start for this job from here on
-        closed = []
-        for name, rec in sorted(read_children(info["repo"]).items()):
-            if rec.get("job") == args.slug and rec.get("pane"):
-                try:
+        closed, key = [], info.get("repo")
+        children = read_children(key) if key else {}
+        for name, rec in sorted(children.items()):
+            if rec.get("job") != args.slug or not rec.get("pane"):
+                continue
+            try:
+                # a pane id comes back after a herdr restart: close it only while it is still this child's
+                if rec.get("terminal") and runtime().place_id(rec["pane"]) == rec["terminal"]:
                     runtime().close(rec["pane"])
                     closed.append(name)
-                except (HerdrError, OSError):
-                    pass  # already gone
+            except (HerdrError, OSError):
+                pass  # already gone
+            rec.update(pane=None, terminal=None)  # under the state lock already: no update_record
+        if children:
+            write_json_atomic(children_path(key), children)
         print(json.dumps({"job": args.slug, "closed": closed,
-                          "dropped_messages": drop_job_mail(args.slug, info["repo"])}))
+                          "dropped_messages": drop_job_mail(args.slug, key) if key else 0}))
         return 0
     if args.action == "archive":
         src = os.path.join(home, "jobs", args.slug)
@@ -2412,13 +2426,25 @@ def drop_job_mail(job, key):
     mark = "Job %s:" % job
     dropped = 0
     for agent in names:
-        for path, text in inbox_messages(agent):
-            if text.startswith(mark) or (agent != names[0]):
-                done = os.path.join(inbox_dir(agent), "read")
-                if not os.path.isdir(done):
-                    os.makedirs(done)
-                replace_file(path, os.path.join(done, os.path.basename(path)))
-                dropped += 1
+        lock = "deliver-" + agent
+        for _ in range(50):
+            if try_lock(lock):
+                break
+            time.sleep(0.1)
+        else:
+            continue  # a delivery holds it: what it delivers is gone from the inbox anyway
+        try:
+            for path, text in inbox_messages(agent):
+                if text.startswith(mark) or agent != names[0]:
+                    done = os.path.join(inbox_dir(agent), "read")
+                    os.makedirs(done, exist_ok=True)
+                    try:
+                        os.replace(path, os.path.join(done, os.path.basename(path)))
+                        dropped += 1
+                    except OSError:
+                        pass  # delivered a moment ago
+        finally:
+            unlock(lock)
     return dropped
 
 

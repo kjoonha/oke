@@ -198,14 +198,12 @@ class TestRevive(ReviveBase):
         self.revive_scenario(**{"agent list": [J({"agents": [AG(None, pane="w1:p5", session=None)]})]})
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
 
-    def test_gives_up_after_three_deaths(self):
+    def test_an_asked_revive_has_no_limit(self):
         children = oke.read_children(self.key)
         children["fix-a-w1"].update(revives=3, report_mtime=None)
         oke.write_json_atomic(oke.children_path(self.key), children)
         self.revive_scenario()
-        self.assertEqual(oke.revive("fix-a-w1"), "gave_up")
-        self.assertEqual(started(self.calls()), [])
-        self.assertIn("gave_up fix-a-w1", self.events())
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")
 
     def test_new_report_resets_the_death_count(self):
         self.write_file(os.path.join(self.child_dir, "report.md"), "type: waiting\nseq: 2\n---\n")
@@ -328,15 +326,14 @@ class TestWaitRevives(ReviveBase):
         # the parent decides; OKe revives nobody by itself
         report = os.path.join(self.child_dir, "report.md")
         self.stub("revived")
-        self.fake({"agent get": [E("agent_not_found"), AGENT("working")]})
+        self.fake({"agent get": [E("agent_not_found")]})
         self.assertEqual(oke.wait_loop("fix-a-w1", report, 2, poll=0, max_polls=4), "gone")
         self.assertEqual(self.revived, [])
 
-    def test_gave_up_is_gone(self):
-        self.stub("gave_up")
-        self.fake({"agent get": [E("agent_not_found")]})
-        self.assertEqual(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
-                                       poll=0, max_polls=4), "gone")
+    def test_one_failed_look_is_not_a_death(self):
+        self.fake({"agent get": [E("agent_not_found"), AGENT("working")]})
+        self.assertIsNone(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
+                                        poll=0, max_polls=4))
 
     def test_pending_api_retry_is_not_idle_no_report(self):
         self.write_file(os.path.join(self.child_dir, "api-retry.json"), '{"attempt": 1}')
