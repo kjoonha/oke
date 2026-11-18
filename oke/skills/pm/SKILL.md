@@ -164,6 +164,7 @@ When a child's wait finishes, act on its first line:
 | `bad_report` | Once: `$OKE send <child> "Rewrite your report.md in the format your skill gives."`, then wait again. Second time: report `failed` for that job |
 | `gone` | The child died; OKe does not restart it by itself. Report `question` for that job: name the child and ask whether to revive it or give the job up. On `kind: answer` "revive": `$OKE revive <child> --reset`, then wait again |
 | `superseded` | A newer wait on that child replaced this one. Do nothing |
+| `cancelled` | The user gave that job up. Do nothing for it: no report, no new wait |
 | `{"deliver": {"to": ..., "text": ...}}` | The child runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again |
 | `deliver_failed` | Your message to the child could not be typed in three times. Report `failed` for that job and name the child |
 | exit code 1 or 2 | herdr failed or is unreachable. Report `failed` with the stderr text. Do not treat the child as gone |

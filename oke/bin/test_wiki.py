@@ -216,12 +216,14 @@ class TestWiki(SpawnBase):
             oke.runtime = real
         self.assertEqual(closed, ["w1:p1"])
         self.assertIsNone(oke.read_children(key)["fix-a-rv"]["pane"])
-        for phase in ("done", "merging"):
-            state = oke.load_state()
-            state["jobs"]["fix-a"]["phase"] = phase
-            oke.save_state(state)
-            self.assertEqual(self.cli("job", "cancel", "fix-a"), 1)
-        state["jobs"]["fix-a"]["phase"] = "working"
+        state = oke.load_state()
+        state["jobs"]["fix-a"]["phase"] = "done"
+        oke.save_state(state)
+        self.assertEqual(self.cli("job", "cancel", "fix-a"), 1)
+        state["jobs"]["fix-a"]["phase"] = "merging"  # a merge that never reached main can be given up
+        oke.save_state(state)
+        self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
+        state["jobs"]["fix-a"]["phase"] = "merging"
         oke.save_state(state)
         oke.ledger_add("fix-a", "oke", "abc", "merge", "ok")
         self.assertEqual(self.cli("job", "cancel", "fix-a"), 1)  # merged, not verified yet

@@ -336,6 +336,20 @@ class TestWaitRevives(ReviveBase):
         self.assertIsNone(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
                                         poll=0, max_polls=5))
 
+    def test_a_cancelled_job_ends_its_childs_wait(self):
+        state = oke.load_state()
+        state["jobs"]["fix-a"]["cancelled"] = True
+        oke.save_state(state)
+        self.fake({})
+        self.assertEqual(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
+                                       poll=0, max_polls=2), "cancelled")
+
+    def test_a_refused_delivery_ends_in_deliver_failed(self):
+        oke.queue_mail("fix-a-w1", "user", "hi")
+        self.fake({"agent get": [AGENT("idle")], "agent prompt": [E("agent_not_found")]})
+        self.assertEqual(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
+                                       poll=0, max_polls=30), "deliver_failed")
+
     def test_one_failed_look_is_not_a_death(self):
         self.fake({"agent get": [E("agent_not_found"), AGENT("working")]})
         self.assertIsNone(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,

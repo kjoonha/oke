@@ -794,6 +794,11 @@ HERDR_RETRIES = 30  # consecutive herdr_unavailable polls (about a minute) befor
 def check_once(agent, report, seq):
     """One look at a child. Returns a result line, None to keep waiting, or a
     '?'-prefixed provisional verdict that only counts once the agent stays idle."""
+    job_dir = os.path.dirname(os.path.dirname(report))
+    job = load_state()["jobs"].get(os.path.basename(job_dir), {})
+    archived = not job and os.path.dirname(job_dir) == os.path.join(oke_home(), "jobs")
+    if archived or job.get("cancelled"):
+        return "cancelled"  # the user gave the job up: nothing about its children matters
     header = read_header(report)
     current = header is not None and header.get("seq") == seq
     if current and header.get("type") in FINAL_TYPES:
@@ -1924,6 +1929,9 @@ def merge_job(job):
     if not current or (base and current != base):
         return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
                     % (current or "a detached HEAD", base))
+    with locked():  # a cancel since the checks above: merge nothing
+        if load_state()["jobs"].get(job, {}).get("phase") != "merging":
+            return fail("job %s left phase merging (cancelled?): not merged" % job)
     pre = git_out(main, "rev-parse", "HEAD")[1]
     result = subprocess.run(["git", "-C", main, "merge", "--no-ff", "--no-edit",
                              "-m", "Merge branch 'oke/%s'" % job, tip],
@@ -2391,7 +2399,7 @@ def job_locked(args):
     if args.action == "cancel":
         info = state["jobs"][args.slug]
         merged = merge_state(args.slug)[0]
-        if info.get("phase") in ("done", "merging") or merged in ("unverified", "verified"):
+        if info.get("phase") == "done" or merged in ("unverified", "verified"):
             return fail("job %s is %s: its merge is in main or under way. Let it finish (verify, or "
                         "roll it back), not cancel" % (args.slug, info.get("phase") if merged == "none" else
                                                        "merged (%s)" % merged))
