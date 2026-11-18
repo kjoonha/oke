@@ -154,6 +154,17 @@ class TestOrcaChoice(OrcaBase):
         os.environ["HERDR_ENV"] = "1"
         self.assertEqual(oke.runtime().name, "herdr")
 
+    def test_tick_knows_the_orchestrator_orca_does_not_list(self):
+        os.environ["OKE_RUNTIME"] = "orca"
+        state = oke.load_state()
+        state["orchestrator"] = {"pane": "term_1", "agent": "orchestrator"}
+        oke.save_state(state)
+        self.fake({})  # no workers started yet: Orca lists nobody
+        self.assertEqual(self.cli("tick", "--pane", "term_1", "--board"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["role"], "orchestrator")
+        self.assertEqual(self.cli("tick", "--pane", "term_2"), 0, self.err)
+        self.assertIsNone(json.loads(self.out)["role"])
+
 
 if __name__ == "__main__":
     unittest.main()

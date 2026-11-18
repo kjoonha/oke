@@ -1383,6 +1383,10 @@ def whoami(state, pane):
     agents = list_agents()
     here = [a for a in agents if a.get("pane_id") == pane]
     if not here:
+        # Orca lists only the workers OKe started, never the user's own session: there
+        # the orchestrator's recorded place is all there is (seen live: role null)
+        if not runtime().owns_orchestrator:
+            return next((r for r in mine if r[0] == "orchestrator"), None), agents
         return None, agents
     for r in mine:
         if same_agent(r[3], here[0]):
