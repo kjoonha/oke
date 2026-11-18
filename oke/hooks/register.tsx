@@ -20,6 +20,7 @@ const bandOpen = atom({ plugin: 'oke', key: 'bandOpen' } as const, false as bool
 // Module state starts over on a reload; session.start runs again then.
 let pane: string | undefined
 let role: string | null = null
+let named = false  // role and folder came from the first prompt, not yet from oke
 let folder: string | null = null
 let bandId: string | null = null
 let mood: Mood = 'rest'
@@ -61,8 +62,12 @@ async function tick($: any) {
     if (eventsOffset !== null) args.push('--events-from', String(eventsOffset))
     const out = await oke($, args)
     if (!out) return
-    role = out.role
-    folder = out.folder ?? null
+    // a role the first prompt named stays until spawn has recorded the agent
+    if (out.role || !named) {
+      role = out.role
+      folder = out.folder ?? null
+      named = false
+    }
     job = out.job ?? null
     seq = out.seq ?? null
     eventsOffset = out.events_offset
@@ -202,6 +207,34 @@ export function gitDenied(command: string): string | null {
   const m = GIT_DENIED.exec(unquoted(command))
   return m ? `OKe blocks \`git ${m[1]!.split(/\s/)[0]}\` here: it can lose work or publish it. `
     + 'Merges go through `oke job merge`; if you really need it, report a question instead.' : null
+}
+
+const REVIEWER_GIT = /^\s*git(?:\s+(?:-C\s+\S+|-c\s+\S+|--no-pager))*\s+(?:diff|log|show|status)\b/
+// Inside Orca a reviewer also reports with `orca orchestration send` (worker_done) or asks
+// with `ask`; a quoted orca path reads as "" here.
+const REVIEWER_ORCA = /^\s*(?:\S*orca(?:\.exe)?|"")\s+orchestration\s+(?:send|ask)\b/
+
+/** The role and folder an OKe first or revive prompt names, else null: the mod knows
+ * them from the first turn on, before `oke spawn` has recorded the agent. */
+export function promptRole(text: string): { role: string, folder: string } | null {
+  const m = /oke:(pm|worker|reviewer) skill\.[\s\S]*?assignment file (?:is )?(\S+?\.md)/.exec(text)
+  return m ? { role: m[1]!, folder: m[2]!.replace(/[\\/][^\\/]*$/, '') } : null
+}
+
+/** The refusal for a reviewer's tool call that could change the repository, else null.
+ * The reviewer's launch flags say the same; this holds where no flags reach the agent
+ * (Orca starts it itself). It writes only its own folder (report, board). */
+export function reviewerDenied(tool: string, input: any, own: string | null): string | null {
+  if (tool === 'Edit' || tool === 'Write' || tool === 'NotebookEdit') {
+    const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    const target = norm(String(input.file_path ?? input.notebook_path ?? ''))
+    if (own && target.startsWith(norm(own) + '/')) return null
+    return 'OKe reviewers change nothing: write only report.md and board.md in your own folder.'
+  }
+  if (tool !== 'Bash') return null
+  const cmd = unquoted(String(input.command ?? ''))
+  if ((REVIEWER_GIT.test(cmd) || REVIEWER_ORCA.test(cmd)) && !/[;&|`<>]|\$\(|--output/.test(cmd)) return null
+  return 'OKe reviewers run only read-only git: git diff, log, show or status, one command, without --output.'
 }
 
 /** The ledger's merge state beside the job name. */
@@ -452,9 +485,10 @@ async function openBoard($: any) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    // herdr pane, else this Claude session (OKe without herdr runs children as --bg sessions)
+    // herdr pane, else Orca terminal or chat, else this Claude session (bg children)
     // the process env has no session id (seen live): ask the session itself
-    pane = (await $.env.get('HERDR_PANE_ID')) || `session:${await $.session.id()}`
+    pane = (await $.env.get('HERDR_PANE_ID')) || (await $.env.get('ORCA_TERMINAL_HANDLE'))
+      || `session:${await $.session.id()}`
     if (!pane) return r
     await $.command.register({ name: 'oke-board', description: 'Show the OKe agents and their boards' })
     // A process that died during a backoff leaves its marker; this one starts clean.
@@ -490,6 +524,10 @@ export const register: Register = on => {
   on('tool.call', async ($, e: any, next) => {
       if (e.tool === 'Bash' && (role === 'pm' || role === 'worker' || role === 'reviewer')) {
         const denied = gitDenied(String(e.command ?? ''))
+        if (denied) return { deny: denied }
+      }
+      if (role === 'reviewer') {
+        const denied = reviewerDenied(e.tool, e, folder)
         if (denied) return { deny: denied }
       }
       const ran: any = await next(e)
@@ -587,6 +625,13 @@ export const register: Register = on => {
     // The person typed during a backoff: their turn replaces the retry.
     pending?.cancel()
     pending = null
+    // Orca runs a new agent's first turn before spawn records it: its guardrails hold from the first tool call
+    const said = role === null ? promptRole(String((e as any).text ?? '')) : null
+    if (said) {
+      role = said.role
+      folder = said.folder
+      named = true
+    }
     // a new assignment's seq for the status line; workers and reviewers do not tick otherwise
     if (role === 'worker' || role === 'reviewer') void tick($)
     return next(e)

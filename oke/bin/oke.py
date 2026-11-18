@@ -16,6 +16,7 @@ import time
 
 import runtime_bg
 import runtime_herdr
+import runtime_orca
 from runtime_herdr import DialogError, HerdrError, herdr, herdr_text, session_of  # noqa: F401 (tests)
 
 PHASES = ("intake", "planning", "awaiting_approval", "working", "reviewing",
@@ -286,16 +287,23 @@ def slug(text, limit=24):
 
 # ---------------------------------------------------------------- runtime
 
-RUNTIMES = {"herdr": runtime_herdr.HerdrRuntime, "bg": runtime_bg.BgRuntime}
+RUNTIMES = {"herdr": runtime_herdr.HerdrRuntime, "bg": runtime_bg.BgRuntime, "orca": runtime_orca.OrcaRuntime}
+
+
+def default_runtime():
+    """herdr inside a herdr pane, orca inside an Orca terminal or chat, else bg."""
+    if os.environ.get("HERDR_ENV") == "1":
+        return "herdr"
+    return "orca" if os.environ.get("ORCA_TERMINAL_HANDLE") else "bg"
 _runtimes = {}
 
 
 def runtime():
     """The runtime that runs OKe's agents: $OKE_RUNTIME, else the one state.json names,
-    else herdr inside a herdr pane and bg outside (see docs/superpowers/specs/2026-11-15-oke-runtime-layer-design.md)."""
+    else default_runtime() (see docs/superpowers/specs/2026-11-15-oke-runtime-layer-design.md)."""
     state = read_json(state_path(), {})
     # before the first claim (seen live: a plain `oke status` outside herdr said "not inside")
-    default = "herdr" if os.environ.get("HERDR_ENV") == "1" else "bg"
+    default = default_runtime()
     name = os.environ.get("OKE_RUNTIME") or (state.get("runtime") if isinstance(state, dict) else None) or default
     if name not in RUNTIMES:
         raise StateError("unknown runtime %r: use %s" % (name, " or ".join(sorted(RUNTIMES))))
@@ -351,8 +359,10 @@ def bank_usage(folder):
 
 
 def agent_command(kind, role, config, home, plugin_dir, folder, resume=None):
-    bank_usage(folder)
     """herdr's --kind and the CLI arguments for one worker or reviewer."""
+    bank_usage(folder)
+    if runtime().name == "orca":
+        config = dict(config, lean_launch=False)  # Orca starts the agent: no flags reach it
     if kind == "claude":
         header = read_header(os.path.join(folder, "assignment.md")) if folder else None
         return kind, launch_args(role, config, home, plugin_dir, resume, folder, header)
@@ -1613,7 +1623,7 @@ def cmd_status(args):
     # seconds old: an agent that just started can show as dead until the next status.
     if args.claim and not os.environ.get("OKE_RUNTIME"):
         # one runtime per OKe home, chosen by where the orchestrator starts
-        want = "herdr" if os.environ.get("HERDR_ENV") == "1" else "bg"
+        want = default_runtime()
         with locked():
             current = load_state()
             if current.get("runtime") != want:
