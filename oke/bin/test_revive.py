@@ -324,18 +324,13 @@ class TestWaitRevives(ReviveBase):
             return results.pop(0) if len(results) > 1 else results[0]
         oke.revive = fake_revive
 
-    def test_gone_child_is_revived_and_the_wait_goes_on(self):
+    def test_a_gone_child_ends_the_wait_without_a_revive(self):
+        # the parent decides; OKe revives nobody by itself
         report = os.path.join(self.child_dir, "report.md")
         self.stub("revived")
         self.fake({"agent get": [E("agent_not_found"), AGENT("working")]})
-        self.assertIsNone(oke.wait_loop("fix-a-w1", report, 2, poll=0, max_polls=4))
-        self.assertEqual(self.revived, ["fix-a-w1"])
-
-    def test_busy_keeps_waiting(self):
-        self.stub("busy")
-        self.fake({"agent get": [E("agent_not_found"), AGENT("working")]})
-        self.assertIsNone(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
-                                        poll=0, max_polls=4))
+        self.assertEqual(oke.wait_loop("fix-a-w1", report, 2, poll=0, max_polls=4), "gone")
+        self.assertEqual(self.revived, [])
 
     def test_gave_up_is_gone(self):
         self.stub("gave_up")
@@ -372,18 +367,13 @@ class TestTick(ReviveBase):
         self.assertEqual(self.revived, [])
         self.assertEqual(self.calls(), [])
 
-    def test_orchestrator_revives_a_dead_pm(self):
+    def test_the_watchers_revive_nobody(self):
         out = self.tick("w7:p1", [AG(None, pane="w7:p1", session="s-o")])
         self.assertEqual(out["role"], "orchestrator")
-        self.assertEqual(self.revived, ["pm-toy"])
-        self.assertEqual(out["revived"], {"pm-toy": "revived"})
-
-    def test_pm_revives_the_orchestrator_and_its_children(self):
         out = self.tick("w1:p3", [AG("pm-toy", pane="w1:p3", session="s-pm")])
         self.assertEqual(out["role"], "pm")
-        # one per tick: the next tick sees the orchestrator back and takes the child
-        self.tick("w1:p3", [AG("pm-toy", pane="w1:p3", session="s-pm"), AG(None, pane="w7:p1", session="s-o")])
-        self.assertEqual(self.revived, ["orchestrator", "fix-a-w1"])
+        self.assertEqual(self.revived, [])
+        self.assertEqual(out["revived"], {})
 
     def test_pm_skips_a_child_with_its_final_report(self):
         self.write_file(os.path.join(self.child_dir, "report.md"), "type: done\nseq: 2\n---\n")
@@ -400,13 +390,6 @@ class TestTick(ReviveBase):
     def test_a_pane_whose_session_herdr_does_not_know_is_not_the_orchestrator(self):
         out = self.tick("w7:p1", [AG(None, pane="w7:p1", session=None)])
         self.assertIsNone(out["role"])
-
-    def test_one_revive_per_tick(self):
-        # a long revive must finish inside the mod's process timeout
-        self.write_file(os.path.join(self.child_dir, "report.md"), "type: waiting\nseq: 2\n---\n")
-        out = self.tick("w1:p3", [AG("pm-toy", pane="w1:p3", session="s-pm")])
-        self.assertEqual(len(self.revived), 1)
-        self.assertEqual(len(out["revived"]), 1)
 
     def test_all_alive_writes_nothing(self):
         before = (io.open(oke.state_path(), encoding="utf-8").read(),

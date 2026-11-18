@@ -176,6 +176,19 @@ class TestWiki(SpawnBase):
         self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
         self.assertNotIn("curate", self.out)
 
+    def test_cancel_closes_the_job_and_drops_only_its_mail(self):
+        key = oke.repo_key(self.repo)
+        oke.write_json_atomic(oke.children_path(key), {"fix-a-w1": {"job": "fix-a", "role": "worker"}})
+        pm = os.path.join(oke.inbox_dir("pm-" + oke.repo_name(key)))
+        self.write(os.path.join(pm, "1.txt"), "Job fix-a: cancel it")
+        self.write(os.path.join(pm, "2.txt"), "Job fix-b: go on")
+        self.write(os.path.join(oke.inbox_dir("fix-a-w1"), "1.txt"), "Assignment updated")
+        self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["dropped_messages"], 2)
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["phase"], "failed")
+        self.assertEqual([t for _, t in oke.inbox_messages("pm-" + oke.repo_name(key))], ["Job fix-b: go on"])
+        self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
+
     def test_report_entries(self):
         text = "## 요약\n- a.md: ok\n## wiki\n- `b.md`: ok\n* c.md: wrong - stale flag\n- d.md: unused\n## 배운 것\n- e.md: ok\n"
         self.assertEqual(wiki.report_entries(text),

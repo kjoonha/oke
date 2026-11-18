@@ -988,7 +988,6 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
     idle = 0
     polls = 0
     outage = 0
-    revive_outage = 0  # not reset by a good look: a revive that always meets an outage must end
     # after_blocked: a key was just sent to a dialog the caller already reported. Do not
     # report that dialog again while herdr still shows the old state. Only a short grace:
     # the agent may already be at its next dialog when this wait starts.
@@ -1023,20 +1022,6 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                 result = None
         else:
             armed = True
-        if result == "gone":
-            try:
-                if revive(agent) in ("revived", "alive", "busy", "failed"):
-                    result = None  # failed counts toward the revive limit and is tried again
-            except (OSError, StateError):
-                result = None  # state.json busy for a moment: look again next poll
-            except HerdrError as e:
-                # an outage during a revive is the same passing outage as during a look
-                revive_outage += 1
-                if e.code != "herdr_unavailable" or revive_outage > HERDR_RETRIES:
-                    raise
-                result = None
-            else:
-                revive_outage = 0
         if result is None:
             idle = 0
         elif result.startswith("?"):
@@ -1510,14 +1495,11 @@ def cmd_tick(args):
                        or (r[2] == key and r[0] in ("worker", "reviewer"))]
         else:
             targets = []
+        # A dead agent is not revived here: the user decides (`oke revive`), as in OMC.
         for t_role, t_name, t_key, t_rec in targets:
             a = live_agent(t_rec, agents)
-            if a:
-                if not t_rec.get("session") and session_of(a):  # spawn could not see it yet
-                    update_record(t_role, t_key, t_name, {"session": session_of(a)})
-            elif not out["revived"] and should_be_alive(state, t_role, t_key, t_name, t_rec):
-                # one per tick: a revive can take two minutes and the mod's call has a timeout
-                out["revived"][t_name] = revive(t_name)
+            if a and not t_rec.get("session") and session_of(a):  # spawn could not see it yet
+                update_record(t_role, t_key, t_name, {"session": session_of(a)})
         if args.board and role in ("orchestrator", "pm"):
             out["board"] = board_tree(state, agents, key if role == "pm" else None)
     print(json.dumps(out, ensure_ascii=False))
@@ -2385,8 +2367,25 @@ def job_locked(args):
         state["jobs"][args.slug]["deferred"] = item["key"]
         save_state(state)
         return 0
+    if args.action == "cancel":
+        info = state["jobs"][args.slug]
+        info.update(phase="failed", phase_at=time.time(), cancelled=True)
+        save_state(state)  # first: nothing may start for this job from here on
+        closed = []
+        for name, rec in sorted(read_children(info["repo"]).items()):
+            if rec.get("job") == args.slug and rec.get("pane"):
+                try:
+                    runtime().close(rec["pane"])
+                    closed.append(name)
+                except (HerdrError, OSError):
+                    pass  # already gone
+        print(json.dumps({"job": args.slug, "closed": closed,
+                          "dropped_messages": drop_job_mail(args.slug, info["repo"])}))
+        return 0
     if args.action == "archive":
         src = os.path.join(home, "jobs", args.slug)
+        if state["jobs"][args.slug].get("repo"):
+            drop_job_mail(args.slug, state["jobs"][args.slug]["repo"])
         dst = os.path.join(home, "archive", "%s-%s" % (args.slug, time.strftime("%Y%m%d-%H%M%S")))
         key = state["jobs"][args.slug].get("repo")
         hint = record_wiki_use(src, key) if key and os.path.isdir(src) else None
@@ -2404,6 +2403,23 @@ def job_locked(args):
 
 
 CURATE_EVERY = 10  # jobs logged in a wiki since its last curation
+
+
+def drop_job_mail(job, key):
+    """Move the queued messages about `job` out of its PM's and children's inboxes, so a
+    later agent never acts on a closed job (OMC deletes a finished team's mailboxes)."""
+    names = ["pm-" + repo_name(key)] + [n for n, r in read_children(key).items() if r.get("job") == job]
+    mark = "Job %s:" % job
+    dropped = 0
+    for agent in names:
+        for path, text in inbox_messages(agent):
+            if text.startswith(mark) or (agent != names[0]):
+                done = os.path.join(inbox_dir(agent), "read")
+                if not os.path.isdir(done):
+                    os.makedirs(done)
+                replace_file(path, os.path.join(done, os.path.basename(path)))
+                dropped += 1
+    return dropped
 
 
 def shared_wiki():
@@ -2712,6 +2728,7 @@ def build_parser():
     phase = job_sub.add_parser("phase")
     phase.add_argument("slug")
     phase.add_argument("phase")
+    job_sub.add_parser("cancel", help="the user gave the job up: close it, its children and its mail").add_argument("slug")
     archive = job_sub.add_parser("archive")
     archive.add_argument("slug")
     defer = job_sub.add_parser("defer")
