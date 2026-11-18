@@ -167,7 +167,7 @@ def report_entries(text):
             continue
         m = WIKI_LINE.match(line) if inside else None
         if m:
-            out.append((m.group(1), m.group(2).lower(), m.group(3).strip()))
+            out.append((m.group(1).lower(), m.group(2).lower(), m.group(3).strip()))
     return out
 
 
