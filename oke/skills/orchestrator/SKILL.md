@@ -59,9 +59,10 @@ The OKe mod in every agent does this without you:
 
 ## Intake
 
-1. Settle the repository path (ask only if it is unclear).
+1. Settle the repository path (ask only if it is unclear). Any folder works: outside git the job is direct (below). Never do the work yourself, and never start your own subagent for it: every request, also a small one or a question about a codebase, becomes a job.
+   - The user wants to know something, not to change anything (investigate, explain, analyze, compare): a research job. Add `--research` to `job new`.
 2. Pick a job name: lowercase letters, digits and `-`, at most 24 characters, starting with a letter. It must differ from every open job.
-3. `$OKE job new <job> --repo <path>`. It prints `job_dir`, `repo`, `pm_dir`, `pm_job_dir`, `pm_agent`, `wiki`, `shared_wiki`. Use these values as they are; do not build the paths yourself. If it fails because the name or its branch already exists, pick another name (add `-2`).
+3. `$OKE job new <job> --repo <path>`. It prints `job_dir`, `repo`, `pm_dir`, `pm_job_dir`, `pm_agent`, `wiki`, `shared_wiki`. Use these values as they are; do not build the paths yourself. `direct: true` (the folder is not a git repository): write `direct: true` into every assignment of the job (its 이번 지시), and tell the user in one line that the files there change in place, with no branch, no merge question and no undo. Do not suggest `git init`. If it fails because the name or its branch already exists, pick another name (add `-2`).
 4. Interview the user until the request is clear (see "Interview"). `$OKE job phase <job> planning` refuses a job whose interview is not done.
 5. Write `<job_dir>/intake.md`:
 
@@ -136,7 +137,7 @@ seq: <n>
 ---
 ## 목표
 ## 이번 지시
-kind: plan | execute | merge | answer | dialog | cancel
+kind: plan | execute | merge | answer | dialog | cancel | research | curate
 <details: for plan, the path of intake.md; for answer, the user's answer; for dialog, see "Queue">
 ```
 
@@ -207,10 +208,11 @@ When the user gives a job up: give the PM `kind: cancel` (steps 2, 4, 5 and 6 of
 
 | Step | You do | Phase to set |
 |---|---|---|
-| Intake done | Assign `kind: plan` | `planning` |
+| Intake done | Assign `kind: plan`. A research job: assign `kind: research` instead | `planning`, research `working` |
 | PM reports the plan (`report_done`, phase `planning`) | Read `<job_dir>/plan.md`. If its 검증 명령 section is empty, send it back (`kind: plan`, say why). Otherwise it becomes a `plan` item | `awaiting_approval` |
 | User approves | Assign `kind: execute`; its 이번 지시 names the lane (`lane: <lane>`) | `working` |
 | User wants changes | Assign `kind: plan` with the requested changes | `planning` |
+| PM reports research done, or a direct job's work reviewed (`report_done`, phase `working` or `reviewing`) | Nothing to merge. Tell the user the report's 요약 (for research, its findings; offer the report path), update the shared wiki from 배운 것 (공용), `$OKE job phase <job> done` (refused: see "Shared wiki"), then `$OKE job archive <job>` | |
 | PM reports work reviewed (`report_done`, phase `working` or `reviewing`) | Lane `trivial`: the user approved the merge with the plan, so assign `kind: merge` now and tell the user in one line. Otherwise it becomes a `merge` item | `merging` for `trivial`, else `awaiting_merge` |
 | User says merge | Assign `kind: merge` | `merging` |
 | PM reports merged (`report_done`, phase `merging`) | Update the shared wiki from the report's 배운 것 (공용) (see "Shared wiki"), `$OKE job phase <job> done`, `$OKE job archive <job>`, tell the user what changed | |
@@ -227,11 +229,15 @@ A job's reviews stop after 10 rounds (`max_review_rounds` in `$OKE_HOME/config.j
 
 Knowledge that holds beyond one repository (company rules, shared tools, how deploys work) lives in the `shared_wiki` folder, which `job new` prints. Only you write it; every PM and worker reads it.
 
-- `index.md`: one line per page, with a link.
-- `log.md`: append `<date> <job>: <what you added>`.
+- `index.md`: one line per page: a link and what the page answers, the trigger first.
 - `<topic>.md`: one topic per page.
+- `log.md`: one line per change; `oke wiki` writes it.
 
-Add what a PM report's 배운 것 (공용) states and you believe, and what the user tells you to keep. Fix a page that turned out wrong. Facts about one repository stay in that repository's wiki, which its PM keeps.
+Change it only through `$OKE wiki ... --shared`, the same way a PM changes its wiki (see the PM's **Wiki**: `wiki read`, then `wiki write --from <file> --base <base> --note ..`). Add what a PM report's 배운 것 (공용) states and you believe, and what the user tells you to keep; add `--job <job>` for a job's lessons. Fix a page that turned out wrong. No repository names or paths: facts about one repository stay in that repository's wiki, which its PM keeps (`wiki write --shared` refuses a repository's path). The PM's rules for what to write hold here too.
+
+`job phase done` refuses a job whose PM did not log it in the wiki: give the PM `kind: answer` with "Record the wiki lines for job <job> (`oke wiki log --job <job> --note none` if it taught nothing), then report done again." Never write a repository wiki yourself.
+
+Curation: when `job archive` prints a `curate:` line, or the user asks to clean up a wiki, give that repository's PM `kind: curate` (it needs a job: `job new <name> --repo <path> --research`, no interview needed: run `$OKE interview <job> --goal 1 --constraints 1 --criteria 1`, then phase `working`). For the shared wiki do the same yourself with `--shared`.
 
 ## Autonomy
 

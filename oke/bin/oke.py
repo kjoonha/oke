@@ -17,6 +17,7 @@ import time
 import runtime_bg
 import runtime_herdr
 import runtime_orca
+import wiki
 from runtime_herdr import DialogError, HerdrError, herdr, herdr_text, session_of  # noqa: F401 (tests)
 
 PHASES = ("intake", "planning", "awaiting_approval", "working", "reviewing",
@@ -259,16 +260,26 @@ def read_events(offset):
 
 
 def repo_key(path):
-    """Normalized git common dir: the same value from a checkout and its worktrees."""
+    """Normalized git common dir: the same value from a checkout and its worktrees.
+    A folder outside git gets `<folder>/.git`, where `git init` would put it: a direct job."""
     cwd = native_path(path)
     try:
         p = subprocess.Popen(["git", "rev-parse", "--git-common-dir"], cwd=cwd,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, _ = p.communicate()
+        out, err = p.communicate()
     except (OSError, ValueError):
-        raise ValueError("not a git repository: %s" % path)
+        raise ValueError("not a folder: %s" % path)  # git missing, or no such folder
     if p.returncode != 0:
-        raise ValueError("not a git repository: %s" % path)
+        if not os.path.isdir(cwd):
+            raise ValueError("not a folder: %s" % path)
+        up = os.path.realpath(cwd)
+        while True:  # a repository git refuses (dubious ownership, a broken .git) is no plain folder
+            if os.path.exists(os.path.join(up, ".git")):
+                raise ValueError("git refuses %s: %s" % (path, err.decode("utf-8", "replace").strip()))
+            if os.path.dirname(up) == up:
+                break
+            up = os.path.dirname(up)
+        return normalize_path(os.path.join(os.path.realpath(cwd), ".git"))
     common = native_path(out.decode("utf-8", "replace").strip())
     if not os.path.isabs(common):
         common = os.path.join(cwd, common)
@@ -1379,6 +1390,10 @@ def whoami(state, pane):
     agents = list_agents()
     here = [a for a in agents if a.get("pane_id") == pane]
     if not here:
+        # Orca lists only the workers OKe started, never the user's own session: there
+        # the orchestrator's recorded place is all there is (seen live: role null)
+        if not runtime().owns_orchestrator:
+            return next((r for r in mine if r[0] == "orchestrator"), None), agents
         return None, agents
     for r in mine:
         if same_agent(r[3], here[0]):
@@ -1425,7 +1440,7 @@ def board_tree(state, agents, only_key=None):
             info = state["jobs"][job]
             waiting = pending_item(job, info)
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
-                         "lane": info.get("lane") or "normal",
+                         "lane": info.get("lane") or "normal", "direct": bool(info.get("direct")),
                          "merge": merge_state(job)[0],
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None})
         tree.append({"repo": repo_name(key), "key": key, "jobs": jobs,
@@ -1701,7 +1716,8 @@ def status_locked(args, herdr_info):
             cls = "disconnected"
         result["jobs"][name] = {"phase": job.get("phase"), "class": cls, "agents": job_agents,
                                 "pm_seq": pm_job_report(name)[0],
-                                "pm_job_dir": pm_job_dir(name).replace("\\", "/")}
+                                "pm_job_dir": pm_job_dir(name).replace("\\", "/"),
+                                "lane": job.get("lane"), "direct": bool(job.get("direct"))}
 
     here = runtime().whoami()
     recorded = state["orchestrator"].get("pane")
@@ -1848,6 +1864,8 @@ def merge_job(job):
     info = state["jobs"].get(job)
     if not info:
         return fail("unknown job: %s" % job)
+    if info.get("lane") == "research" or info.get("direct"):
+        return fail("job %s: %s" % (job, NO_MERGE))
     if info.get("phase") != "merging":
         return fail("job %s is in phase %s: set phase merging after the user approves the merge"
                     % (job, info.get("phase")))
@@ -2167,6 +2185,9 @@ def cmd_ledger(args):
 # trivial: a subagent does the work, one approval covers plan and merge;
 # small: a worker pane, a review subagent; normal: worker and reviewer panes
 LANES = ("trivial", "small", "normal")
+# research: the PM looks and reports, no change, no plan approval, no merge.
+# A direct job (a folder outside git) changes the files in place: no branch, no merge.
+NO_MERGE = "the job has nothing to merge (research or direct): set phase done after its report"
 
 PHASE_FROM = {
     "planning": ("intake", "planning", "awaiting_approval", "working", "reviewing", "awaiting_merge"),
@@ -2268,16 +2289,29 @@ def job_locked(args):
             key = repo_key(args.repo)
         except ValueError as e:
             return fail(str(e))
+        direct = not os.path.exists(key)
+        busy = [n for n, j in state["jobs"].items()  # research changes nothing: never in the way
+                if direct and not args.research and j.get("repo") == key and j.get("lane") != "research"
+                and j.get("phase") not in DONE_PHASES]
+        if busy:
+            return fail("job %s already changes %s in place (no git, no undo): finish or archive it first"
+                        % (busy[0], args.repo))
         branch = "refs/heads/oke/" + args.slug
-        if subprocess.call(["git", "-C", native_path(args.repo), "show-ref", "--verify", "--quiet", branch]) == 0:
+        if not direct and subprocess.call(["git", "-C", native_path(args.repo), "show-ref", "--verify",
+                                           "--quiet", branch]) == 0:
             return fail("branch oke/%s already exists (an earlier job): pick another job name" % args.slug)
         os.makedirs(job_dir)
         # the branch the main checkout is on now: `job merge` merges only into it
-        base = git_out(native_path(os.path.dirname(key)), "symbolic-ref", "-q", "--short", "HEAD")[1]
+        base = None if direct else git_out(native_path(os.path.dirname(key)), "symbolic-ref", "-q", "--short", "HEAD")[1]
         state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None,
-                                    "phase_at": time.time(), "base": base or None}
+                                    "phase_at": time.time(), "created": time.time(), "base": base or None}
+        if args.research:
+            state["jobs"][args.slug]["lane"] = "research"
+        if direct:
+            state["jobs"][args.slug]["direct"] = True
         save_state(state)
         print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key,
+                          "lane": "research" if args.research else None, "direct": direct,
                           "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
                           "pm_dir": pm_dir(key).replace("\\", "/"),
                           "pm_agent": "pm-" + repo_name(key),
@@ -2292,9 +2326,17 @@ def job_locked(args):
             return fail("bad phase %r: one of %s" % (args.phase, ", ".join(PHASES)))
         now = state["jobs"][args.slug].get("phase")
         allowed = PHASE_FROM.get(args.phase)
-        if args.phase == "merging" and state["jobs"][args.slug].get("lane") == "trivial":
+        info = state["jobs"][args.slug]
+        no_merge = info.get("lane") == "research" or info.get("direct")
+        if args.phase == "merging" and info.get("lane") == "trivial":
             # the user approved the plan and the merge in one go
             allowed = allowed + ("working", "reviewing")
+        if no_merge and args.phase in ("awaiting_merge", "merging"):
+            return fail("job %s: %s" % (args.slug, NO_MERGE))
+        if no_merge and args.phase == "done":
+            allowed = allowed + ("working", "reviewing")
+        if info.get("lane") == "research" and args.phase == "working":
+            allowed = allowed + ("intake", "planning")  # no plan to approve
         if allowed is not None and now not in allowed:
             return fail("job %s cannot go from %s to %s: allowed only from %s"
                         % (args.slug, now, args.phase, ", ".join(allowed)))
@@ -2302,7 +2344,12 @@ def job_locked(args):
             # a job merged without a worktree has no ledger merge row: only OKe's merges are held
             return fail("job %s: its merge is %s, run `oke job verify` (or merge again) first"
                         % (args.slug, merge_state(args.slug)[0]))
-        if args.phase == "planning" and now == "intake":  # a re-plan needs no new interview
+        if args.phase == "done" and info.get("repo") and not wiki.logged(wiki_dir(info["repo"]), args.slug,
+                                                                         info.get("created")):
+            return fail("job %s: the PM has not recorded what it taught. It writes the lessons with "
+                        "`oke wiki write --job %s`, or `oke wiki log --job %s --note none`"
+                        % (args.slug, args.slug, args.slug))
+        if args.phase in ("planning", "working") and now == "intake":  # a re-plan needs no new interview
             problem = interview_problem(args.slug)
             if problem:
                 return fail(problem)
@@ -2321,6 +2368,8 @@ def job_locked(args):
         return 0
     if args.action == "lane":
         info = state["jobs"][args.slug]
+        if info.get("lane") == "research":
+            return fail("job %s is research: it has no size lane" % args.slug)
         grows = LANES.index(args.lane) > LANES.index(info.get("lane") or "normal")
         if info.get("phase") not in ("intake", "planning", "awaiting_approval") and not (
                 grows and info.get("phase") in ("working", "reviewing")):
@@ -2339,6 +2388,8 @@ def job_locked(args):
     if args.action == "archive":
         src = os.path.join(home, "jobs", args.slug)
         dst = os.path.join(home, "archive", "%s-%s" % (args.slug, time.strftime("%Y%m%d-%H%M%S")))
+        key = state["jobs"][args.slug].get("repo")
+        hint = record_wiki_use(src, key) if key and os.path.isdir(src) else None
         if os.path.isdir(src):
             if not os.path.isdir(os.path.dirname(dst)):
                 os.makedirs(os.path.dirname(dst))
@@ -2346,7 +2397,134 @@ def job_locked(args):
         del state["jobs"][args.slug]
         save_state(state)
         print(dst)
+        if hint:
+            print(hint)
         return 0
+    return fail("unknown action")
+
+
+CURATE_EVERY = 10  # jobs logged in a wiki since its last curation
+
+
+def shared_wiki():
+    path = os.path.join(load_config()["wiki_path"], "_shared")
+    if not os.path.isdir(path):
+        os.makedirs(path)
+    return path
+
+
+def record_wiki_use(job_dir, key):
+    """Count what the job's reports said about wiki pages (`## wiki`); a page is the
+    repository's if it has one by that name, else the shared wiki's. Says when the
+    repository's wiki is due for a curation."""
+    entries = []
+    for name in sorted(os.listdir(job_dir)):
+        try:
+            with io.open(os.path.join(job_dir, name, "report.md"), encoding="utf-8") as f:
+                entries += wiki.report_entries(f.read())
+        except (IOError, OSError, UnicodeDecodeError):
+            pass
+    repo, shared = wiki_dir(key), shared_wiki()
+    wiki.record(repo, [e for e in entries if os.path.isfile(os.path.join(repo, e[0]))])
+    wiki.record(shared, [e for e in entries if not os.path.isfile(os.path.join(repo, e[0]))])
+    try:
+        with io.open(os.path.join(repo, "log.md"), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (IOError, OSError, UnicodeDecodeError):
+        return None
+    jobs = set()
+    for line in reversed(lines):
+        m = re.match(r"^\S+ (\S+): (curated)?", line)
+        if not m:
+            continue
+        if m.group(1) == "curate" or m.group(2):  # a curation job logs "curated: .."
+            break
+        jobs.add(m.group(1))
+    if len(jobs) >= CURATE_EVERY:
+        return ("curate: the wiki of %s took %d jobs since its last curation: give its PM `kind: curate`"
+                % (os.path.dirname(key), len(jobs)))
+    return None
+
+
+def wiki_verified(job, info):
+    """Lessons count only from work that was checked (Hermes: learning from unchecked
+    sessions taught wrong rules)."""
+    if info.get("lane") == "research":
+        return True
+    if info.get("direct"):
+        review = latest_report(os.path.join(oke_home(), "jobs", job), r"-rv\d*$")
+        return bool(review) and review_verdict(review[1]) == "pass"
+    return merge_state(job)[0] == "verified"
+
+
+def cmd_wiki(args):
+    if args.action == "read":
+        return wiki_locked(args)
+    with locked():  # .usage.json is read-modify-write, and `job archive` writes it too
+        return wiki_locked(args)
+
+
+def wiki_locked(args):
+    state = load_state()
+    label = "curate"
+    if args.job:
+        if args.job not in state["jobs"]:
+            return fail("unknown job: %s" % args.job)
+        label = args.job
+    if args.shared:
+        where = shared_wiki()
+    elif args.job:
+        where = wiki_dir(state["jobs"][args.job]["repo"])
+    elif args.repo:
+        try:
+            where = wiki_dir(repo_key(args.repo))
+        except ValueError as e:
+            return fail(str(e))
+    else:
+        return fail("name the wiki: --job <job>, --repo <path> or --shared")
+    try:
+        if args.action == "read":
+            out = wiki.read(where, args.page)
+            text = out.pop("text")
+            print(json.dumps(out))
+            if text:
+                sys.stdout.write(text if text.endswith("\n") else text + "\n")
+            return 0
+        if args.action == "write":
+            if args.job and args.page != "index.md" and not wiki_verified(args.job, state["jobs"][args.job]):
+                return fail("job %s is not verified yet (merge verified, a direct job's review passed, or "
+                            "research): write its lessons after that" % args.job)
+            with io.open(args.source, encoding="utf-8-sig") as f:
+                text = f.read()
+            if args.shared:
+                low = text.replace("\\", "/").lower()
+                keys = set(state["repos"]) | set(j.get("repo") for j in state["jobs"].values() if j.get("repo"))
+                for key in keys:
+                    checkout = os.path.dirname(key).lower()
+                    bash = re.sub(r"^([a-z]):/", r"/\1/", checkout)  # c:/x as Git Bash writes it: /c/x
+                    if len(checkout) > 3 and (checkout in low or bash in low):
+                        return fail("the shared wiki holds what is true beyond one repository: drop the "
+                                    "path %s" % os.path.dirname(key))
+            print(json.dumps(wiki.write(where, args.page, text, args.base, label, args.note, args.dup_ok,
+                                        merging=args.merging or ())))
+            return 0
+        if args.action == "log":
+            wiki.log(where, label, args.note)
+            return 0
+        if args.action == "status":
+            print(json.dumps(wiki.status(where), ensure_ascii=False, indent=1))
+            return 0
+        if args.action == "prune":
+            print(json.dumps({"archived" if args.apply else "due": wiki.prune(where, args.apply)}))
+            return 0
+        if args.action == "archive":
+            wiki.archive(where, args.page, args.reason, label)
+            return 0
+        if args.action in ("pin", "unpin"):
+            wiki.pin(where, args.page, args.action == "pin")
+            return 0
+    except (wiki.WikiError, IOError, OSError) as e:
+        return fail(str(e))
     return fail("unknown action")
 
 
@@ -2529,7 +2707,8 @@ def build_parser():
     job_sub.required = True
     new = job_sub.add_parser("new")
     new.add_argument("slug")
-    new.add_argument("--repo", required=True)
+    new.add_argument("--repo", required=True, help="a git checkout, or any folder for a direct job")
+    new.add_argument("--research", action="store_true", help="look and report: no change, no merge")
     phase = job_sub.add_parser("phase")
     phase.add_argument("slug")
     phase.add_argument("phase")
@@ -2551,6 +2730,30 @@ def build_parser():
     verify.add_argument("command", nargs="?", help="the plan's 검증 명령, as one quoted string")
     verify.add_argument("--accept", help="the user accepts the merge without (another) check: why")
     job.set_defaults(func=cmd_job)
+
+    wk = sub.add_parser("wiki", help="read and write a wiki: capped pages, read before write, a log line per job")
+    wk_sub = wk.add_subparsers(dest="action")
+    wk_sub.required = True
+    for name in ("read", "write", "log", "status", "prune", "archive", "pin", "unpin"):
+        p = wk_sub.add_parser(name)
+        if name in ("read", "write", "archive", "pin", "unpin"):
+            p.add_argument("page")
+        p.add_argument("--job", help="the job's repository wiki; with write and log, the job the lines are for")
+        p.add_argument("--repo", help="the wiki of this repository (curation)")
+        p.add_argument("--shared", action="store_true", help="the shared wiki (only the orchestrator writes it)")
+        if name == "write":
+            p.add_argument("--from", dest="source", required=True, help="a file holding the whole new page")
+            p.add_argument("--base", required=True, help="the base `oke wiki read` printed (new for a new page)")
+            p.add_argument("--note", required=True, help="what changed, for log.md")
+            p.add_argument("--dup-ok", action="store_true", help="lines that only look like another page's")
+            p.add_argument("--merging", action="append", help="a page merged into this one (archived next)")
+        if name == "log":
+            p.add_argument("--note", required=True)
+        if name == "prune":
+            p.add_argument("--apply", action="store_true", help="move them; without it only list them")
+        if name == "archive":
+            p.add_argument("--reason", required=True)
+    wk.set_defaults(func=cmd_wiki)
 
     ledger = sub.add_parser("ledger")
     ledger_sub = ledger.add_subparsers(dest="action")

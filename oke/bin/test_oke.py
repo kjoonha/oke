@@ -79,7 +79,13 @@ class Base(unittest.TestCase):
         now = oke.load_state()["jobs"][name]["phase"]
         start = self.PATH.index(now) + 1 if now in self.PATH else 0
         for step in self.PATH[start:self.PATH.index(phase) + 1]:
+            if step == "done":
+                self.logged(name)
             self.assertEqual(self.cli("job", "phase", name, step), 0, self.err)
+
+    def logged(self, name):
+        """The PM's wiki line for the job, which `job phase done` asks for."""
+        self.assertEqual(self.cli("wiki", "log", "--job", name, "--note", "none"), 0, self.err)
 
     def cli(self, *args):
         out, err = io.StringIO(), io.StringIO()
@@ -153,9 +159,10 @@ class TestState(Base):
         self.assertEqual(oke.repo_key(repo), oke.repo_key(wt))
         self.assertNotIn("\\", oke.repo_key(repo))
 
-    def test_repo_key_rejects_non_repo(self):
+    def test_repo_key_outside_git_is_where_git_init_would_put_it(self):
+        self.assertTrue(oke.repo_key(self.home).endswith("/home/.git"))
         with self.assertRaises(ValueError):
-            oke.repo_key(self.home)
+            oke.repo_key(self.path("missing"))
 
     def test_normalize_windows_forms(self):
         self.assertEqual(oke.normalize_path("/c/Users/X/r/.git", windows=True), "c:/users/x/r/.git")
@@ -292,6 +299,31 @@ class TestState(Base):
     def test_job_new_rejects_bad_slug(self):
         repo = self.git_repo("r")
         self.assertEqual(self.cli("job", "new", "Bad Name", "--repo", repo), 1)
+
+    def test_a_folder_outside_git_is_a_direct_job_with_no_merge(self):
+        folder = self.path("plain")
+        os.makedirs(folder)
+        self.assertEqual(self.cli("job", "new", "calc", "--repo", folder), 0, self.err)
+        self.assertTrue(json.loads(self.out)["direct"])
+        self.assertEqual(oke.repo_key(folder), oke.load_state()["jobs"]["calc"]["repo"])
+        self.assertEqual(self.cli("job", "new", "x", "--repo", self.path("missing")), 1)
+        self.advance("calc", "working")
+        self.assertEqual(self.cli("job", "phase", "calc", "awaiting_merge"), 1)
+        self.assertEqual(self.cli("job", "merge", "calc"), 1)
+        self.assertEqual(self.cli("job", "phase", "calc", "done"), 1)  # no wiki line yet
+        self.logged("calc")
+        self.assertEqual(self.cli("job", "phase", "calc", "done"), 0, self.err)
+
+    def test_research_skips_the_plan_and_the_merge(self):
+        repo = self.git_repo("r")
+        self.assertEqual(self.cli("job", "new", "look", "--repo", repo, "--research"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "look", "working"), 1)  # the interview first
+        self.assertEqual(self.cli("interview", "look", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
+        self.assertEqual(self.cli("job", "phase", "look", "working"), 0, self.err)
+        self.assertEqual(self.cli("job", "lane", "look", "small"), 1)
+        self.assertEqual(self.cli("job", "phase", "look", "merging"), 1)
+        self.logged("look")
+        self.assertEqual(self.cli("job", "phase", "look", "done"), 0, self.err)
 
 
 def J(result):

@@ -20,7 +20,7 @@ If your first prompt says you were restarted after a crash, your earlier turns a
    ```
    python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py" ledger add <job> --by <you> --commit <git -C <cwd> rev-parse HEAD, or uncommitted> --check worker-verify --result pass|fail --detail "<the command>"
    ```
-6. Delete the untracked files your builds and checks left behind that are not part of the work: caches (`__pycache__`, `.pytest_cache`), compiled files, test logs (`git -C <cwd> status --short` shows them). Otherwise the worktree cannot be removed. In your report, list the new files that are part of the work: the PM commits only those. Keep anything that is work; when unsure, keep it and list it in the report.
+6. Delete the untracked files your builds and checks left behind that are not part of the work: caches (`__pycache__`, `.pytest_cache`), compiled files, test logs (`git -C <cwd> status --short` shows them; outside git, look at the files you touched). Otherwise the worktree cannot be removed. In your report, list the new files that are part of the work: the PM commits only those. Keep anything that is work; when unsure, keep it and list it in the report.
 7. Write your report and end your turn.
 
 Never push, `reset --hard`, `clean -f`, delete branches or drop stashes: OKe blocks them, and the PM merges through OKe. If you think one is needed, report `question`.
@@ -67,7 +67,10 @@ on: <what you wait for, when type is waiting>
 ## 검증 출력     (required for done: the command and the end of its output)
 ## 질문          (required for question)
 ## 배운 것       (facts the next worker should know, about this repository or beyond it, or 없음)
+## wiki          (each wiki page you read: `- <page>.md: ok`, or `- <page>.md: wrong: <what is true instead>`; or 없음)
 ```
+
+The `## wiki` lines are how OKe learns which pages help: a page nobody reads goes to the archive after 30 days, and a `wrong` page is fixed first.
 
 - `done` only when the 검증 명령 passed. If it fails and you cannot fix it, report `failed` with the output.
 - Unclear requirement: report `question`. Do not guess what the user wants.

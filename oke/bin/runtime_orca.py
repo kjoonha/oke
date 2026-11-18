@@ -256,7 +256,10 @@ class OrcaRuntime(object):
         return cwd
 
     def place_for_repo(self, repo, label):
-        run_orca(["repo", "add", "--path", repo.replace("\\", "/")])  # worker-start needs Orca to know it
+        # worker-start needs Orca to know it; Orca refuses a plain folder as kind git
+        kind = "git" if subprocess.call(["git", "-C", repo, "rev-parse"], stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL) == 0 else "folder"
+        run_orca(["repo", "add", "--path", repo.replace("\\", "/"), "--kind", kind])
         return repo
 
     def entry_of(self, place):
