@@ -29,12 +29,12 @@ git -c core.autocrlf=false archive --format=tar.gz -o oke.tar.gz HEAD .claude-pl
 반입한 곳에서 (Linux, tcsh 도 같다):
 
 ```
-mkdir -p ~/tools/oke && tar xzf oke.tar.gz -C ~/tools/oke
-claude plugin marketplace add ~/tools/oke
+mkdir -p ~/.claude/plugins/marketplaces/oke && tar xzf oke.tar.gz -C ~/.claude/plugins/marketplaces/oke
+claude plugin marketplace add ~/.claude/plugins/marketplaces/oke
 claude plugin install oke@oke
 ```
 
-플러그인은 그 폴더에서 바로 읽힌다. 새 버전은 같은 폴더에 다시 풀고 `claude plugin marketplace update oke` 를 부른다.
+GitHub 으로 받은 marketplace 와 같은 자리다. 플러그인은 이 폴더에서 읽히므로 지우지 않는다 (`claude plugin marketplace remove oke` 가 함께 지운다). 새 버전은 같은 폴더에 다시 풀고 `claude plugin marketplace update oke` 를 부른다.
 
 ## 쓰기
 
