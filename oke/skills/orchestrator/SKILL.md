@@ -170,7 +170,7 @@ When it finishes, read the first line of its output. If the user speaks before i
 | `bad_report <job> ...` | `$OKE send <pm> --job <job> "Job <job>: rewrite <pm_job_dir>/report.md in the required format."` and wait again |
 | `idle_no_report again <job>`, `bad_report again <job> ...` | The nudge did not help. Do not nudge again: the wait now leaves that job alone and `pending` lists it as `silent`. Wait again (for the other jobs), then run the queue |
 | `no_jobs` | The PM has no open job left. Do not start its wait again |
-| `gone` | The PM died. OKe does not restart an agent by itself. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / cancel (see "Giving up") / hold |
+| `gone` | The PM died. OKe does not restart an agent by itself. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / cancel (see "Giving up") / hold. Hold: write the file `$OKE_HOME/hold/<pm>` (one line: why), do not start that PM's wait again and do not ask again until the user brings it up; a new wait would only end in `gone` again and repeat the same question. OKe deletes that file itself when the PM is started or revived again, or has no open job left |
 | `superseded` | A newer wait replaced this one. Do nothing: do not run the queue and do not start a wait |
 | `{"deliver": {"to": ..., "text": ...}}` | The PM runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again. Not a result to show the user |
 | `deliver_failed` | Messages for the PM could not be typed in three times in a row. Tell the user and offer to go to the PM pane (`$OKE attach <pm>`); the messages stay in `$OKE_HOME/inbox/<pm>/`. Start the wait again after the user says the pane is free |
@@ -195,7 +195,7 @@ Run the queue after every wait result except `superseded`, after the start proce
    - `plan`: the plan approval question (see "Flow").
    - `merge`: the merge question (see "Flow").
 4. When the user picks hold, "look myself" or "discuss in the PM pane": `$OKE job defer <job>`. Do not ask a deferred item again unless the user brings it up. It stops being deferred by itself when its job moves on.
-5. Repeat until no item is left whose `deferred` is false. Then make sure each PM with open jobs has a wait running.
+5. Repeat until no item is left whose `deferred` is false. Then make sure each PM with open jobs has a wait running, except a PM the user put on hold after `gone` (a file `$OKE_HOME/hold/<pm>` exists).
 
 "Give the PM" always means the steps in "Give the job to the PM": a new `seq`, then `$OKE send`, then the wait.
 
@@ -257,7 +257,7 @@ With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merg
 ## Rules
 
 - Write a decision or a user instruction into the assignment or intake file the moment you get it. Your context can be compacted; the files cannot.
-- After compaction, run `$OKE status` and the queue, and start a wait for each PM with open jobs.
+- After compaction, run `$OKE status` and the queue, and start a wait for each PM with open jobs, except a PM on hold (`$OKE_HOME/hold/<pm>` exists).
 - `$OKE attach <agent>` prints `"attached": false` and a `hint` when OKe cannot show the agent itself (background sessions, Orca workers): give the user that hint. `$OKE keys` fails there too: for a dialog, offer only that command.
 - Inside Orca, Orca also wakes you with its own messages from your PMs (`worker_done`, `escalation`). They only wake you: read the PM's report.md and handle it as the wait would, then start the wait again. Never answer them with `orca orchestration` commands. OKe needs Orca's Agent Orchestration setting on, and the OKe plugin installed in Claude Code (Orca starts the agents itself, without OKe's `--plugin-dir`).
 - Do not send text starting with `/` through `$OKE send` from Git Bash; it is rewritten into a Windows path.

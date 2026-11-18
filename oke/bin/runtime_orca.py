@@ -9,7 +9,8 @@ caller is the Orca terminal that ran `oke` (ORCA_TERMINAL_HANDLE), so the orches
 coordinates its PMs and each PM its workers.
 
 Place: before a start it is the folder the agent starts in; after it, the worker's
-terminal handle. Errors reuse HerdrError and its codes.
+first terminal handle. A follow-up may run in a new terminal (`terminal` in the
+registry): the first handle stays the agent's place, as OKe's state records it. Errors reuse HerdrError and its codes.
 """
 import glob
 import io
@@ -123,12 +124,15 @@ def status_of(show):
     (no result: Orca no longer knows the dispatch)."""
     if not show:
         return None
+    # A settled task waits for the next one: Orca mail starts it as a follow-up dispatch,
+    # in the same kept terminal or, when Orca closed that one, in a new terminal on the
+    # same session ("send reopens a closed worker"). Liveness then reads "exited" or
+    # "unverifiable" and the terminal may be released (all seen live): still idle.
+    if show.get("stage") == "settled" and show.get("activity") in (None, "idle") \
+            and show.get("liveness") != "lost":
+        return "idle"
     if show.get("terminalState") in ("released", "closed"):
         return None
-    # A settled task waits for the next one, which Orca mail starts as a follow-up in
-    # the same kept terminal: liveness then reads "exited" or "unverifiable" (seen live).
-    if show.get("stage") == "settled" and show.get("activity") in (None, "idle")             and show.get("liveness") != "lost":
-        return "idle"
     if show.get("liveness") in ("exited", "lost"):
         return None
     return STATUS.get(show.get("activity"), "working")
@@ -172,49 +176,78 @@ class OrcaRuntime(object):
 
     def whoami(self):
         """The calling session's place: its Orca terminal (or chat) handle."""
-        return os.environ.get("ORCA_TERMINAL_HANDLE")
+        return self.canonical(os.environ.get("ORCA_TERMINAL_HANDLE"))
+
+    def canonical(self, place):
+        """The agent's first handle for a terminal a follow-up moved it to, else `place`."""
+        for entry in load_registry().values():
+            if place and entry.get("terminal") == place:
+                return entry.get("handle")
+        return place
 
     def missing(self):
         return []
 
     def show(self, entry, name=None):
         """worker-show of the agent's current dispatch. Orca mail to a settled worker
-        starts a follow-up dispatch with a new id in the same terminal, so a settled
-        one moves the entry (and the registry row `name`) to the terminal's owner."""
+        starts a follow-up dispatch with a new id, so a settled one moves the entry (and
+        the registry row `name`) to its follow-up, and keeps that one open too: Orca
+        closes a follow-up's terminal two minutes after it finishes otherwise."""
         try:
             show = run_orca(["orchestration", "worker-show", "--dispatch", entry["dispatch"]])
         except HerdrError as e:
             if e.code == "herdr_unavailable":
                 raise
             return None  # unknown dispatch: gone, so the watcher revives it
-        owner = self.owner(show, entry) if show and show.get("stage") == "settled" else None
-        if not owner or owner == entry["dispatch"]:
+        nxt = self.follow_up(show, entry, name) if show and show.get("stage") == "settled" else None
+        if not nxt:
             return show
         entry.setdefault("origin", entry["dispatch"])
-        entry["dispatch"] = owner
+        entry.update(nxt)
+        try:
+            run_orca(["orchestration", "worker-keep-open", "--dispatch", nxt["dispatch"]])
+        except HerdrError as e:
+            if e.code == "herdr_unavailable":
+                raise  # else it settled and closed already: the next mail reopens it
         if name:
-            update_registry(lambda r: r.get(name) and r[name].update(dispatch=owner, origin=entry["origin"]))
-        return self.show(entry)
+            update_registry(lambda r: r.get(name) and r[name].update(origin=entry["origin"], **nxt))
+        return self.show(entry, name)
 
-    def owner(self, show, entry):
-        """The dispatch that now owns the entry's terminal, or None when Orca does not say."""
+    def follow_up(self, show, entry, name=None):
+        """The follow-up dispatch that replaced the entry's, as {dispatch, terminal}, or None."""
         if not show.get("runId"):
             return None
+        here = entry.get("terminal") or entry["handle"]
         try:
             rows = run_orca(["orchestration", "worker-list", "--run", show["runId"], "--limit", "100",
                              "--full"]).get("workers") or []
+            for row in rows:  # one in the same terminal owns it now
+                resource = row.get("resource") or {}
+                if resource.get("terminalHandle") == here and resource.get("releaseState") != "released":
+                    owner = resource.get("ownerDispatchId")
+                    return {"dispatch": owner, "terminal": here} if owner and owner != entry["dispatch"] else None
+            # Orca closed the terminal: a newer dispatch (rows come newest first) names
+            # this one as the dispatch it follows up. Each row is asked once: `seen` is
+            # the newest row already asked, so a long rest costs one list per look.
+            newest = rows[0].get("dispatchId") if rows else None
+            for row in rows:
+                if row.get("dispatchId") in (entry["dispatch"], entry.get("seen")):
+                    break
+                full = run_orca(["orchestration", "worker-show", "--dispatch", row["dispatchId"], "--full"])
+                if (full.get("dispatch") or {}).get("followUpOf") == entry["dispatch"]:
+                    terminal = (full.get("worker") or {}).get("agentTerminalHandle") or here
+                    return {"dispatch": row["dispatchId"], "terminal": terminal, "seen": None}
+            if newest and newest != entry.get("seen"):
+                entry["seen"] = newest
+                if name:
+                    update_registry(lambda r: r.get(name) and r[name].update(seen=newest))
         except HerdrError as e:
             if e.code == "herdr_unavailable":
                 raise
-            return None
-        for row in rows:
-            resource = row.get("resource") or {}
-            if resource.get("terminalHandle") == entry["handle"]:
-                return resource.get("ownerDispatchId")
         return None
 
     def as_agent(self, name, entry, show):
-        return {"name": name, "pane_id": entry["handle"], "terminal_id": entry["handle"],
+        return {"name": name, "pane_id": entry["handle"], "terminal_id": entry.get("terminal") or entry["handle"],
                 "agent_status": status_of(show) or "gone", "cwd": entry.get("cwd"),
                 # the first dispatch stands for the session: Orca's preamble names it at the
                 # start of the transcript, where a revive looks for it
@@ -292,7 +325,7 @@ class OrcaRuntime(object):
         entry = load_registry().get(name)
         if not entry:
             raise HerdrError("agent_not_found", name)
-        return "open %s in Orca (task %s)" % (entry["handle"], name)
+        return "open %s in Orca (task %s)" % (entry.get("terminal") or entry["handle"], name)
 
     def split(self, near, cwd):
         return cwd
@@ -335,6 +368,7 @@ class OrcaRuntime(object):
         name, entry = self.entry_of(place)
         if not entry:
             return  # a folder: never started
+        self.show(entry, name)  # stop the follow-up that runs now, not the dispatch it replaced
         try:
             run_orca(["orchestration", "worker-stop", "--dispatch", entry["dispatch"]])
         except HerdrError as e:

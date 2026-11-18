@@ -184,6 +184,8 @@ class TestWiki(SpawnBase):
         state["repos"][key] = {"pm": {"agent": pm, "pane": "w1:p9"}}
         oke.save_state(state)
         self.fake({})
+        hold = os.path.join(oke.oke_home(), "hold", pm)
+        self.write(hold, "user held the dead PM")
         self.assertEqual(self.cli("send", pm, "Job fix-a: assignment updated (seq 2)"), 0, self.err)
         self.assertEqual(self.cli("send", pm, "Job fix-b: go on"), 0, self.err)
         self.write(os.path.join(oke.inbox_dir("fix-a-w1"), "1.txt"), "Assignment updated")
@@ -194,6 +196,7 @@ class TestWiki(SpawnBase):
         self.assertEqual(texts[0], "Job fix-b: go on")  # the PM still hears of the cancel itself
         self.assertTrue(texts[1].startswith("Job fix-a was cancelled"))
         self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
+        self.assertFalse(os.path.exists(hold))  # its last open job is gone: the hold ends
 
     def test_cancel_closes_only_panes_still_the_childs_and_never_a_done_job(self):
         key = oke.repo_key(self.repo)

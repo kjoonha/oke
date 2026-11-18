@@ -695,6 +695,7 @@ def cmd_spawn(args):
         return fail("bad agent name %r: must match %s" % (agent, AGENT_NAME.pattern))
     if role not in ("pm", "worker", "reviewer"):
         return fail("bad role %r" % role)
+    clear_hold(agent)
     config = load_config()
     kind = str(header.get("kind") or "").strip().lower() or ("claude" if role == "pm" else config["agents"].get(role, "claude"))
     if kind not in KINDS:
@@ -1306,10 +1307,20 @@ def relaunch(state, role, key, name, record, folder):
         raise
 
 
+def clear_hold(agent):
+    """The user's hold on a dead PM (the orchestrator's `$OKE_HOME/hold/<pm>`) ends when
+    the PM is started or revived again, or has no open job left."""
+    try:
+        os.remove(os.path.join(oke_home(), "hold", agent))
+    except OSError:
+        pass
+
+
 def revive(name):
     """Bring a dead OKe agent back in its own session. Returns revived, alive, busy
     (another process is reviving it), not_needed, failed or unknown. Only an explicit
     request revives: nothing in OKe restarts a dead agent by itself."""
+    clear_hold(name)
     state = load_state()
     found = find_target(state, name)
     if found is None:
@@ -1390,15 +1401,22 @@ def cmd_resume_all(args):
 def whoami(state, pane):
     """(role, name, key, record) of the OKe agent in `pane`, or None. Pane ids come
     back after a herdr restart, so a recorded session has to match as well."""
+    pane = getattr(runtime(), "canonical", lambda p: p)(pane)  # Orca: a follow-up's new terminal
     if pane and pane.startswith("session:"):
         # a session id is never reused: no need to ask the runtime who is there
         sid = pane[len("session:"):]
         mine = [r for r in records(state) if r[3].get("pane") == pane or r[3].get("session") == sid]
         return (mine[0] if mine else None), list_agents()
     mine = [r for r in records(state) if r[3].get("pane") == pane]
+    agents = None
+    if not mine and hasattr(runtime(), "canonical"):
+        # Orca: an agent whose follow-up started in a new terminal, before anyone looked
+        agents = list_agents()  # looking moves the registry to its new terminal
+        pane = runtime().canonical(pane)
+        mine = [r for r in records(state) if r[3].get("pane") == pane]
     if not mine:
         return None, []
-    agents = list_agents()
+    agents = agents if agents is not None else list_agents()
     here = [a for a in agents if a.get("pane_id") == pane]
     if not here:
         # Orca lists only the workers OKe started, never the user's own session: there
@@ -2433,6 +2451,8 @@ def job_locked(args):
                        "left of it, and write no report for it." % args.slug)
         info.update(phase="failed", phase_at=time.time(), cancelled=True)
         save_state(state)  # nothing may start for this job from here on
+        if pm.get("agent") and not open_jobs(state, info.get("repo")):
+            clear_hold(pm["agent"])
         return 0
     if args.action == "archive":
         src = os.path.join(home, "jobs", args.slug)

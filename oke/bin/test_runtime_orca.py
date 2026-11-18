@@ -48,7 +48,9 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(s(settled), "idle")  # seen live: a PM done with its task
         # seen live: a PM settled after worker_done, its terminal kept for the next mail
         self.assertEqual(s(dict(settled, liveness="exited", terminalState="retained")), "idle")
-        self.assertIsNone(s(dict(settled, terminalState="released")))
+        # seen live: Orca closed a settled PM's terminal; the next mail reopens it
+        self.assertEqual(s(dict(settled, liveness="exited", terminalState="released")), "idle")
+        self.assertIsNone(s(dict(settled, stage="running", activity="working", terminalState="released")))
         self.assertIsNone(s(dict(WORKING, liveness="exited")))  # died mid-task
         self.assertIsNone(s(dict(WORKING, terminalState="released")))
         self.assertIsNone(s(None))  # Orca no longer knows the dispatch
@@ -108,14 +110,59 @@ class TestOrcaRuntime(OrcaBase):
         self.fake({"orchestration worker-show --dispatch ctx_1": [OK(settled)],
                    "orchestration worker-show --dispatch ctx_2": [OK(WORKING)],
                    "orchestration worker-list": [OK(rows)],
+                   "orchestration worker-keep-open": [OK({})],
                    "orchestration send": [OK({"id": "msg_1"})]})
         self.assertEqual(self.rt.agent("pm-toy")["agent_status"], "working")
+        self.assertIn(["orchestration", "worker-keep-open", "--dispatch", "ctx_2", "--json"], self.calls())
         entry = runtime_orca.load_registry()["pm-toy"]
         self.assertEqual((entry["dispatch"], entry["origin"]), ("ctx_2", "ctx_1"))
         self.assertEqual(self.rt.agent("pm-toy")["agent_session"], {"value": "ctx_1"})  # the transcript's id
         self.rt.prompt("pm-toy", "go")
         argv = self.calls()[-1]
         self.assertEqual(argv[argv.index("--to") + 1], "dispatch:ctx_2")
+
+    def test_a_follow_up_in_a_new_terminal_is_found_by_the_dispatch_it_follows(self):
+        # seen live: Orca closed the PM's terminal, and OKe's mail reopened it in a new one
+        self.register("pm-toy", "ctx_1", "term_1")
+        settled = {"stage": "settled", "liveness": "exited", "terminalState": "released", "runId": "run_1"}
+        rows = {"workers": [
+            {"dispatchId": "ctx_3", "resource": {"terminalHandle": "term_3", "ownerDispatchId": "ctx_3"}},
+            {"dispatchId": "ctx_2", "resource": {"terminalHandle": "term_2", "ownerDispatchId": "ctx_2"}},
+            {"dispatchId": "ctx_1", "resource": {"terminalHandle": "term_1", "ownerDispatchId": "ctx_1",
+                                                 "releaseState": "released"}}]}
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(settled)],
+                   "orchestration worker-show --dispatch ctx_3 --full": [OK({"dispatch": {"followUpOf": "ctx_9"}})],
+                   "orchestration worker-show --dispatch ctx_2 --full": [OK({"dispatch": {"followUpOf": "ctx_1"},
+                                                                            "worker": {"agentTerminalHandle": "term_2"}})],
+                   "orchestration worker-show --dispatch ctx_2": [OK(WORKING)],
+                   "orchestration worker-list": [OK(rows)],
+                   "orchestration worker-keep-open": [OK({})]})
+        agent = self.rt.agent("pm-toy")
+        # the first handle stays its place (OKe's state records it); it runs in term_2
+        self.assertEqual((agent["agent_status"], agent["pane_id"], agent["terminal_id"]),
+                         ("working", "term_1", "term_2"))
+        entry = runtime_orca.load_registry()["pm-toy"]
+        self.assertEqual((entry["dispatch"], entry["handle"], entry["terminal"], entry["origin"]),
+                         ("ctx_2", "term_1", "term_2", "ctx_1"))
+        self.assertIn(["orchestration", "worker-keep-open", "--dispatch", "ctx_2", "--json"], self.calls())
+        self.assertEqual(self.rt.canonical("term_2"), "term_1")  # its mod ticks with term_2
+        self.assertEqual(self.rt.canonical("term_7"), "term_7")
+        self.assertEqual(self.rt.entry_of("term_1")[0], "pm-toy")  # close and cancel find it
+
+    def test_a_resting_worker_asks_each_newer_dispatch_once(self):
+        self.register("pm-toy", "ctx_1", "term_1")
+        settled = {"stage": "settled", "liveness": "exited", "terminalState": "released", "runId": "run_1"}
+        rows = {"workers": [
+            {"dispatchId": "ctx_3", "resource": {"terminalHandle": "term_3", "ownerDispatchId": "ctx_3"}},
+            {"dispatchId": "ctx_1", "resource": {"terminalHandle": "term_1", "ownerDispatchId": "ctx_1",
+                                                 "releaseState": "released"}}]}
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(settled)],
+                   "orchestration worker-show --dispatch ctx_3 --full": [OK({"dispatch": {"followUpOf": "ctx_9"}})],
+                   "orchestration worker-list": [OK(rows)]})
+        for _ in range(3):
+            self.assertEqual(self.rt.agent("pm-toy")["agent_status"], "idle")
+        asked = [c for c in self.calls() if c[:4] == ["orchestration", "worker-show", "--dispatch", "ctx_3"]]
+        self.assertEqual(len(asked), 1)
 
     def test_an_unknown_dispatch_is_gone(self):
         self.register()
@@ -155,6 +202,22 @@ class TestOrcaRuntime(OrcaBase):
         self.rt.close("structworker_1")
         self.assertEqual(runtime_orca.load_registry(), {})
         self.rt.close(self.repo)  # a folder: nothing started there
+
+    def test_close_stops_the_follow_up_that_runs_now(self):
+        self.register("fix-a-rv", "ctx_1", "term_1")
+        settled = {"stage": "settled", "liveness": "exited", "terminalState": "released", "runId": "run_1"}
+        rows = {"workers": [
+            {"dispatchId": "ctx_2", "resource": {"terminalHandle": "term_2", "ownerDispatchId": "ctx_2"}},
+            {"dispatchId": "ctx_1", "resource": {"terminalHandle": "term_1", "releaseState": "released"}}]}
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(settled)],
+                   "orchestration worker-show --dispatch ctx_2 --full": [OK({"dispatch": {"followUpOf": "ctx_1"}})],
+                   "orchestration worker-show --dispatch ctx_2": [OK(WORKING)],
+                   "orchestration worker-list": [OK(rows)],
+                   "orchestration worker-keep-open": [OK({})],
+                   "orchestration worker-stop": [OK({})]})
+        self.rt.close("term_1")
+        self.assertEqual(self.calls()[-1], ["orchestration", "worker-stop", "--dispatch", "ctx_2", "--json"])
+        self.assertEqual(runtime_orca.load_registry(), {})
 
     def test_worktree_is_an_orca_worktree_on_the_branch(self):
         self.fake({"worktree create": [OK({"worktree": {"id": "r::/w", "path": "/w"}})],
