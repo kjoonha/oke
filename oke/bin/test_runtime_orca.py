@@ -136,6 +136,15 @@ class TestOrcaRuntime(OrcaBase):
         self.rt.worktree_remove("r::/w")
         self.assertEqual(self.calls()[1][:4], ["worktree", "rm", "--worktree", "id:r::/w"])
 
+    def test_a_plain_folder_is_added_to_orca_as_a_folder(self):
+        plain = self.path("plain")
+        os.makedirs(plain)
+        self.fake({"repo add": [OK({}), OK({})]})
+        self.rt.place_for_repo(self.repo, "r")
+        self.rt.place_for_repo(plain, "p")
+        kinds = [argv[argv.index("--kind") + 1] for argv in self.calls()]
+        self.assertEqual(kinds, ["git", "folder"])
+
     def test_screen_is_the_transcript_end(self):
         self.register()
         msgs = [{"role": "assistant", "blocks": [{"type": "text", "text": "Allow edit?"}]}]

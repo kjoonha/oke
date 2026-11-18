@@ -2442,7 +2442,7 @@ def record_wiki_use(job_dir, key):
         jobs.add(m.group(1))
     if len(jobs) >= CURATE_EVERY:
         return ("curate: the wiki of %s took %d jobs since its last curation: give its PM `kind: curate`"
-                % (repo_name(key), len(jobs)))
+                % (os.path.dirname(key), len(jobs)))
     return None
 
 
