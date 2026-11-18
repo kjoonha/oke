@@ -76,7 +76,7 @@ For each child in `children.json` whose `job` is an open job, decide in this ord
 
 1. Its `report.md` has the `seq` of its `assignment.md` and type `done`, `question` or `failed`: the child finished that step. Do not start it again. Handle that report as in the table below (a finished reviewer stays finished).
 2. It is in `$OKE agents`: it keeps its work. Write that job's report as `waiting` (unless it already has the current seq and type `question`, `blocked` or `failed`: leave that one) and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If it is at a dialog the wait says `blocked`; handle it as in the table below.
-3. Otherwise: `$OKE revive <child>` (it restarts the child in its own session and tells it to re-read its assignment), then wait as in 2. Your own watcher may have revived it already; then `revive` says `alive`.
+3. Otherwise: `$OKE revive <child>` (it restarts the child in its own session and tells it to re-read its assignment), then wait as in 2. Only this restart of yours revives children; nothing revives them while you run.
 
 Then, for each open job whose assignment `seq` is higher than the `seq` of its `pm/report.md`: you had not acted on that instruction yet. Act on it now. And for each job whose report is `waiting` on another job that is no longer open (a merge that waited): start it now. For each job in phase `merging`, `$OKE ledger show <job>`: `merge: unverified` means its verification never finished; run step 3a of the merge again.
 
@@ -160,9 +160,11 @@ When a child's wait finishes, act on its first line:
 | worker `report question` | Answer from the plan, the code or the wiki if you can (autonomy `balanced` or `full`). If it is about what the user wants, or autonomy is `conservative`, report `question` for that job and wait for `kind: answer` |
 | `blocked` | Report `type: blocked` for that job: name the child agent and paste the screen text. Do not start that child's wait again yet. The orchestrator answers the dialog and gives you `kind: dialog` |
 | `report blocked` | Children do not use this type. Treat it as `report question` |
-| `idle_no_report`, `bad_report` | Once: `$OKE send <child> "Re-read your assignment and write a proper report."`, then wait again. Second time: report `failed` for that job |
-| `gone` | `oke wait` already revived the child three times without a new report. Report `failed` with the agent name |
+| `idle_no_report` | Once: `$OKE send <child> "continue"` (its turn stopped short: it picks up where it was), then wait again. Second time: report `failed` for that job |
+| `bad_report` | Once: `$OKE send <child> "Rewrite your report.md in the format your skill gives."`, then wait again. Second time: report `failed` for that job |
+| `gone` | The child died; OKe does not restart it by itself. Report `question` for that job: name the child and ask whether to revive it or give the job up. On `kind: answer` "revive": `$OKE revive <child> --reset`, then wait again |
 | `superseded` | A newer wait on that child replaced this one. Do nothing |
+| `cancelled` | The user gave that job up. Do nothing for it: no report, no new wait |
 | `{"deliver": {"to": ..., "text": ...}}` | The child runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again |
 | `deliver_failed` | Your message to the child could not be typed in three times. Report `failed` for that job and name the child |
 | exit code 1 or 2 | herdr failed or is unreachable. Report `failed` with the stderr text. Do not treat the child as gone |
@@ -198,7 +200,7 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
    A second run for the same job (after you were restarted) waits for the first one and then reports its result.
    Files the check left in the main checkout make the next `job merge` refuse a dirty checkout: delete untracked byproducts (caches); tracked files the check changed, and anything else, ask as in step 1.
 4. Exit 2: conflict; the merge is already aborted and the output lists the files. Never resolve conflicts yourself. Climb this ladder:
-   1. Give the worker a new instruction, with `commit: yes` in its header from now on: "Rebase `oke/<job>` onto `<base branch>`. Resolve the conflicts so that both changes keep their purpose. Run the 검증 명령 again, commit, and report." Write this job's report as `waiting` and wait. A dead worker is revived by the wait.
+   1. Give the worker a new instruction, with `commit: yes` in its header from now on: "Rebase `oke/<job>` onto `<base branch>`. Resolve the conflicts so that both changes keep their purpose. Run the 검증 명령 again, commit, and report." Write this job's report as `waiting` and wait. A dead worker makes the wait say `gone`: handle it as in the table.
    2. Worker `done`: give the reviewer a new instruction to review what the rebase changed, with `commit:` set to the rebased tip (`job merge` refuses until that review passes). `verdict: pass`: back to step 3. `changes`: as in the review rounds.
    3. Worker `question` or `failed`, or the merge conflicts again after the rebase: report `question` for the job with the conflicting files. The user decides.
 5. Update the wiki from the reports' 배운 것 and fix the pages they marked `wrong` (see **Wiki**). What holds beyond this repository goes into your done report's 배운 것 (공용) instead.
@@ -206,9 +208,9 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
 7. Close the worker and reviewer: `$OKE close <pane>` (the `pane` that `spawn` printed).
 8. Report `done` for the job. If a merge waited for this one, start it now.
 
-### kind: cancel
+### A cancelled job
 
-The user gave the job up. Ignore any later wait result for that job's children (a `gone` after you close them included): write no report for it. Do not start their waits again, close its worker and reviewer (`$OKE close <pane>`), and leave its worktree and branch as they are (say so on the board). A job without a worktree leaves uncommitted files in the main checkout that would block every later merge: report nothing for the cancelled job, but name those files in the next merge's `question` at step 1 ("left by the cancelled job <job>"). Write no report: the job is closed. If a merge waited for this job, start it now.
+The orchestrator cancels a job itself (`oke job cancel`: phase `failed`, its children closed, its queued mail dropped) and tells you "Job <job> was cancelled by the user"; an older one sends `kind: cancel`. Either way the user gave the job up. Ignore any later wait result for that job's children (a `gone` after you close them included): write no report for it. Do not start their waits again, close its worker and reviewer (`$OKE close <pane>`), and leave its worktree and branch as they are (say so on the board). A job without a worktree leaves uncommitted files in the main checkout that would block every later merge: report nothing for the cancelled job, but name those files in the next merge's `question` at step 1 ("left by the cancelled job <job>"). Write no report: the job is closed. If a merge waited for this job, start it now.
 
 ### kind: research
 

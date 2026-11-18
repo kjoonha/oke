@@ -30,38 +30,6 @@ class TestHerdrTimeout(SpawnBase):
 
 
 class TestOutageDuringRevive(ReviveBase):
-    def test_the_wait_survives_a_passing_outage_inside_revive(self):
-        calls = []
-        real = oke.revive
-
-        def flaky(name):
-            calls.append(name)
-            if len(calls) == 1:
-                raise oke.HerdrError("herdr_unavailable", "down for a moment")
-            return "revived"
-        oke.revive = flaky
-        try:
-            self.fake({"agent get": [E("agent_not_found"), E("agent_not_found"), AGENT("working")]})
-            report = os.path.join(self.child_dir, "report.md")
-            self.assertIsNone(oke.wait_loop("fix-a-w1", report, 2, poll=0, max_polls=4))
-            self.assertEqual(len(calls), 2)
-        finally:
-            oke.revive = real
-
-    def test_a_revive_that_always_meets_an_outage_ends_the_wait(self):
-        real = oke.revive
-
-        def down(name):
-            raise oke.HerdrError("herdr_unavailable", "agent start hangs")
-        oke.revive = down
-        try:
-            self.fake({"agent get": [E("agent_not_found")]})
-            report = os.path.join(self.child_dir, "report.md")
-            with self.assertRaises(oke.HerdrError):
-                oke.wait_loop("fix-a-w1", report, 2, poll=0, max_polls=oke.HERDR_RETRIES + 5)
-        finally:
-            oke.revive = real
-
     def test_an_outage_does_not_count_as_a_crash(self):
         real = oke.relaunch
 

@@ -176,6 +176,59 @@ class TestWiki(SpawnBase):
         self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
         self.assertNotIn("curate", self.out)
 
+    def test_cancel_closes_the_job_and_drops_only_its_mail(self):
+        key = oke.repo_key(self.repo)
+        oke.write_json_atomic(oke.children_path(key), {"fix-a-w1": {"job": "fix-a", "role": "worker"}})
+        pm = "pm-" + oke.repo_name(key)
+        state = oke.load_state()
+        state["repos"][key] = {"pm": {"agent": pm, "pane": "w1:p9"}}
+        oke.save_state(state)
+        self.fake({})
+        self.assertEqual(self.cli("send", pm, "Job fix-a: assignment updated (seq 2)"), 0, self.err)
+        self.assertEqual(self.cli("send", pm, "Job fix-b: go on"), 0, self.err)
+        self.write(os.path.join(oke.inbox_dir("fix-a-w1"), "1.txt"), "Assignment updated")
+        self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
+        self.assertEqual(json.loads(self.out.strip().splitlines()[-1])["dropped_messages"], 2)
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["phase"], "failed")
+        texts = [t.split(": ", 1)[1] for _, t in oke.inbox_messages(pm)]
+        self.assertEqual(texts[0], "Job fix-b: go on")  # the PM still hears of the cancel itself
+        self.assertTrue(texts[1].startswith("Job fix-a was cancelled"))
+        self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
+
+    def test_cancel_closes_only_panes_still_the_childs_and_never_a_done_job(self):
+        key = oke.repo_key(self.repo)
+        oke.write_json_atomic(oke.children_path(key), {
+            "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p1", "terminal": "t1"},
+            "fix-a-rv": {"job": "fix-a", "role": "reviewer", "pane": "w1:p2", "terminal": "t2"}})
+        closed = []
+
+        class Stub(object):
+            def place_id(self, pane):
+                return {"w1:p1": "t1", "w1:p2": "someone-else"}[pane]  # p2 was reused
+
+            def close(self, pane):
+                closed.append(pane)
+        real = oke.runtime
+        oke.runtime = lambda *a: Stub()
+        try:
+            self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
+        finally:
+            oke.runtime = real
+        self.assertEqual(closed, ["w1:p1"])
+        self.assertIsNone(oke.read_children(key)["fix-a-rv"]["pane"])
+        state = oke.load_state()
+        state["jobs"]["fix-a"]["phase"] = "done"
+        oke.save_state(state)
+        self.assertEqual(self.cli("job", "cancel", "fix-a"), 1)
+        state["jobs"]["fix-a"]["phase"] = "merging"  # a merge that never reached main can be given up
+        oke.save_state(state)
+        self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
+        state["jobs"]["fix-a"]["phase"] = "merging"
+        oke.save_state(state)
+        oke.ledger_add("fix-a", "oke", "abc", "merge", "ok")
+        self.assertEqual(self.cli("job", "cancel", "fix-a"), 1)  # merged, not verified yet
+        self.assertIn("in main", self.err)
+
     def test_report_entries(self):
         text = "## 요약\n- a.md: ok\n## wiki\n- `b.md`: ok\n* c.md: wrong - stale flag\n- d.md: unused\n## 배운 것\n- e.md: ok\n"
         self.assertEqual(wiki.report_entries(text),

@@ -198,14 +198,12 @@ class TestRevive(ReviveBase):
         self.revive_scenario(**{"agent list": [J({"agents": [AG(None, pane="w1:p5", session=None)]})]})
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
 
-    def test_gives_up_after_three_deaths(self):
+    def test_an_asked_revive_has_no_limit(self):
         children = oke.read_children(self.key)
         children["fix-a-w1"].update(revives=3, report_mtime=None)
         oke.write_json_atomic(oke.children_path(self.key), children)
         self.revive_scenario()
-        self.assertEqual(oke.revive("fix-a-w1"), "gave_up")
-        self.assertEqual(started(self.calls()), [])
-        self.assertIn("gave_up fix-a-w1", self.events())
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")
 
     def test_new_report_resets_the_death_count(self):
         self.write_file(os.path.join(self.child_dir, "report.md"), "type: waiting\nseq: 2\n---\n")
@@ -324,24 +322,46 @@ class TestWaitRevives(ReviveBase):
             return results.pop(0) if len(results) > 1 else results[0]
         oke.revive = fake_revive
 
-    def test_gone_child_is_revived_and_the_wait_goes_on(self):
+    def test_a_gone_child_ends_the_wait_without_a_revive(self):
+        # the parent decides; OKe revives nobody by itself
         report = os.path.join(self.child_dir, "report.md")
         self.stub("revived")
-        self.fake({"agent get": [E("agent_not_found"), AGENT("working")]})
-        self.assertIsNone(oke.wait_loop("fix-a-w1", report, 2, poll=0, max_polls=4))
-        self.assertEqual(self.revived, ["fix-a-w1"])
+        self.fake({"agent get": [E("agent_not_found")]})
+        self.assertEqual(oke.wait_loop("fix-a-w1", report, 2, poll=0, max_polls=4), "gone")
+        self.assertEqual(self.revived, [])
 
-    def test_busy_keeps_waiting(self):
-        self.stub("busy")
+    def test_a_lost_name_with_a_live_session_is_not_gone(self):
+        self.fake({"agent get": [E("agent_not_found")],
+                   "agent list": [J({"agents": [AG("other-name", status="working", pane="w1:p5", session="s-w")]})]})
+        self.assertIsNone(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
+                                        poll=0, max_polls=5))
+
+    def test_a_cancelled_job_ends_its_childs_wait(self):
+        state = oke.load_state()
+        state["jobs"]["fix-a"]["cancelled"] = True
+        oke.save_state(state)
+        self.fake({})
+        self.assertEqual(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
+                                       poll=0, max_polls=2), "cancelled")
+
+    def test_a_refused_delivery_ends_in_deliver_failed(self):
+        oke.queue_mail("fix-a-w1", "user", "hi")
+        self.fake({"agent get": [AGENT("idle")], "agent prompt": [E("agent_not_found")]})
+        self.assertEqual(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
+                                       poll=0, max_polls=30), "deliver_failed")
+
+    def test_an_archived_job_ends_its_childs_wait_with_a_slash_path(self):
+        state = oke.load_state()
+        del state["jobs"]["fix-a"]
+        oke.save_state(state)
+        self.fake({})
+        report = os.path.join(self.child_dir, "report.md").replace("\\", "/")  # as `job new` prints it
+        self.assertEqual(oke.wait_loop("fix-a-w1", report, 2, poll=0, max_polls=2), "cancelled")
+
+    def test_one_failed_look_is_not_a_death(self):
         self.fake({"agent get": [E("agent_not_found"), AGENT("working")]})
         self.assertIsNone(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
                                         poll=0, max_polls=4))
-
-    def test_gave_up_is_gone(self):
-        self.stub("gave_up")
-        self.fake({"agent get": [E("agent_not_found")]})
-        self.assertEqual(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
-                                       poll=0, max_polls=4), "gone")
 
     def test_pending_api_retry_is_not_idle_no_report(self):
         self.write_file(os.path.join(self.child_dir, "api-retry.json"), '{"attempt": 1}')
@@ -372,18 +392,13 @@ class TestTick(ReviveBase):
         self.assertEqual(self.revived, [])
         self.assertEqual(self.calls(), [])
 
-    def test_orchestrator_revives_a_dead_pm(self):
+    def test_the_watchers_revive_nobody(self):
         out = self.tick("w7:p1", [AG(None, pane="w7:p1", session="s-o")])
         self.assertEqual(out["role"], "orchestrator")
-        self.assertEqual(self.revived, ["pm-toy"])
-        self.assertEqual(out["revived"], {"pm-toy": "revived"})
-
-    def test_pm_revives_the_orchestrator_and_its_children(self):
         out = self.tick("w1:p3", [AG("pm-toy", pane="w1:p3", session="s-pm")])
         self.assertEqual(out["role"], "pm")
-        # one per tick: the next tick sees the orchestrator back and takes the child
-        self.tick("w1:p3", [AG("pm-toy", pane="w1:p3", session="s-pm"), AG(None, pane="w7:p1", session="s-o")])
-        self.assertEqual(self.revived, ["orchestrator", "fix-a-w1"])
+        self.assertEqual(self.revived, [])
+        self.assertEqual(out["revived"], {})
 
     def test_pm_skips_a_child_with_its_final_report(self):
         self.write_file(os.path.join(self.child_dir, "report.md"), "type: done\nseq: 2\n---\n")
@@ -400,13 +415,6 @@ class TestTick(ReviveBase):
     def test_a_pane_whose_session_herdr_does_not_know_is_not_the_orchestrator(self):
         out = self.tick("w7:p1", [AG(None, pane="w7:p1", session=None)])
         self.assertIsNone(out["role"])
-
-    def test_one_revive_per_tick(self):
-        # a long revive must finish inside the mod's process timeout
-        self.write_file(os.path.join(self.child_dir, "report.md"), "type: waiting\nseq: 2\n---\n")
-        out = self.tick("w1:p3", [AG("pm-toy", pane="w1:p3", session="s-pm")])
-        self.assertEqual(len(self.revived), 1)
-        self.assertEqual(len(out["revived"]), 1)
 
     def test_all_alive_writes_nothing(self):
         before = (io.open(oke.state_path(), encoding="utf-8").read(),

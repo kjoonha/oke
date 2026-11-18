@@ -66,6 +66,15 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(seen, [1])
         self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["dispatch"], "ctx_1")
 
+    def test_the_tab_says_who_is_there(self):
+        self.fake({"orchestration worker-start": [OK(STARTED)], "terminal rename": [OK({})]})
+        self.rt.start("pm-toy-6b0484", self.repo, [], "go", lambda: False)
+        self.assertEqual(self.calls()[1], ["terminal", "rename", "--terminal", "structworker_1",
+                                           "--title", "OKe PM: toy", "--json"])
+        t = runtime_orca.title_of
+        self.assertEqual((t("fix-a-w1"), t("fix-a-rv"), t("odd")),
+                         ("OKe worker 1: fix-a", "OKe reviewer: fix-a", "OKe: odd"))
+
     def test_a_revive_gets_the_dead_sessions_transcript(self):
         projects = os.path.join(self.path("claude"), "projects", "x")
         os.makedirs(projects)

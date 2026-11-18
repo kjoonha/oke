@@ -794,6 +794,12 @@ HERDR_RETRIES = 30  # consecutive herdr_unavailable polls (about a minute) befor
 def check_once(agent, report, seq):
     """One look at a child. Returns a result line, None to keep waiting, or a
     '?'-prefixed provisional verdict that only counts once the agent stays idle."""
+    job_dir = os.path.dirname(os.path.dirname(report))
+    job = load_state()["jobs"].get(os.path.basename(job_dir), {})
+    archived = not job and (normalize_path(os.path.dirname(job_dir))
+                            == normalize_path(os.path.join(oke_home(), "jobs")))
+    if archived or job.get("cancelled"):
+        return "cancelled"  # the user gave the job up: nothing about its children matters
     header = read_header(report)
     current = header is not None and header.get("seq") == seq
     if current and header.get("type") in FINAL_TYPES:
@@ -829,9 +835,19 @@ def look_at(agent, folder):
     try:
         info = runtime().agent(agent)
     except HerdrError as e:
-        if e.code in ("agent_not_found", "pane_not_found"):
+        if e.code not in ("agent_not_found", "pane_not_found"):
+            raise
+        try:
+            found = find_target(load_state(), agent)
+            info = live_agent(found[3], list_agents()) if found else None
+        except HerdrError:
+            info = None  # the name lookup already said gone; the confirmations decide
+        if not info:
             return "gone"
-        raise
+        # the runtime lost its name but its session still runs: judge that agent
+        lost = True
+    else:
+        lost = False
     remember_session(agent, info)
     status = info.get("agent_status")
     if status == "blocked":
@@ -839,7 +855,7 @@ def look_at(agent, folder):
             return "blocked\n" + runtime().screen(agent)
         except HerdrError as e:
             if e.code in ("agent_not_found", "pane_not_found"):
-                return "gone"
+                return "blocked\n(screen unreadable: open its pane)" if lost else "gone"
             raise
     if status not in ("idle", "done"):
         return None
@@ -920,15 +936,6 @@ def check_pm_once(agent, key):
             save_state(current)
         return "report %s %s" % (header["type"], name)
     look = look_at(agent, pm_dir(key))
-    if look == "gone" and not open_jobs(state, key):
-        # Mail for a dead PM without open jobs (a cancel): nobody revives it, and the
-        # next PM of this repository must not get it.
-        done = os.path.join(inbox_dir(agent), "read")
-        if not os.path.isdir(done):
-            os.makedirs(done, exist_ok=True)
-        for path, _ in inbox_messages(agent):
-            replace_file(path, os.path.join(done, os.path.basename(path)))
-        return "no_jobs"
     if look != "idle":
         return look
     for name, seq, header, _ in jobs:
@@ -985,10 +992,9 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
     """No time limit: a five hour simulation is a normal wait. A herdr state read
     right after input can be stale and a report can be mid-write, so an idle
     verdict needs IDLE_CONFIRMATIONS consecutive polls."""
-    idle = 0
+    idle = gone = 0
     polls = 0
     outage = 0
-    revive_outage = 0  # not reset by a good look: a revive that always meets an outage must end
     # after_blocked: a key was just sent to a dialog the caller already reported. Do not
     # report that dialog again while herdr still shows the old state. Only a short grace:
     # the agent may already be at its next dialog when this wait starts.
@@ -1023,20 +1029,20 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                 result = None
         else:
             armed = True
-        if result == "gone":
-            try:
-                if revive(agent) in ("revived", "alive", "busy", "failed"):
-                    result = None  # failed counts toward the revive limit and is tried again
-            except (OSError, StateError):
-                result = None  # state.json busy for a moment: look again next poll
-            except HerdrError as e:
-                # an outage during a revive is the same passing outage as during a look
-                revive_outage += 1
-                if e.code != "herdr_unavailable" or revive_outage > HERDR_RETRIES:
-                    raise
-                result = None
-            else:
-                revive_outage = 0
+        gone = gone + 1 if result == "gone" else 0
+        if result == "gone" and gone < GONE_CONFIRMATIONS:
+            result = None
+        if result == "gone" and jobs_key is not None and not open_jobs(load_state(), jobs_key):
+            # A dead PM without open jobs: nobody revives it, and the next PM of this
+            # repository must not get its mail (a cancel notice).
+            done = os.path.join(inbox_dir(agent), "read")
+            os.makedirs(done, exist_ok=True)
+            for path, _ in inbox_messages(agent):
+                try:
+                    os.replace(path, os.path.join(done, os.path.basename(path)))
+                except OSError:
+                    pass
+            return "no_jobs"
         if result is None:
             idle = 0
         elif result.startswith("?"):
@@ -1054,8 +1060,12 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                         failed_deliveries += 1
                     else:
                         failed_deliveries = 0
-                except (HerdrError, OSError):
+                except HerdrError as e:
                     sent = None  # a passing outage: the next check_once counts it
+                    if e.code != "herdr_unavailable":
+                        failed_deliveries += 1  # refused (a lost name): never loop on it
+                except OSError:
+                    sent = None
                 if isinstance(sent, str):
                     # the caller sends it (SendMessage) and starts this wait again
                     return json.dumps({"deliver": {"to": agent, "text": sent}}, ensure_ascii=False)
@@ -1092,7 +1102,7 @@ def cmd_wait(args):
 # ---------------------------------------------------------------- revive
 
 DONE_PHASES = ("done", "failed")
-REVIVE_LIMIT = 3  # consecutive deaths with no new report in between
+GONE_CONFIRMATIONS = 3  # one failed look (a CLI hiccup) is not a death
 ORCH_NAME = "oke-orch"
 REVIVE_PROMPT = ("You were restarted after a crash. Use the oke:{role} skill. Re-read your "
                  "assignment file {path} and your board.md, then continue.")
@@ -1293,7 +1303,8 @@ def relaunch(state, role, key, name, record, folder):
 
 def revive(name):
     """Bring a dead OKe agent back in its own session. Returns revived, alive, busy
-    (another process is reviving it), not_needed, gave_up, failed or unknown."""
+    (another process is reviving it), not_needed, failed or unknown. Only an explicit
+    request revives: nothing in OKe restarts a dead agent by itself."""
     state = load_state()
     found = find_target(state, name)
     if found is None:
@@ -1325,12 +1336,7 @@ def revive_locked(name):
         mtime = report_mtime(folder) if folder else None
     revives = record.get("revives", 0)
     if folder and mtime != record.get("report_mtime"):
-        revives = 0  # it reported since the last revive: not a crash loop
-    if revives >= REVIVE_LIMIT:
-        if not record.get("gave_up"):
-            log_event("gave_up %s after %d restarts" % (name, revives))
-            update_record(role, key, name, {"gave_up": True})
-        return "gave_up"
+        revives = 0  # it reported since the last revive (the board shows the count)
     if folder:
         try:
             os.remove(os.path.join(folder, "api-retry.json"))  # the dead process's retry
@@ -1359,7 +1365,7 @@ def revive_locked(name):
 
 
 def cmd_revive(args):
-    if args.reset:  # the user chose to resume after OKe gave up
+    if args.reset:  # a fresh start of the restart count the board shows
         found = find_target(load_state(), args.agent)
         if found:
             update_record(found[0], found[2], found[1], {"revives": 0, "gave_up": False})
@@ -1368,8 +1374,8 @@ def cmd_revive(args):
 
 
 def cmd_resume_all(args):
-    """After a reboot: the orchestrator brings back each PM with work left; the PMs'
-    own watchers bring back their children."""
+    """After a reboot: the orchestrator brings back each PM with work left; each PM
+    restarts its own children when it comes back."""
     state = load_state()
     result = dict((name, revive(name)) for role, name, key, rec in records(state) if role == "pm")
     print(json.dumps(result, ensure_ascii=False))
@@ -1510,14 +1516,11 @@ def cmd_tick(args):
                        or (r[2] == key and r[0] in ("worker", "reviewer"))]
         else:
             targets = []
+        # A dead agent is not revived here: the user decides (`oke revive`), as in OMC.
         for t_role, t_name, t_key, t_rec in targets:
             a = live_agent(t_rec, agents)
-            if a:
-                if not t_rec.get("session") and session_of(a):  # spawn could not see it yet
-                    update_record(t_role, t_key, t_name, {"session": session_of(a)})
-            elif not out["revived"] and should_be_alive(state, t_role, t_key, t_name, t_rec):
-                # one per tick: a revive can take two minutes and the mod's call has a timeout
-                out["revived"][t_name] = revive(t_name)
+            if a and not t_rec.get("session") and session_of(a):  # spawn could not see it yet
+                update_record(t_role, t_key, t_name, {"session": session_of(a)})
         if args.board and role in ("orchestrator", "pm"):
             out["board"] = board_tree(state, agents, key if role == "pm" else None)
     print(json.dumps(out, ensure_ascii=False))
@@ -1813,6 +1816,12 @@ def cmd_job(args):
             return fail("git could not read the main checkout of %s" % args.slug)
         print(json.dumps({"job": args.slug, "tree": tree}))
         return 0
+    if args.action == "cancel":
+        with locked():
+            code = job_locked(args)
+        if code:
+            return code
+        return cancel_children(args.slug, load_state()["jobs"][args.slug].get("repo"))
     if args.action == "verify":
         if bool(args.command) == bool(args.accept):
             return fail("give the 검증 명령, or --accept \"<why>\" when the user accepts the merge as it is")
@@ -1921,6 +1930,8 @@ def merge_job(job):
     if not current or (base and current != base):
         return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
                     % (current or "a detached HEAD", base))
+    if left_merging(job):
+        return 1
     pre = git_out(main, "rev-parse", "HEAD")[1]
     result = subprocess.run(["git", "-C", main, "merge", "--no-ff", "--no-edit",
                              "-m", "Merge branch 'oke/%s'" % job, tip],
@@ -1975,6 +1986,15 @@ def pending_tree(main):
             pass
 
 
+def left_merging(job):
+    """A cancel since merge_job's first checks: merge nothing."""
+    with locked():
+        if load_state()["jobs"].get(job, {}).get("phase") == "merging":
+            return False
+    fail("job %s left phase merging (cancelled?): not merged" % job)
+    return True
+
+
 def commit_direct(job, info, main, review, reviewed):
     """A job without a worktree: commit its reviewed, uncommitted changes in the main
     checkout and record that commit as the job's merge, so it is verified like one.
@@ -1993,6 +2013,8 @@ def commit_direct(job, info, main, review, reviewed):
     if tree != reviewed:
         return fail("the changes in %s are not the ones the review covered (tree %s, reviewed %s): give "
                     "the reviewer a new instruction with `tree: %s`, then merge" % (main, tree, reviewed, tree))
+    if left_merging(job):
+        return 1
     pre = git_out(main, "rev-parse", "HEAD")[1]
     for argv in (ADD, ["commit", "-q", "-m", "oke: %s" % job]):
         result = subprocess.run(["git", "-C", main] + argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -2385,8 +2407,25 @@ def job_locked(args):
         state["jobs"][args.slug]["deferred"] = item["key"]
         save_state(state)
         return 0
+    if args.action == "cancel":
+        info = state["jobs"][args.slug]
+        merged = merge_state(args.slug)[0]
+        if info.get("phase") == "done" or merged in ("unverified", "verified"):
+            return fail("job %s is %s: its merge is in main or under way. Let it finish (verify, or "
+                        "roll it back), not cancel" % (args.slug, info.get("phase") if merged == "none" else
+                                                       "merged (%s)" % merged))
+        pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}
+        if pm.get("agent"):
+            # queued before the phase changes: the PM's wait delivers it before it can say no_jobs
+            queue_mail(pm["agent"], "oke", "Job %s was cancelled by the user. Forget it, close what is "
+                       "left of it, and write no report for it." % args.slug)
+        info.update(phase="failed", phase_at=time.time(), cancelled=True)
+        save_state(state)  # nothing may start for this job from here on
+        return 0
     if args.action == "archive":
         src = os.path.join(home, "jobs", args.slug)
+        if state["jobs"][args.slug].get("repo"):
+            drop_job_mail(args.slug, state["jobs"][args.slug]["repo"])
         dst = os.path.join(home, "archive", "%s-%s" % (args.slug, time.strftime("%Y%m%d-%H%M%S")))
         key = state["jobs"][args.slug].get("repo")
         hint = record_wiki_use(src, key) if key and os.path.isdir(src) else None
@@ -2404,6 +2443,59 @@ def job_locked(args):
 
 
 CURATE_EVERY = 10  # jobs logged in a wiki since its last curation
+
+
+def cancel_children(job, key):
+    """After `job cancel` closed the job: close its children's panes and drop its mail,
+    outside the state lock (runtime calls and the delivery lock can be slow)."""
+    closed, left = [], []
+    for name, rec in sorted(read_children(key).items() if key else []):
+        if rec.get("job") != job or not rec.get("pane"):
+            continue
+        try:
+            # a pane id comes back after a herdr restart: close it only while it is still this child's
+            if rec.get("terminal") and runtime().place_id(rec["pane"]) == rec["terminal"]:
+                runtime().close(rec["pane"])
+                closed.append(name)
+        except HerdrError as e:
+            if e.code == "herdr_unavailable":
+                left.append(name)  # keep its record: `job cancel` again closes it later
+                continue
+        except OSError:
+            pass  # already gone
+        update_record(rec.get("role") or "worker", key, name, {"pane": None, "terminal": None})
+    print(json.dumps({"job": job, "closed": closed, "not_closed": left,
+                      "dropped_messages": drop_job_mail(job, key) if key else 0}))
+    return 0
+
+
+def drop_job_mail(job, key):
+    """Move the queued messages about `job` out of its PM's and children's inboxes, so a
+    later agent never acts on a closed job (OMC deletes a finished team's mailboxes)."""
+    names = ["pm-" + repo_name(key)] + [n for n, r in read_children(key).items() if r.get("job") == job]
+    mark = "Job %s:" % job
+    dropped = 0
+    for agent in names:
+        lock = "deliver-" + agent
+        for _ in range(50):
+            if try_lock(lock):
+                break
+            time.sleep(0.1)
+        else:
+            continue  # a delivery holds it: what it delivers is gone from the inbox anyway
+        try:
+            for path, text in inbox_messages(agent):
+                if text.split(": ", 1)[-1].startswith(mark) or agent != names[0]:
+                    done = os.path.join(inbox_dir(agent), "read")
+                    os.makedirs(done, exist_ok=True)
+                    try:
+                        os.replace(path, os.path.join(done, os.path.basename(path)))
+                        dropped += 1
+                    except OSError:
+                        pass  # delivered a moment ago
+        finally:
+            unlock(lock)
+    return dropped
 
 
 def shared_wiki():
@@ -2554,6 +2646,17 @@ def inbox_messages(agent):
     return out
 
 
+def queue_mail(agent, sender, text):
+    d = inbox_dir(agent)
+    if not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    _sent[0] += 1
+    path = os.path.join(d, "%.6f-%d-%d.txt" % (time.time(), os.getpid(), _sent[0]))
+    with io.open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
+        f.write(u"%s: %s\n" % (sender, text))
+    os.replace(path + ".tmp", path)
+
+
 def cmd_send(args):
     text = " ".join(" ".join(args.text).split())
     if not text:
@@ -2595,14 +2698,7 @@ def cmd_send(args):
                 current["jobs"][args.job].pop("warned", None)  # a nudge keeps the count
             current["jobs"][args.job]["sent_seq"] = seq
             save_state(current)
-    d = inbox_dir(found[1])
-    if not os.path.isdir(d):
-        os.makedirs(d, exist_ok=True)
-    _sent[0] += 1
-    path = os.path.join(d, "%.6f-%d-%d.txt" % (time.time(), os.getpid(), _sent[0]))
-    with io.open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
-        f.write(u"%s: %s\n" % (sender, text))
-    os.replace(path + ".tmp", path)
+    queue_mail(found[1], sender, text)
     print(json.dumps({"agent": found[1], "queued": True}))
     return 0
 
@@ -2712,6 +2808,7 @@ def build_parser():
     phase = job_sub.add_parser("phase")
     phase.add_argument("slug")
     phase.add_argument("phase")
+    job_sub.add_parser("cancel", help="the user gave the job up: close it, its children and its mail").add_argument("slug")
     archive = job_sub.add_parser("archive")
     archive.add_argument("slug")
     defer = job_sub.add_parser("defer")
