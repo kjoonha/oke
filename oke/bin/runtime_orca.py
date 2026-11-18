@@ -150,6 +150,17 @@ def transcript_of(dispatch, cwd):
     return None
 
 
+def title_of(name):
+    """The tab title a person reads: `OKe PM: <repo>`, `OKe worker: <job>`."""
+    m = re.match(r"^pm-(.+)-[0-9a-f]{6}$", name)
+    if m:
+        return "OKe PM: " + m.group(1)
+    m = re.match(r"^(.+)-(w\d+|rv\d*)$", name)
+    if m:
+        return "OKe %s: %s" % ("reviewer" if m.group(2).startswith("rv") else "worker " + m.group(2)[1:], m.group(1))
+    return "OKe: " + name
+
+
 class OrcaRuntime(object):
     name = "orca"
     Error = HerdrError
@@ -226,6 +237,10 @@ class OrcaRuntime(object):
             args += ["--model", argv[argv.index("--model") + 1]]
         result = run_orca(args)
         entry = {"dispatch": result["dispatchId"], "handle": result["terminal"], "cwd": place}
+        try:  # Orca titles every tab worker-task_<id>: say who it is (seen live)
+            run_orca(["terminal", "rename", "--terminal", entry["handle"], "--title", title_of(name)])
+        except HerdrError:
+            pass  # only the tab's name
         update_registry(lambda r: r.__setitem__(name, entry))
         registered()
         return self.as_agent(name, entry, {"activity": "working", "liveness": "live"})
