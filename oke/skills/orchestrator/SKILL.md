@@ -203,7 +203,7 @@ Run the queue after every wait result except `superseded`, after the start proce
 
 A job is the unit of cancelling. When the user gives a job up, cancel it yourself; never send it through the PM, which may be dead:
 
-1. `$OKE job cancel <job>`. It closes the job first (phase `failed`, so nothing starts for it again), then closes its worker and reviewer, and drops the messages about it still queued for the PM and its children.
+1. `$OKE job cancel <job>`. It closes the job first (phase `failed`, so nothing starts for it again), then closes its worker and reviewer, and drops the messages about it still queued for the PM and its children. It refuses a job whose merge is under way or already in main: tell the user, and let the PM finish it (verify, or roll back when the user says so).
 2. If the PM runs (`$OKE status`, `repos[<repo>].pm` is `alive`): `$OKE send <pm agent> "Job <job> was cancelled by the user. Forget it and write no report for it."` (no `--job`: it owes no report). A dead PM is not started for this.
 3. `$OKE job archive <job>`. Its worktree and branch stay; tell the user where.
 

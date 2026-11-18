@@ -179,14 +179,18 @@ class TestWiki(SpawnBase):
     def test_cancel_closes_the_job_and_drops_only_its_mail(self):
         key = oke.repo_key(self.repo)
         oke.write_json_atomic(oke.children_path(key), {"fix-a-w1": {"job": "fix-a", "role": "worker"}})
-        pm = os.path.join(oke.inbox_dir("pm-" + oke.repo_name(key)))
-        self.write(os.path.join(pm, "1.txt"), "Job fix-a: cancel it")
-        self.write(os.path.join(pm, "2.txt"), "Job fix-b: go on")
+        pm = "pm-" + oke.repo_name(key)
+        state = oke.load_state()
+        state["repos"][key] = {"pm": {"agent": pm, "pane": "w1:p9"}}
+        oke.save_state(state)
+        self.fake({})
+        self.assertEqual(self.cli("send", pm, "Job fix-a: assignment updated (seq 2)"), 0, self.err)
+        self.assertEqual(self.cli("send", pm, "Job fix-b: go on"), 0, self.err)
         self.write(os.path.join(oke.inbox_dir("fix-a-w1"), "1.txt"), "Assignment updated")
         self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
-        self.assertEqual(json.loads(self.out)["dropped_messages"], 2)
+        self.assertEqual(json.loads(self.out.strip().splitlines()[-1])["dropped_messages"], 2)
         self.assertEqual(oke.load_state()["jobs"]["fix-a"]["phase"], "failed")
-        self.assertEqual([t for _, t in oke.inbox_messages("pm-" + oke.repo_name(key))], ["Job fix-b: go on"])
+        self.assertEqual([t.split(": ", 1)[1] for _, t in oke.inbox_messages(pm)], ["Job fix-b: go on"])
         self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
 
     def test_cancel_closes_only_panes_still_the_childs_and_never_a_done_job(self):
@@ -210,10 +214,16 @@ class TestWiki(SpawnBase):
             oke.runtime = real
         self.assertEqual(closed, ["w1:p1"])
         self.assertIsNone(oke.read_children(key)["fix-a-rv"]["pane"])
-        state = oke.load_state()
-        state["jobs"]["fix-a"]["phase"] = "done"
+        for phase in ("done", "merging"):
+            state = oke.load_state()
+            state["jobs"]["fix-a"]["phase"] = phase
+            oke.save_state(state)
+            self.assertEqual(self.cli("job", "cancel", "fix-a"), 1)
+        state["jobs"]["fix-a"]["phase"] = "working"
         oke.save_state(state)
-        self.assertEqual(self.cli("job", "cancel", "fix-a"), 1)
+        oke.ledger_add("fix-a", "oke", "abc", "merge", "ok")
+        self.assertEqual(self.cli("job", "cancel", "fix-a"), 1)  # merged, not verified yet
+        self.assertIn("in main", self.err)
 
     def test_report_entries(self):
         text = "## 요약\n- a.md: ok\n## wiki\n- `b.md`: ok\n* c.md: wrong - stale flag\n- d.md: unused\n## 배운 것\n- e.md: ok\n"
