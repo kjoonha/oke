@@ -190,7 +190,9 @@ class TestWiki(SpawnBase):
         self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
         self.assertEqual(json.loads(self.out.strip().splitlines()[-1])["dropped_messages"], 2)
         self.assertEqual(oke.load_state()["jobs"]["fix-a"]["phase"], "failed")
-        self.assertEqual([t.split(": ", 1)[1] for _, t in oke.inbox_messages(pm)], ["Job fix-b: go on"])
+        texts = [t.split(": ", 1)[1] for _, t in oke.inbox_messages(pm)]
+        self.assertEqual(texts[0], "Job fix-b: go on")  # the PM still hears of the cancel itself
+        self.assertTrue(texts[1].startswith("Job fix-a was cancelled"))
         self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
 
     def test_cancel_closes_only_panes_still_the_childs_and_never_a_done_job(self):

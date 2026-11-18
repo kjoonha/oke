@@ -41,7 +41,7 @@ Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`.
 6. `state_recovered` true: tell the user state.json was unreadable and saved as `state.json.bad`.
 7. For each job with class `disconnected`, and each entry of `orphan_job_dirs`, ask: resume / archive / leave. Ask once per PM, not once per job: the jobs of one repository share their PM.
    - resume: `$OKE revive <pm agent> --reset`. It restarts the PM in its own session and tells it to re-read its assignments. `revived` or `alive`: go on. `unknown` (never spawned): spawn it as in "Give the job to the PM". `failed`: show the last line of `$OKE_HOME/events.log` to the user.
-   - archive: `$OKE job cancel <job>`, then `$OKE job archive <job>`. Never delete a worktree or branch. Report the worktree path and `git -C <worktree> status --short | wc -l`.
+   - archive: `$OKE job cancel <job>`, then `$OKE job archive <job>`; an `orphan_job_dirs` entry has no job to cancel: only `job archive`. If `job cancel` refuses (its merge is under way or in main), tell the user why and leave that job. Never delete a worktree or branch. Report the worktree path and `git -C <worktree> status --short | wc -l`.
 8. For each PM (`status.repos`) that has a job with class `alive`, start its wait (see "Wait").
 9. Run the queue (see "Queue"). Jobs with class `awaiting_user` come back there.
 10. Started by `/oke:resume` (everything was down, for example after a reboot): do not ask at step 7. Run `$OKE resume-all` instead; it revives every PM that has an unfinished job, and each PM restarts its own children when it comes back. Then steps 8 and 9.
@@ -204,7 +204,7 @@ Run the queue after every wait result except `superseded`, after the start proce
 A job is the unit of cancelling. When the user gives a job up, cancel it yourself; never send it through the PM, which may be dead:
 
 1. `$OKE job cancel <job>`. It closes the job first (phase `failed`, so nothing starts for it again), then closes its worker and reviewer, and drops the messages about it still queued for the PM and its children. It refuses a job whose merge is under way or already in main: tell the user, and let the PM finish it (verify, or roll back when the user says so).
-2. If the PM runs (`$OKE status`, `repos[<repo>].pm` is `alive`): `$OKE send <pm agent> "Job <job> was cancelled by the user. Forget it and write no report for it."` (no `--job`: it owes no report). A dead PM is not started for this.
+2. `job cancel` also queued "Job <job> was cancelled" for the PM: a running PM gets it from its wait, a dead one is not started for it. If no wait of that PM runs, start one (see "Wait") so the notice goes in.
 3. `$OKE job archive <job>`. Its worktree and branch stay; tell the user where.
 
 ## Flow

@@ -839,6 +839,9 @@ def look_at(agent, folder):
         if not info:
             return "gone"
         # the runtime lost its name but its session still runs: judge that agent
+        lost = True
+    else:
+        lost = False
     remember_session(agent, info)
     status = info.get("agent_status")
     if status == "blocked":
@@ -846,7 +849,7 @@ def look_at(agent, folder):
             return "blocked\n" + runtime().screen(agent)
         except HerdrError as e:
             if e.code in ("agent_not_found", "pane_not_found"):
-                return "gone"
+                return "blocked\n(screen unreadable: open its pane)" if lost else "gone"
             raise
     if status not in ("idle", "done"):
         return None
@@ -1051,8 +1054,12 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                         failed_deliveries += 1
                     else:
                         failed_deliveries = 0
-                except (HerdrError, OSError):
+                except HerdrError as e:
                     sent = None  # a passing outage: the next check_once counts it
+                    if e.code != "herdr_unavailable":
+                        failed_deliveries += 1  # refused (a lost name): never loop on it
+                except OSError:
+                    sent = None
                 if isinstance(sent, str):
                     # the caller sends it (SendMessage) and starts this wait again
                     return json.dumps({"deliver": {"to": agent, "text": sent}}, ensure_ascii=False)
@@ -2388,8 +2395,13 @@ def job_locked(args):
             return fail("job %s is %s: its merge is in main or under way. Let it finish (verify, or "
                         "roll it back), not cancel" % (args.slug, info.get("phase") if merged == "none" else
                                                        "merged (%s)" % merged))
+        pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}
+        if pm.get("agent"):
+            # queued before the phase changes: the PM's wait delivers it before it can say no_jobs
+            queue_mail(pm["agent"], "oke", "Job %s was cancelled by the user. Forget it, close what is "
+                       "left of it, and write no report for it." % args.slug)
         info.update(phase="failed", phase_at=time.time(), cancelled=True)
-        save_state(state)  # first: nothing may start for this job from here on
+        save_state(state)  # nothing may start for this job from here on
         return 0
     if args.action == "archive":
         src = os.path.join(home, "jobs", args.slug)
@@ -2417,7 +2429,7 @@ CURATE_EVERY = 10  # jobs logged in a wiki since its last curation
 def cancel_children(job, key):
     """After `job cancel` closed the job: close its children's panes and drop its mail,
     outside the state lock (runtime calls and the delivery lock can be slow)."""
-    closed = []
+    closed, left = [], []
     for name, rec in sorted(read_children(key).items() if key else []):
         if rec.get("job") != job or not rec.get("pane"):
             continue
@@ -2426,10 +2438,14 @@ def cancel_children(job, key):
             if rec.get("terminal") and runtime().place_id(rec["pane"]) == rec["terminal"]:
                 runtime().close(rec["pane"])
                 closed.append(name)
-        except (HerdrError, OSError):
+        except HerdrError as e:
+            if e.code == "herdr_unavailable":
+                left.append(name)  # keep its record: `job cancel` again closes it later
+                continue
+        except OSError:
             pass  # already gone
         update_record(rec.get("role") or "worker", key, name, {"pane": None, "terminal": None})
-    print(json.dumps({"job": job, "closed": closed,
+    print(json.dumps({"job": job, "closed": closed, "not_closed": left,
                       "dropped_messages": drop_job_mail(job, key) if key else 0}))
     return 0
 
@@ -2611,6 +2627,17 @@ def inbox_messages(agent):
     return out
 
 
+def queue_mail(agent, sender, text):
+    d = inbox_dir(agent)
+    if not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    _sent[0] += 1
+    path = os.path.join(d, "%.6f-%d-%d.txt" % (time.time(), os.getpid(), _sent[0]))
+    with io.open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
+        f.write(u"%s: %s\n" % (sender, text))
+    os.replace(path + ".tmp", path)
+
+
 def cmd_send(args):
     text = " ".join(" ".join(args.text).split())
     if not text:
@@ -2652,14 +2679,7 @@ def cmd_send(args):
                 current["jobs"][args.job].pop("warned", None)  # a nudge keeps the count
             current["jobs"][args.job]["sent_seq"] = seq
             save_state(current)
-    d = inbox_dir(found[1])
-    if not os.path.isdir(d):
-        os.makedirs(d, exist_ok=True)
-    _sent[0] += 1
-    path = os.path.join(d, "%.6f-%d-%d.txt" % (time.time(), os.getpid(), _sent[0]))
-    with io.open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
-        f.write(u"%s: %s\n" % (sender, text))
-    os.replace(path + ".tmp", path)
+    queue_mail(found[1], sender, text)
     print(json.dumps({"agent": found[1], "queued": True}))
     return 0
 

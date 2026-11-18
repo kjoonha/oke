@@ -330,6 +330,12 @@ class TestWaitRevives(ReviveBase):
         self.assertEqual(oke.wait_loop("fix-a-w1", report, 2, poll=0, max_polls=4), "gone")
         self.assertEqual(self.revived, [])
 
+    def test_a_lost_name_with_a_live_session_is_not_gone(self):
+        self.fake({"agent get": [E("agent_not_found")],
+                   "agent list": [J({"agents": [AG("other-name", status="working", pane="w1:p5", session="s-w")]})]})
+        self.assertIsNone(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
+                                        poll=0, max_polls=5))
+
     def test_one_failed_look_is_not_a_death(self):
         self.fake({"agent get": [E("agent_not_found"), AGENT("working")]})
         self.assertIsNone(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
