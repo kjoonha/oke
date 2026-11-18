@@ -153,7 +153,7 @@ class TestWiki(SpawnBase):
         self.fake(fake)
         self.assertEqual(self.cli("status"), 0, self.err)
         jobs = json.loads(self.out)["jobs"]
-        self.assertEqual((jobs["calc"]["direct"], jobs["look"]["lane"]), (True, "research"))
+        self.assertEqual((jobs["calc"]["direct"], jobs["look"]["size"]), (True, "research"))
 
     def test_the_shared_wiki_catches_git_bash_paths_and_ignores_a_root(self):
         if not oke.os.name == "nt":

@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: OKe review subagent. A PM starts it for a trivial or small job, with the path of a reviewer assignment file. It reviews that diff without changing the repository and answers with the review report, which the PM saves.
+description: OKe review subagent. A PM starts it for a small or normal job, with the path of a reviewer assignment file. It reviews that diff without changing the repository and answers with the review report, which the PM saves.
 tools: Read, Grep, Glob, Bash
 model: opus
 ---

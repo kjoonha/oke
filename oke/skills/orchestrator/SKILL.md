@@ -54,7 +54,7 @@ The OKe mod in every agent does this without you:
 - An agent whose turn ends on an API error that clears by itself (rate limit, overload, server error) resubmits the turn after 30 s, 1 m, 2 m, 4 m, then every 5 m, up to `api_retry_limit` (default 20) tries. Other API errors, and the last try, make a child or PM report `failed` with "API error" in the summary.
 - An agent that ends its turn without a report gets one nudge to continue (`idle_no_report`, below).
 - The user opens the board with `/oke-board` (type it in this pane; it is a command of the mod, not of the skill).
-- A host that draws no mod pane (Orca's chat, other SDK hosts) has no `/oke-board`. There, when the user asks for the board or a job changes phase, run `$OKE board` and put its text in your reply. In Orca's chat (`ORCA_CHAT_SCRATCH_DIR` is set) you may instead write `$OKE board --html` to a file in that folder and show it as an Orca visual.
+- A host that draws no mod pane (Orca's chat, other SDK hosts) has no `/oke-board`. There, when the user asks for the board or a job changes phase, run `$OKE board` and put its text in your reply. In Orca's chat (`ORCA_CHAT_SCRATCH_DIR` is set) you may instead write `$OKE board --html` to a file in that folder with a shell redirect (`> <folder>/oke-board.html`) and show it as an Orca visual.
 
 ## Intake
 
@@ -213,16 +213,16 @@ A job is the unit of cancelling. When the user gives a job up, cancel it yoursel
 |---|---|---|
 | Intake done | Assign `kind: plan`. A research job: assign `kind: research` instead | `planning`, research `working` |
 | PM reports the plan (`report_done`, phase `planning`) | Read `<job_dir>/plan.md`. If its 검증 명령 section is empty, send it back (`kind: plan`, say why). Otherwise it becomes a `plan` item | `awaiting_approval` |
-| User approves | Assign `kind: execute`; its 이번 지시 names the lane (`lane: <lane>`) | `working` |
+| User approves | Assign `kind: execute`; its 이번 지시 names the size (`size: <size>`) | `working` |
 | User wants changes | Assign `kind: plan` with the requested changes | `planning` |
 | PM reports research done, or a direct job's work reviewed (`report_done`, phase `working` or `reviewing`) | Nothing to merge. Tell the user the report's 요약 (for research, its findings; offer the report path), update the shared wiki from 배운 것 (공용), `$OKE job phase <job> done` (refused: see "Shared wiki"), then `$OKE job archive <job>` | |
-| PM reports work reviewed (`report_done`, phase `working` or `reviewing`) | Lane `trivial`: the user approved the merge with the plan, so assign `kind: merge` now and tell the user in one line. Otherwise it becomes a `merge` item | `merging` for `trivial`, else `awaiting_merge` |
+| PM reports work reviewed (`report_done`, phase `working` or `reviewing`) | Size `small`: the user approved the merge with the plan, so assign `kind: merge` now and tell the user in one line. Otherwise it becomes a `merge` item | `merging` for `small`, else `awaiting_merge` |
 | User says merge | Assign `kind: merge` | `merging` |
 | PM reports merged (`report_done`, phase `merging`) | Update the shared wiki from the report's 배운 것 (공용) (see "Shared wiki"), `$OKE job phase <job> done`, `$OKE job archive <job>`, tell the user what changed | |
 
 Plan approval question: put a short summary of the plan in the option `preview`, mention the plan file path, and offer: approve / request changes / discuss in the PM pane (then `$OKE attach <pm>` and defer).
 
-The plan's lane (`lane:` at the top of its 접근, also on the board) changes this question. `trivial`: one line of plan, and the offer is approve and merge / approve, ask me before the merge / request changes. "Ask me before the merge" makes it `small`: run `$OKE job lane <job> small` before you assign `kind: execute`. A lane you think is wrong (too small for what the plan touches): say so in the question. When a trivial job's PM asks because the job grew, the user's answer approves the merge or not: treat a yes as a `merge` item answered merge.
+The plan's size (`size:` at the top of its 접근, also on the board) changes this question. `small`: one line of plan, and the offer is approve and merge / approve, ask me before the merge / request changes. "Ask me before the merge" makes it `normal`: run `$OKE job size <job> normal` before you assign `kind: execute`. A size you think is wrong (too small for what the plan touches): say so in the question. A plan or instruction written before the rename says `lane:` with the old names (trivial = `small`, small = `normal`, normal = `large`): the `size` that `$OKE status` shows for the job is the one that counts. When a small job's PM asks because the job grew, the user's answer approves the merge or not: treat a yes as a `merge` item answered merge.
 
 Merge question: summary, branch name, number of changed files, and the checks recorded so far (`$OKE ledger show <job>`: who checked which commit, pass or fail). Offer: merge / hold / look myself. A merge counts as done only after the PM verified it on the merged result (`merge: verified` in the ledger); when the PM reports merged, check that before `job phase done`. When the PM asks because the main branch moved on during the check, the user may accept the merge as it is: put that answer into the PM's assignment; the PM records it with `--accept`.
 
@@ -236,7 +236,7 @@ Knowledge that holds beyond one repository (company rules, shared tools, how dep
 - `<topic>.md`: one topic per page.
 - `log.md`: one line per change; `oke wiki` writes it.
 
-Change it only through `$OKE wiki ... --shared`, the same way a PM changes its wiki (see the PM's **Wiki**: `wiki read`, then `wiki write --from <file> --base <base> --note ..`). Add what a PM report's 배운 것 (공용) states and you believe, and what the user tells you to keep; add `--job <job>` for a job's lessons. Fix a page that turned out wrong. No repository names or paths: facts about one repository stay in that repository's wiki, which its PM keeps (`wiki write --shared` refuses a repository's path). The PM's rules for what to write hold here too.
+Change it only through `$OKE wiki ... --shared`, the same way a PM changes its wiki (see the PM's **Wiki**: `wiki read`, then `wiki write --from <file> --base <base> --note ..`). Write that page file under `$OKE_HOME/tmp/`. A guard lets you write files only in OKe's home (never a wiki: those change through `$OKE wiki`) and in your own memory folder. Add what a PM report's 배운 것 (공용) states and you believe, and what the user tells you to keep; add `--job <job>` for a job's lessons. Fix a page that turned out wrong. No repository names or paths: facts about one repository stay in that repository's wiki, which its PM keeps (`wiki write --shared` refuses a repository's path). The PM's rules for what to write hold here too.
 
 `job phase done` refuses a job whose PM did not log it in the wiki: give the PM `kind: answer` with "Record the wiki lines for job <job> (`oke wiki log --job <job> --note none` if it taught nothing), then report done again." Never write a repository wiki yourself.
 

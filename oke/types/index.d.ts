@@ -21,8 +21,8 @@ export type BoardJob = {
   agents: BoardNode[]
   /** The ledger: none, unverified, verified or rolled_back. */
   merge: string
-  /** The size lane the PM chose: trivial, small or normal. */
-  lane?: string
+  /** The job size the PM chose: small, normal or large (or research). */
+  size?: string
   /** What the job waits on the user for (`oke pending` kind), null when nothing or deferred. */
   pending: string | null
 }

@@ -44,12 +44,12 @@ updated: <ISO time>
 ## 한 일       (last 5)
 ## 다음
 ## 막힌 것
-## 결정        (decided, with why: one line each, last 5)
+## 결정        (made already, last 5: one sentence each in the user's language, "<what> — <why>", e.g. "리뷰는 diff 대신 결과 파일로 함 — repo가 고정돼 diff가 비어 있음")
 ## 결정 필요    (open decisions: who decides (user or PM) and the question)
 ## 확인 필요    (what someone should check, and why)
 ```
 
-The board shows 결정 필요, 막힌 것, 확인 필요 and 결정 under your tasks. Write `없음` in a section with nothing in it. The board only shows: a decision the user must make still goes in a `question` report.
+The board shows 결정 필요, 막힌 것 and 확인 필요 under your tasks; 결정 only when the person opens your row. Write `없음` in a section with nothing in it. The board only shows: a decision the user must make still goes in a `question` report.
 
 3. Before every turn ends, every open job you work on has a `report.md` in its `pm` folder with the `seq` of its assignment. Overwrite it:
 
@@ -98,29 +98,29 @@ job: <job>
 ## 사용자에게 물을 것 (or 없음)
 ```
 
-A small job gets one line per section. Use no worktree only when the change is small and no other OKe job of this repository is open: a job without a worktree changes the main checkout that every merge uses. Whether the main checkout already holds the user's own changes is your call: without a worktree, `$OKE job merge` commits every tracked change there (new files only as you stage them). Report `done` with a short summary, or `question` if intake is not enough to plan.
+A `small` or `normal` job gets one line per section. Use no worktree only when the change is small and no other OKe job of this repository is open: a job without a worktree changes the main checkout that every merge uses. Whether the main checkout already holds the user's own changes is your call: without a worktree, `$OKE job merge` commits every tracked change there (new files only as you stage them). Report `done` with a short summary, or `question` if intake is not enough to plan.
 
-### Lanes
+### Job size
 
-While planning, decide how big the job is and record it: `$OKE job lane <job> <lane>`, and start plan.md's 접근 with `lane: <lane>` and one line why.
+While planning, decide how big the job is and record it: `$OKE job size <job> <size>`, and start plan.md's 접근 with `size: <size>` and one line why.
 
-| Lane | When | Work | Review | User asks |
+| Size | When | Work | Review | User asks |
 |---|---|---|---|---|
-| `trivial` | One line describes it: a few lines in one or two files, no design choice, an obvious check (a typo, a constant, a config value, a one-line fix) | A subagent of yours | The review subagent | Once: plan and merge together |
-| `small` | A clear change in a few files with no open design question | A worker pane | The review subagent | Plan, then merge |
-| `normal` | Everything else. When in doubt, normal | A worker pane | A reviewer pane | Plan, then merge |
+| `small` | One line describes it: a few lines in one or two files, no design choice, an obvious check (a typo, a constant, a config value, a one-line fix) | A subagent of yours | The review subagent | Once: plan and merge together |
+| `normal` | A clear change in a few files with no open design question | A worker pane | The review subagent | Plan, then merge |
+| `large` | Everything else. When in doubt, large | A worker pane | A reviewer pane | Plan, then merge |
 
-The orchestrator may change the lane before it assigns `kind: execute` (the user wanted to approve the merge separately): follow the lane its execute instruction names.
+The orchestrator may change the size before it assigns `kind: execute` (the user wanted to approve the merge separately): follow the size its execute instruction names. A plan or instruction written before the rename says `lane:` with the old names (trivial = `small`, small = `normal`, normal = `large`): the `size` that `$OKE status` shows for the job is the one that counts.
 
-**Work subagent (trivial).** No worker pane and no wait. Call the Agent tool with `subagent_type: general-purpose` and a prompt that holds everything a worker would get: the cwd, the change from the plan, what not to touch, the 검증 명령, and "Make the change. Do not commit. Run the 검증 명령. Answer with the files you changed and the command's output." Check its answer as a worker `report done`. Findings from the review go to a new subagent call with the findings added.
+**Work subagent (small).** No worker pane and no wait. Call the Agent tool with `subagent_type: general-purpose` and a prompt that holds everything a worker would get: the cwd, the change from the plan, what not to touch, the 검증 명령, and "Make the change. Do not commit. Run the 검증 명령. Answer with the files you changed and the command's output." Check its answer as a worker `report done`. Findings from the review go to a new subagent call with the findings added.
 
-**Review subagent (trivial and small).** Write the reviewer's assignment exactly as for a reviewer pane (see **Review**), but do not spawn it: call the Agent tool with `subagent_type: oke:reviewer` and the prompt `Review: <the assignment path>`. It answers with the review report (Claude Code does not let a subagent write report files): write that answer, unchanged, to `report.md` next to the assignment, which `$OKE job merge` checks as for a reviewer pane. An answer without the `type`, `seq` and `verdict` lines is no review: call it again. Every new review round is a new call, after `seq` + 1 and the new `commit:` or `tree:` in the assignment. The subagent is told, not forced, to change nothing: after its pass, `git status --short` must match what you saw before the call (`$OKE job merge` also refuses a tree or commit other than the one reviewed).
+**Review subagent (small and normal).** Write the reviewer's assignment exactly as for a reviewer pane (see **Review**), but do not spawn it: call the Agent tool with `subagent_type: oke:reviewer` and the prompt `Review: <the assignment path>`. It answers with the review report (Claude Code does not let a subagent write report files): write that answer, unchanged, to `report.md` next to the assignment, which `$OKE job merge` checks as for a reviewer pane. An answer without the `type`, `seq` and `verdict` lines is no review: call it again. Every new review round is a new call, after `seq` + 1 and the new `commit:` or `tree:` in the assignment. The subagent is told, not forced, to change nothing: after its pass, `git status --short` must match what you saw before the call (`$OKE job merge` also refuses a tree or commit other than the one reviewed).
 
-**A job outgrows its lane.** The work or the review shows it is bigger than planned (more files, a design choice, a second `changes` round on a trivial job): `$OKE job lane <job> small` or `normal` (a lane only grows once work started) and go on in that lane. A trivial job that grows loses its merge approval: report `question` for that job saying why, and wait for the answer before the merge.
+**A job outgrows its size.** The work or the review shows it is bigger than planned (more files, a design choice, a second `changes` round on a small job): `$OKE job size <job> normal` or `large` (a size only grows once work started) and go on at that size. A small job that grows loses its merge approval: report `question` for that job saying why, and wait for the answer before the merge.
 
 ### kind: execute
 
-Lane `trivial`: no worker pane. Do step 1 if the plan uses a worktree, then the work subagent and the review subagent (see Lanes), then continue at "verdict: pass" under **Review**.
+Size `small`: no worker pane. Do step 1 if the plan uses a worktree, then the work subagent and the review subagent (see Job size), then continue at "verdict: pass" under **Review**.
 
 
 1. Worktree, if the plan uses one: `$OKE worktree <job> --repo <repo>`. It prints `id` (to remove it later), `path` (the checkout) and `place` (where to start the worker). Write `id` and `path` on your board. If it fails, report `failed` with the error. It always uses branch `oke/<job>`, the only one `$OKE job merge` merges.
@@ -172,7 +172,7 @@ When a child's wait finishes, act on its first line:
 
 **A new instruction for a child:** edit its assignment (`이번 지시`, `seq` + 1), `$OKE send <child> "Assignment updated (seq <n>). Re-read <its assignment path>."`, then start its wait with the new seq. The wait types the message in once the child is idle, so start the wait last. A message must not start with `/`.
 
-**Review.** With a worktree, the review always covers a commit: if the worker did not commit (`commit: no`), commit its changes first: `git -C <cwd> add -u`, then `git -C <cwd> add <file>` for each new file that is part of the job, then `git -C <cwd> commit` (see "New files" below). Then write `$OKE_HOME/jobs/<job>/<job>-rv/assignment.md` (role `reviewer`, same `cwd` as the worker, `commit: <git -C <cwd> rev-parse HEAD>` in the header, 이번 지시 = the diff range `<base branch>...<that commit>` (three dots: only this job's changes, even after other jobs merged)). Without a worktree, first `git -C <cwd> add <file>` each new file that is part of the job (see "New files"; tracked changes are always included), then put `tree: <the tree from $OKE job tree <job>>` in the header instead of `commit`, right before you spawn or instruct the reviewer; 이번 지시 = "uncommitted changes: `git diff HEAD`, and new files listed by `git status --short`". `$OKE spawn <file> --split-from <worker pane>`. Wait for it. Lane `small` or `trivial`: the review subagent instead (see Lanes).
+**Review.** With a worktree, the review always covers a commit: if the worker did not commit (`commit: no`), commit its changes first: `git -C <cwd> add -u`, then `git -C <cwd> add <file>` for each new file that is part of the job, then `git -C <cwd> commit` (see "New files" below). Then write `$OKE_HOME/jobs/<job>/<job>-rv/assignment.md` (role `reviewer`, same `cwd` as the worker, `commit: <git -C <cwd> rev-parse HEAD>` in the header, 이번 지시 = the diff range `<base branch>...<that commit>` (three dots: only this job's changes, even after other jobs merged)). Without a worktree, first `git -C <cwd> add <file>` each new file that is part of the job (see "New files"; tracked changes are always included), then put `tree: <the tree from $OKE job tree <job>>` in the header instead of `commit`, right before you spawn or instruct the reviewer; 이번 지시 = "uncommitted changes: `git diff HEAD`, and new files listed by `git status --short`". `$OKE spawn <file> --split-from <worker pane>`. Wait for it. Size `small` or `normal`: the review subagent instead (see Job size).
 
 **New files.** You decide which untracked files (`git -C <cwd> status --short`, `??`) belong to the job: the ones the worker's report names or the plan calls for. Leave out what builds and checks leave behind (caches, compiled files, logs, build output) and anything you do not recognise; never delete a file you did not see the job create. `$OKE job merge` commits tracked changes plus only what you staged, and names the untracked files it left (`left_untracked`): mention them in your report.
 
@@ -183,7 +183,7 @@ Every new instruction to the reviewer (another round, a rebase) repeats this: co
 
 ### kind: merge
 
-Lanes: where the steps below instruct the worker, a trivial job calls the work subagent again; where they instruct or close the reviewer, trivial and small jobs call the review subagent again, and there is nothing to close for a subagent.
+Job size: where the steps below instruct the worker, a small job calls the work subagent again; where they instruct or close the reviewer, small and normal jobs call the review subagent again, and there is nothing to close for a subagent.
 
 Merges go one at a time, in the order the merge assignments reached you. Finish one before you start the next. While a merge is still in progress (for example in its conflict ladder), write the next job's report as `waiting` (`on: <the job being merged>`) and start it when that one is done. A merge that waits at step 1 on a job without a worktree is not in progress: when that job's merge arrives, do it first, out of order, then the waiting one.
 

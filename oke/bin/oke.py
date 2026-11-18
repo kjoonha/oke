@@ -172,6 +172,11 @@ def load_state(recover=False):
     for key in EMPTY_STATE:
         if isinstance(loaded.get(key), dict):
             state[key] = loaded[key]
+    for job in state["jobs"].values():
+        if isinstance(job, dict) and "lane" in job:
+            lane = job.pop("lane")
+            if lane in OLD_LANES:
+                job["size"] = OLD_LANES[lane]
     if loaded.get("runtime") in RUNTIMES:
         state["runtime"] = loaded["runtime"]
     return state
@@ -1446,7 +1451,7 @@ def board_tree(state, agents, only_key=None):
             info = state["jobs"][job]
             waiting = pending_item(job, info)
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
-                         "lane": info.get("lane") or "normal", "direct": bool(info.get("direct")),
+                         "size": info.get("size"), "direct": bool(info.get("direct")),
                          "merge": merge_state(job)[0],
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None})
         tree.append({"repo": repo_name(key), "key": key, "jobs": jobs,
@@ -1505,6 +1510,10 @@ def cmd_tick(args):
         role, name, key, record = me
         out["role"], out["agent"] = role, name
         out["folder"] = agent_folder(role, name, key, record)
+        # the orchestrator writes only in OKe's home outside the wikis, and its own memory
+        out["home"] = oke_home()
+        out["wiki"] = load_config()["wiki_path"]
+        out["claude_dir"] = os.path.abspath(native_path(claude_config_dir()))
         if role in ("worker", "reviewer"):  # for the status line
             out["job"] = record.get("job")
             out["seq"] = (read_header(os.path.join(out["folder"], "assignment.md")) or {}).get("seq")                 if out["folder"] else None
@@ -1720,7 +1729,7 @@ def status_locked(args, herdr_info):
         result["jobs"][name] = {"phase": job.get("phase"), "class": cls, "agents": job_agents,
                                 "pm_seq": pm_job_report(name)[0],
                                 "pm_job_dir": pm_job_dir(name).replace("\\", "/"),
-                                "lane": job.get("lane"), "direct": bool(job.get("direct"))}
+                                "size": job.get("size"), "direct": bool(job.get("direct"))}
 
     here = runtime().whoami()
     recorded = state["orchestrator"].get("pane")
@@ -1873,7 +1882,7 @@ def merge_job(job):
     info = state["jobs"].get(job)
     if not info:
         return fail("unknown job: %s" % job)
-    if info.get("lane") == "research" or info.get("direct"):
+    if info.get("size") == "research" or info.get("direct"):
         return fail("job %s: %s" % (job, NO_MERGE))
     if info.get("phase") != "merging":
         return fail("job %s is in phase %s: set phase merging after the user approves the merge"
@@ -2204,9 +2213,12 @@ def cmd_ledger(args):
 # Phases that pass a user gate may only be entered from the phase before that gate
 # (or stay). Not proof of a user's approval, but a PM or an orchestrator slip cannot
 # skip the approval step. Phases not listed here are free.
-# trivial: a subagent does the work, one approval covers plan and merge;
-# small: a worker pane, a review subagent; normal: worker and reviewer panes
-LANES = ("trivial", "small", "normal")
+# Job sizes, which the PM decides while planning. small: a subagent does the work,
+# one approval covers plan and merge; normal: a worker pane, a review subagent;
+# large: worker and reviewer panes
+SIZES = ("small", "normal", "large")
+# state.json from before the rename kept a "lane" with the old names
+OLD_LANES = {"trivial": "small", "small": "normal", "normal": "large", "research": "research"}
 # research: the PM looks and reports, no change, no plan approval, no merge.
 # A direct job (a folder outside git) changes the files in place: no branch, no merge.
 NO_MERGE = "the job has nothing to merge (research or direct): set phase done after its report"
@@ -2313,7 +2325,7 @@ def job_locked(args):
             return fail(str(e))
         direct = not os.path.exists(key)
         busy = [n for n, j in state["jobs"].items()  # research changes nothing: never in the way
-                if direct and not args.research and j.get("repo") == key and j.get("lane") != "research"
+                if direct and not args.research and j.get("repo") == key and j.get("size") != "research"
                 and j.get("phase") not in DONE_PHASES]
         if busy:
             return fail("job %s already changes %s in place (no git, no undo): finish or archive it first"
@@ -2328,12 +2340,12 @@ def job_locked(args):
         state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None,
                                     "phase_at": time.time(), "created": time.time(), "base": base or None}
         if args.research:
-            state["jobs"][args.slug]["lane"] = "research"
+            state["jobs"][args.slug]["size"] = "research"
         if direct:
             state["jobs"][args.slug]["direct"] = True
         save_state(state)
         print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key,
-                          "lane": "research" if args.research else None, "direct": direct,
+                          "size": "research" if args.research else None, "direct": direct,
                           "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
                           "pm_dir": pm_dir(key).replace("\\", "/"),
                           "pm_agent": "pm-" + repo_name(key),
@@ -2349,15 +2361,15 @@ def job_locked(args):
         now = state["jobs"][args.slug].get("phase")
         allowed = PHASE_FROM.get(args.phase)
         info = state["jobs"][args.slug]
-        no_merge = info.get("lane") == "research" or info.get("direct")
-        if args.phase == "merging" and info.get("lane") == "trivial":
+        no_merge = info.get("size") == "research" or info.get("direct")
+        if args.phase == "merging" and info.get("size") == "small":
             # the user approved the plan and the merge in one go
             allowed = allowed + ("working", "reviewing")
         if no_merge and args.phase in ("awaiting_merge", "merging"):
             return fail("job %s: %s" % (args.slug, NO_MERGE))
         if no_merge and args.phase == "done":
             allowed = allowed + ("working", "reviewing")
-        if info.get("lane") == "research" and args.phase == "working":
+        if info.get("size") == "research" and args.phase == "working":
             allowed = allowed + ("intake", "planning")  # no plan to approve
         if allowed is not None and now not in allowed:
             return fail("job %s cannot go from %s to %s: allowed only from %s"
@@ -2388,16 +2400,16 @@ def job_locked(args):
         print(json.dumps({"job": args.slug, "round": review_round(args.slug),
                           "limit": info.get("review_rounds", load_config().get("max_review_rounds"))}))
         return 0
-    if args.action == "lane":
+    if args.action == "size":
         info = state["jobs"][args.slug]
-        if info.get("lane") == "research":
-            return fail("job %s is research: it has no size lane" % args.slug)
-        grows = LANES.index(args.lane) > LANES.index(info.get("lane") or "normal")
+        if info.get("size") == "research":
+            return fail("job %s is research: it has no size" % args.slug)
+        grows = SIZES.index(args.size) > SIZES.index(info.get("size") or "large")
         if info.get("phase") not in ("intake", "planning", "awaiting_approval") and not (
                 grows and info.get("phase") in ("working", "reviewing")):
-            return fail("job %s: in phase %s a lane can only grow, before the merge"
+            return fail("job %s: in phase %s a size can only grow, before the merge"
                         % (args.slug, info.get("phase")))
-        state["jobs"][args.slug]["lane"] = args.lane
+        state["jobs"][args.slug]["size"] = args.size
         save_state(state)
         return 0
     if args.action == "defer":
@@ -2541,7 +2553,7 @@ def record_wiki_use(job_dir, key):
 def wiki_verified(job, info):
     """Lessons count only from work that was checked (Hermes: learning from unchecked
     sessions taught wrong rules)."""
-    if info.get("lane") == "research":
+    if info.get("size") == "research":
         return True
     if info.get("direct"):
         review = latest_report(os.path.join(oke_home(), "jobs", job), r"-rv\d*$")
@@ -2816,9 +2828,9 @@ def build_parser():
     rounds = job_sub.add_parser("rounds", help="show a job's review round and limit, or set the limit")
     rounds.add_argument("slug")
     rounds.add_argument("n", nargs="?", type=int)
-    lane = job_sub.add_parser("lane", help="the job's size lane, which the PM decides while planning")
-    lane.add_argument("slug")
-    lane.add_argument("lane", choices=LANES)
+    size = job_sub.add_parser("size", help="the job's size, which the PM decides while planning")
+    size.add_argument("slug")
+    size.add_argument("size", choices=SIZES)
     merge = job_sub.add_parser("merge")
     merge.add_argument("slug")
     job_sub.add_parser("tree", help="the tree a review of a job without a worktree names").add_argument("slug")

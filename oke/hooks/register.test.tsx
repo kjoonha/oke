@@ -1,11 +1,11 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { promptRole } from './register'
+import { orchestratorDenied, promptRole } from './register'
 
 type Run = { argv: readonly string[] }
 
 const BOARD = [{
   repo: 'toy-6b0484', key: 'k', pm: null,
-  jobs: [{ job: 'calc-sub', phase: 'working', merge: 'rolled_back', pending: 'question', lane: 'small', agents: [{
+  jobs: [{ job: 'calc-sub', phase: 'working', merge: 'rolled_back', pending: 'question', size: 'small', agents: [{
     agent: 'calc-sub-w1', role: 'worker', status: 'working', pane: 'w7:p9', report: null,
     board: '## 지금\nwriting sub', revives: 1, cost: 0.4, todos: [
       { content: 'write sub', status: 'completed' }, { content: 'test sub', status: 'in_progress' },
@@ -22,7 +22,7 @@ let autoCompact = true
 
 function answer(args: readonly string[]) {
   if (args[0] === 'tick') {
-    return { role: tickRole, folder: '/oke/jobs/j/w1', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : tickBoard, revived: {} }
+    return { role: tickRole, folder: '/oke/jobs/j/w1', home: 'C:/oke', wiki: 'C:/oke/wiki', claude_dir: 'C:/Users/u/.claude', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : tickBoard, revived: {} }
   }
   if (args[0] === 'boundary') return { role: tickRole, answered: answeredNow }
   if (args[0] === 'api-retry' && args.includes('--clear')) return { action: 'cleared' }
@@ -398,7 +398,7 @@ test('the orchestrator never compacts by itself', async ($, on) => {
   tickRole = 'worker'
 })
 
-test('the board shows decided, to decide, to check and blocked from board.md', async ($, on) => {
+test('the board shows to decide, to check and blocked from board.md, not what is decided', async ($, on) => {
   mock.clock(on)
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
   tickRole = 'orchestrator'
@@ -410,7 +410,7 @@ test('the board shows decided, to decide, to check and blocked from board.md', a
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /◆ decided\s+JWT over sessions: no shared store$/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /JWT over sessions/ })).toBeFalsy()  // decided: only in the opened board.md
   expect(await ui.find({ type: 'Text', text: /\? decide\s+user: keep the old endpoint\?$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /check|blocked/ })).toBeFalsy()  // 없음 and none are empty
   await ui.unmount()
@@ -475,6 +475,43 @@ test('a reviewer writes only its own folder and runs only read-only git', async 
     expect((await call(ok)).deny).toBeUndefined()
   }
   tickRole = 'worker'
+})
+
+test('the orchestrator writes only the OKe home and starts no subagent', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { ORCA_TERMINAL_HANDLE: 'term_1' })
+  tickRole = 'orchestrator'
+  engine(on, [], [])
+  on('tool.call', () => ({ result: { stdout: '' } }))
+  await $.session.start({ cwd: 'C:/work/toy', surface: 'terminal', isInteractive: true })
+  const call = (e: any) => $.tool.call(e as any) as Promise<any>
+  for (const bad of [{ tool: 'Edit', file_path: 'C:/repo/calc.py' }, { tool: 'Write', file_path: 'calc.py' },
+    { tool: 'Write', file_path: 'C:/oke/../repo/a.py' }, { tool: 'NotebookEdit', notebook_path: 'C:/repo/n.ipynb' },
+    { tool: 'Agent', prompt: 'edit calc.py' }, { tool: 'Workflow', script: 'agent("edit calc.py")' },
+    { tool: 'Edit', file_path: 'C:/repo/.claude/worktrees/f/calc.py' },
+    { tool: 'Write', file_path: 'C:/repo/.claude/commands/deploy.md' }, { tool: 'Edit', file_path: 'C:/Users/u/.claude/settings.json' },
+    { tool: 'Write', file_path: 'C:/Users/u/.claude/plugins/cache/oke/hooks/register.tsx' },
+    { tool: 'Write', file_path: 'C:/oke/wiki/toy/index.md' }, { tool: 'Write', file_path: 'C:/oke/./wiki/toy/index.md' },
+    { tool: 'Write', file_path: 'C:/oke//wiki/toy/index.md' }, { tool: 'Write', file_path: 'C:/oke/wiki./toy/index.md' },
+    { tool: 'Write', file_path: 'C:/oke/wiki /toy/index.md' }, { tool: 'Write', file_path: 'C:/oke/KNOWLE~1/x.md' },
+    { tool: 'Write', file_path: 'C:/Users/u/.claude/projects/other/memory/MEMORY.md' }]) {
+    expect((await call(bad)).deny).toMatch(/^OKe orchestrators/)
+  }
+  for (const ok of [{ tool: 'Write', file_path: 'C:\\oke\\jobs\\j\\pm\\assignment.md' },
+    { tool: 'Read', file_path: 'C:/repo/a' },
+    { tool: 'Bash', command: 'python oke.py pending' }]) {
+    expect((await call(ok)).deny).toBeUndefined()
+  }
+  tickRole = 'worker'
+})
+
+test('the orchestrator may write its own memory, not that of another project', () => {
+  const dirs = { home: 'C:/oke', wiki: 'C:/oke/wiki', claude: 'C:\\Users\\u\\.claude', root: 'C:\\work\\toy' }
+  const write = (file_path: string) => orchestratorDenied('Write', { file_path }, dirs)
+  expect(write('C:\\Users\\u\\.claude\\projects\\C--work-toy\\memory\\a.md')).toBeNull()
+  expect(write('C:/Users/u/.claude/projects/other/memory/a.md')).toMatch(/^OKe orchestrators/)
+  expect(orchestratorDenied('Write', { file_path: 'C:/Users/u/.claude/projects/C--work-toy/memory/a.md' },
+    { ...dirs, root: null })).toMatch(/^OKe orchestrators/)  // no root known: refused
 })
 
 test('the first or revive prompt names the role and folder', () => {

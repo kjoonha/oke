@@ -22,6 +22,9 @@ let pane: string | undefined
 let role: string | null = null
 let named = false  // role and folder came from the first prompt, not yet from oke
 let folder: string | null = null
+let home: string | null = null
+let claudeDir: string | null = null
+let wiki: string | null = null
 let bandId: string | null = null
 let mood: Mood = 'rest'
 let frame = 0
@@ -68,6 +71,9 @@ async function tick($: any) {
       folder = out.folder ?? null
       named = false
     }
+    home = out.home ?? home
+    claudeDir = out.claude_dir ?? claudeDir
+    wiki = out.wiki ?? wiki
     job = out.job ?? null
     seq = out.seq ?? null
     eventsOffset = out.events_offset
@@ -248,6 +254,31 @@ export function reviewerDenied(tool: string, input: any, own: string | null): st
   return 'OKe reviewers run only read-only git: git diff, log, show or status, one command, without --output.'
 }
 
+/** The refusal for an orchestrator tool call that does a job's work itself, else null.
+ * Every request becomes a job, so plan approval, review and the merge gate are never
+ * skipped. It writes only OKe's home outside the wikis (those change through `oke wiki`)
+ * and its own memory (<claude config>/projects/<project>/memory/). */
+export function orchestratorDenied(tool: string, input: any,
+  dirs: { home: string | null, wiki?: string | null, claude?: string | null, root?: string | null }): string | null {
+  const why = 'OKe orchestrators never do the work: make it a job (`oke job new`) and give it to the PM.'
+  if (tool === 'Agent' || tool === 'Task' || tool === 'Workflow') return `${why} No subagents either.`
+  if (tool !== 'Edit' && tool !== 'Write' && tool !== 'NotebookEdit') return null
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  const under = (dir: string | null | undefined) => dir ? target.startsWith(norm(dir) + '/') : false
+  const target = norm(String(input.file_path ?? input.notebook_path ?? ''))
+  // only a canonical absolute path: `.`, `..`, `//` or a name ending in a dot or space
+  // (Windows drops those) or an 8.3 short name (KNOWLE~1) could reach the wiki past the
+  // prefix checks
+  const plain = /^([a-z]:)?\/[^/]/.test(target) && !/(^|\/)\.{1,2}(\/|$)|\/\/|[. ](\/|$)|~\d/.test(target)
+  // Claude Code names a project's folder after its root, every other character a dash; a
+  // root it names otherwise (a git root above it) only refuses: never a foreign memory
+  const memory = !!dirs.claude && !!dirs.root
+    && under(`${dirs.claude}/projects/${dirs.root.replace(/[^A-Za-z0-9]/g, '-')}/memory`)
+  if (plain && ((under(dirs.home) && !under(dirs.wiki)) || memory)) return null
+  return `${why} You may write only under ${dirs.home ?? '$OKE_HOME'} (a scratch file: its tmp/ folder; `
+    + 'never a wiki: use `oke wiki`) and in your own memory folder.'
+}
+
 /** The ledger's merge state beside the job name. */
 const LEDGER: Record<string, [string, string]> = {
   unverified: ['unverified', 'yellow'],
@@ -307,8 +338,7 @@ const NOTES: [string, string, string, string][] = [
   ['결정 필요', '?', 'decide', INK.yellow],
   ['막힌 것', '✗', 'blocked', INK.red],
   ['확인 필요', '!', 'check', INK.magenta],
-  ['결정', '◆', 'decided', INK.cyan],
-]
+]  // 결정 (made already) asks nothing of the person: it shows only in the opened board.md
 
 const TASK_TOOLS = ['TaskCreate', 'TaskUpdate', 'TodoWrite']
 
@@ -539,6 +569,18 @@ export const register: Register = on => {
       }
       if (role === 'reviewer') {
         const denied = reviewerDenied(e.tool, e, folder)
+        if (denied) return { deny: denied }
+      }
+      if (role === 'orchestrator') {
+        let root: string | null = null  // asked on each write: /cd or a worktree move changes it
+        if (['Edit', 'Write', 'NotebookEdit'].includes(e.tool)) {
+          try {
+            root = await $.session.root()
+          } catch {
+            // no root: its memory is refused too, never a foreign one allowed
+          }
+        }
+        const denied = orchestratorDenied(e.tool, e, { home, wiki, claude: claudeDir, root })
         if (denied) return { deny: denied }
       }
       const ran: any = await next(e)
@@ -805,7 +847,7 @@ export const register: Register = on => {
           <Box flexDirection="column" borderStyle="round" borderColor={job.pending ? INK.yellow : hurt ? INK.red : INK.lavender} paddingX={1} marginTop={1}>
             <Text>
               <Text bold color={INK.white}>{job.job}</Text>
-              {job.lane && job.lane !== 'normal' ? <Text color={INK.dim}>{` · ${job.lane}`}</Text> : ''}
+              {job.size ? <Text color={INK.dim}>{` · ${job.size}`}</Text> : ''}
               {label ? <Text color={labelColor}>{`  ${label}`}</Text> : ''}
             </Text>
             <Text>

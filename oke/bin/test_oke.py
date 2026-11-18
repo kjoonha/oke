@@ -197,23 +197,33 @@ class TestState(Base):
         other = self.git_repo("other/api")
         self.assertEqual(os.path.basename(oke.wiki_dir(oke.repo_key(other))), oke.repo_name(oke.repo_key(other)))
 
-    def test_lane_is_set_while_planning_and_trivial_merges_without_a_second_ask(self):
+    def test_size_is_set_while_planning_and_small_merges_without_a_second_ask(self):
         repo = self.git_repo("r")
         for job in ("tiny", "grew", "big"):
             self.assertEqual(self.cli("job", "new", job, "--repo", repo), 0)
             self.advance(job, "planning")
         for job in ("tiny", "grew"):
-            self.assertEqual(self.cli("job", "lane", job, "trivial"), 0, self.err)
-        self.assertNotEqual(self.cli("job", "lane", "tiny", "huge"), 0)  # not a lane
-        self.assertEqual(oke.load_state()["jobs"]["tiny"]["lane"], "trivial")
+            self.assertEqual(self.cli("job", "size", job, "small"), 0, self.err)
+        self.assertNotEqual(self.cli("job", "size", "tiny", "huge"), 0)  # not a size
+        self.assertEqual(oke.load_state()["jobs"]["tiny"]["size"], "small")
         for job in ("tiny", "grew", "big"):
             self.advance(job, "working")
         self.assertEqual(self.cli("job", "phase", "tiny", "merging"), 0, self.err)
-        self.assertEqual(self.cli("job", "phase", "big", "merging"), 1)  # normal: the user approves first
-        self.assertEqual(self.cli("job", "lane", "big", "small"), 1)  # no shrinking once work started
-        self.assertEqual(self.cli("job", "lane", "grew", "small"), 0, self.err)  # a lane may grow
+        self.assertEqual(self.cli("job", "phase", "big", "merging"), 1)  # large: the user approves first
+        self.assertEqual(self.cli("job", "size", "big", "normal"), 1)  # no shrinking once work started
+        self.assertEqual(self.cli("job", "size", "grew", "normal"), 0, self.err)  # a size may grow
         self.assertEqual(self.cli("job", "phase", "grew", "merging"), 1)  # and loses its merge approval
-        self.assertEqual(self.cli("job", "lane", "tiny", "normal"), 1)  # not once merging
+        self.assertEqual(self.cli("job", "size", "tiny", "large"), 1)  # not once merging
+
+    def test_an_old_lane_in_state_json_becomes_a_size(self):
+        jobs = {"a": {"phase": "working", "lane": "trivial"}, "b": {"phase": "working", "lane": "small"},
+                "c": {"phase": "working", "lane": "normal"}, "d": {"phase": "intake", "lane": "research"}}
+        with io.open(oke.state_path(), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"jobs": jobs}))
+        got = oke.load_state()["jobs"]
+        self.assertEqual({k: v.get("size") for k, v in got.items()},
+                         {"a": "small", "b": "normal", "c": "large", "d": "research"})
+        self.assertFalse(any("lane" in v for v in got.values()))
 
     def test_review_rounds_stop_at_the_limit_until_the_user_allows_more(self):
         repo = self.git_repo("r")
@@ -320,7 +330,7 @@ class TestState(Base):
         self.assertEqual(self.cli("job", "phase", "look", "working"), 1)  # the interview first
         self.assertEqual(self.cli("interview", "look", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
         self.assertEqual(self.cli("job", "phase", "look", "working"), 0, self.err)
-        self.assertEqual(self.cli("job", "lane", "look", "small"), 1)
+        self.assertEqual(self.cli("job", "size", "look", "small"), 1)
         self.assertEqual(self.cli("job", "phase", "look", "merging"), 1)
         self.logged("look")
         self.assertEqual(self.cli("job", "phase", "look", "done"), 0, self.err)

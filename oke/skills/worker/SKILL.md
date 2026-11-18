@@ -47,12 +47,12 @@ updated: <ISO time>
 ## 한 일       (last 5)
 ## 다음
 ## 막힌 것
-## 결정        (decided, with why: one line each, last 5)
+## 결정        (made already, last 5: one sentence each in the user's language, "<what> — <why>", e.g. "리뷰는 diff 대신 결과 파일로 함 — repo가 고정돼 diff가 비어 있음")
 ## 결정 필요    (open decisions: who decides (user or PM) and the question)
 ## 확인 필요    (what someone should check, and why)
 ```
 
-The board shows 결정 필요, 막힌 것, 확인 필요 and 결정 under your tasks. Write `없음` in a section with nothing in it. The board only shows: a decision the user must make still goes in a `question` report.
+The board shows 결정 필요, 막힌 것 and 확인 필요 under your tasks; 결정 only when the person opens your row. Write `없음` in a section with nothing in it. The board only shows: a decision the user must make still goes in a `question` report.
 
 ## Report
 
