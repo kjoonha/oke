@@ -17,6 +17,7 @@ import json
 import os
 import re
 import subprocess
+import time
 
 from runtime_herdr import HerdrError
 
@@ -87,13 +88,41 @@ def load_registry():
 
 def save_registry(data):
     path = registry_path()
-    with io.open(path + ".tmp", "w", encoding="utf-8") as f:
+    tmp = "%s.%d.tmp" % (path, os.getpid())
+    with io.open(tmp, "w", encoding="utf-8") as f:
         f.write(json.dumps(data, indent=2, ensure_ascii=False))
-    os.replace(path + ".tmp", path)
+    os.replace(tmp, path)
+
+
+def update_registry(change):
+    """Load, `change(registry)`, save, under a lock: PMs start workers at the same time."""
+    lock = registry_path() + ".lock"
+    for _ in range(100):
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL))
+            break
+        except OSError:
+            try:
+                if time.time() - os.path.getmtime(lock) > 30:
+                    os.remove(lock)  # left by a killed process
+            except OSError:
+                pass  # released meanwhile
+            time.sleep(0.1)
+    else:
+        raise HerdrError("registry_locked", "%s is locked" % lock)
+    try:
+        registry = load_registry()
+        change(registry)
+        save_registry(registry)
+    finally:
+        os.remove(lock)
 
 
 def status_of(show):
-    """herdr's agent_status for a `worker-show` result, or None when the worker is gone."""
+    """herdr's agent_status for a `worker-show` result, or None when the worker is gone
+    (no result: Orca no longer knows the dispatch)."""
+    if not show:
+        return None
     if show.get("liveness") in ("exited", "lost"):
         return None
     if show.get("terminalState") in ("released", "closed"):
@@ -143,7 +172,7 @@ class OrcaRuntime(object):
         except HerdrError as e:
             if e.code == "herdr_unavailable":
                 raise
-            return {}
+            return None  # unknown dispatch: gone, so the watcher revives it
 
     def as_agent(self, name, entry, show):
         return {"name": name, "pane_id": entry["handle"], "terminal_id": entry["handle"],
@@ -197,9 +226,7 @@ class OrcaRuntime(object):
             args += ["--model", argv[argv.index("--model") + 1]]
         result = run_orca(args)
         entry = {"dispatch": result["dispatchId"], "handle": result["terminal"], "cwd": place}
-        registry = load_registry()
-        registry[name] = entry
-        save_registry(registry)
+        update_registry(lambda r: r.__setitem__(name, entry))
         registered()
         return self.as_agent(name, entry, {"activity": "working", "liveness": "live"})
 
@@ -265,9 +292,7 @@ class OrcaRuntime(object):
         except HerdrError as e:
             if e.code == "herdr_unavailable":
                 raise  # already settled or stopped: forget it anyway
-        registry = load_registry()
-        registry.pop(name, None)
-        save_registry(registry)
+        update_registry(lambda r: r.pop(name, None))
 
     def worktree_create(self, repo, branch, label):
         """An Orca worktree: worker-start only runs in a workspace Orca knows."""
