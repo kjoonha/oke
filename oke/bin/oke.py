@@ -272,8 +272,13 @@ def repo_key(path):
     if p.returncode != 0:
         if not os.path.isdir(cwd):
             raise ValueError("not a folder: %s" % path)
-        if os.path.exists(os.path.join(cwd, ".git")):  # dubious ownership, a broken .git
-            raise ValueError("git refuses %s: %s" % (path, err.decode("utf-8", "replace").strip()))
+        up = os.path.realpath(cwd)
+        while True:  # a repository git refuses (dubious ownership, a broken .git) is no plain folder
+            if os.path.exists(os.path.join(up, ".git")):
+                raise ValueError("git refuses %s: %s" % (path, err.decode("utf-8", "replace").strip()))
+            if os.path.dirname(up) == up:
+                break
+            up = os.path.dirname(up)
         return normalize_path(os.path.join(os.path.realpath(cwd), ".git"))
     common = native_path(out.decode("utf-8", "replace").strip())
     if not os.path.isabs(common):
@@ -1711,7 +1716,8 @@ def status_locked(args, herdr_info):
             cls = "disconnected"
         result["jobs"][name] = {"phase": job.get("phase"), "class": cls, "agents": job_agents,
                                 "pm_seq": pm_job_report(name)[0],
-                                "pm_job_dir": pm_job_dir(name).replace("\\", "/")}
+                                "pm_job_dir": pm_job_dir(name).replace("\\", "/"),
+                                "lane": job.get("lane"), "direct": bool(job.get("direct"))}
 
     here = runtime().whoami()
     recorded = state["orchestrator"].get("pane")
@@ -2284,8 +2290,9 @@ def job_locked(args):
         except ValueError as e:
             return fail(str(e))
         direct = not os.path.exists(key)
-        busy = [n for n, j in state["jobs"].items()
-                if direct and j.get("repo") == key and j.get("phase") not in DONE_PHASES]
+        busy = [n for n, j in state["jobs"].items()  # research changes nothing: never in the way
+                if direct and not args.research and j.get("repo") == key and j.get("lane") != "research"
+                and j.get("phase") not in DONE_PHASES]
         if busy:
             return fail("job %s already changes %s in place (no git, no undo): finish or archive it first"
                         % (busy[0], args.repo))

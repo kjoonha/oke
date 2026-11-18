@@ -214,7 +214,7 @@ The user gave the job up. Ignore any later wait result for that job's children (
 
 The user wants to know something; nothing changes. Read `$OKE_HOME/jobs/<job>/intake.md` and the wikis as for a plan. Investigate yourself; for a wide search call Agent with `subagent_type: Explore`, never a worker pane. Do not change the repository. Put what will still hold next time into the repository wiki (see **Wiki**). Report `done`: the findings go in 요약 (answer the question the user asked, with `file:line` where it helps; the report may be long), sources and open points after it. There is no plan, review or merge.
 
-### Direct job (`direct: true` in `$OKE status`)
+### Direct job (`direct: true` in the assignment and in `$OKE status` under `jobs`)
 
 The folder is not a git repository: the files change in place. Plan and execute as usual, with these differences. No worktree, and `commit: no` for the worker. Skip the git steps (`job tree`, `add`, `commit`, `status`). The reviewer's assignment has no `commit:` or `tree:`; its 이번 지시 lists the files the worker reported as changed or new, to read whole. On `verdict: pass` report `done` (files changed, the worker's 검증 출력): there is no merge, and `$OKE job merge` refuses one.
 

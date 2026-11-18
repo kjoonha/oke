@@ -107,7 +107,8 @@ def duplicates(wiki, page, text, old, merging=()):
 
 
 def stamp(now=None):
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now))
+    """UTC, so `logged` compares times that never go backwards (summer time, a new zone)."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
 
 
 def log(wiki, job, note, now=None):

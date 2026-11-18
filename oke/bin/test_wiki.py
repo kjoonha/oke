@@ -3,7 +3,7 @@ import io
 import json
 import os
 
-from test_oke import SpawnBase  # noqa: F401
+from test_oke import J, SpawnBase, help_ok  # noqa: F401
 import oke
 import wiki
 
@@ -136,8 +136,24 @@ class TestWiki(SpawnBase):
     def test_a_folder_git_refuses_is_not_a_direct_job(self):
         folder = self.path("broken")
         os.makedirs(os.path.join(folder, ".git"))
-        with self.assertRaises(ValueError):
-            oke.repo_key(folder)
+        os.makedirs(os.path.join(folder, "src"))
+        for path in (folder, os.path.join(folder, "src")):
+            with self.assertRaises(ValueError):
+                oke.repo_key(path)
+
+    def test_status_says_direct_and_research_may_look_while_a_direct_job_runs(self):
+        folder = self.path("plain")
+        os.makedirs(folder)
+        self.assertEqual(self.cli("job", "new", "calc", "--repo", folder), 0, self.err)
+        self.assertEqual(self.cli("job", "new", "look", "--repo", folder, "--research"), 0, self.err)
+        os.environ["HERDR_ENV"] = "1"
+        os.environ["HERDR_PANE_ID"] = "w7:p1"
+        fake = help_ok()
+        fake["agent list"] = [J({"agents": []})]
+        self.fake(fake)
+        self.assertEqual(self.cli("status"), 0, self.err)
+        jobs = json.loads(self.out)["jobs"]
+        self.assertEqual((jobs["calc"]["direct"], jobs["look"]["lane"]), (True, "research"))
 
     def test_the_shared_wiki_catches_git_bash_paths_and_ignores_a_root(self):
         if not oke.os.name == "nt":

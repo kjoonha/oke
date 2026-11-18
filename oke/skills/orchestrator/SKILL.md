@@ -62,7 +62,7 @@ The OKe mod in every agent does this without you:
 1. Settle the repository path (ask only if it is unclear). Any folder works: outside git the job is direct (below). Never do the work yourself, and never start your own subagent for it: every request, also a small one or a question about a codebase, becomes a job.
    - The user wants to know something, not to change anything (investigate, explain, analyze, compare): a research job. Add `--research` to `job new`.
 2. Pick a job name: lowercase letters, digits and `-`, at most 24 characters, starting with a letter. It must differ from every open job.
-3. `$OKE job new <job> --repo <path>`. It prints `job_dir`, `repo`, `pm_dir`, `pm_job_dir`, `pm_agent`, `wiki`, `shared_wiki`. Use these values as they are; do not build the paths yourself. `direct: true` (the folder is not a git repository): tell the user in one line that the files there change in place, with no branch, no merge question and no undo. Do not suggest `git init`. If it fails because the name or its branch already exists, pick another name (add `-2`).
+3. `$OKE job new <job> --repo <path>`. It prints `job_dir`, `repo`, `pm_dir`, `pm_job_dir`, `pm_agent`, `wiki`, `shared_wiki`. Use these values as they are; do not build the paths yourself. `direct: true` (the folder is not a git repository): write `direct: true` into every assignment of the job (its 이번 지시), and tell the user in one line that the files there change in place, with no branch, no merge question and no undo. Do not suggest `git init`. If it fails because the name or its branch already exists, pick another name (add `-2`).
 4. Interview the user until the request is clear (see "Interview"). `$OKE job phase <job> planning` refuses a job whose interview is not done.
 5. Write `<job_dir>/intake.md`:
 
@@ -212,7 +212,7 @@ When the user gives a job up: give the PM `kind: cancel` (steps 2, 4, 5 and 6 of
 | PM reports the plan (`report_done`, phase `planning`) | Read `<job_dir>/plan.md`. If its 검증 명령 section is empty, send it back (`kind: plan`, say why). Otherwise it becomes a `plan` item | `awaiting_approval` |
 | User approves | Assign `kind: execute`; its 이번 지시 names the lane (`lane: <lane>`) | `working` |
 | User wants changes | Assign `kind: plan` with the requested changes | `planning` |
-| PM reports research done, or a direct job's work reviewed (`report_done`, phase `working` or `reviewing`) | Nothing to merge. Tell the user the report's 요약 (for research, its findings; offer the report path), update the shared wiki from 배운 것 (공용), then `$OKE job archive <job>` | `done` |
+| PM reports research done, or a direct job's work reviewed (`report_done`, phase `working` or `reviewing`) | Nothing to merge. Tell the user the report's 요약 (for research, its findings; offer the report path), update the shared wiki from 배운 것 (공용), `$OKE job phase <job> done` (refused: see "Shared wiki"), then `$OKE job archive <job>` | |
 | PM reports work reviewed (`report_done`, phase `working` or `reviewing`) | Lane `trivial`: the user approved the merge with the plan, so assign `kind: merge` now and tell the user in one line. Otherwise it becomes a `merge` item | `merging` for `trivial`, else `awaiting_merge` |
 | User says merge | Assign `kind: merge` | `merging` |
 | PM reports merged (`report_done`, phase `merging`) | Update the shared wiki from the report's 배운 것 (공용) (see "Shared wiki"), `$OKE job phase <job> done`, `$OKE job archive <job>`, tell the user what changed | |
