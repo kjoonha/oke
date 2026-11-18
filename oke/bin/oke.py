@@ -796,7 +796,8 @@ def check_once(agent, report, seq):
     '?'-prefixed provisional verdict that only counts once the agent stays idle."""
     job_dir = os.path.dirname(os.path.dirname(report))
     job = load_state()["jobs"].get(os.path.basename(job_dir), {})
-    archived = not job and os.path.dirname(job_dir) == os.path.join(oke_home(), "jobs")
+    archived = not job and (normalize_path(os.path.dirname(job_dir))
+                            == normalize_path(os.path.join(oke_home(), "jobs")))
     if archived or job.get("cancelled"):
         return "cancelled"  # the user gave the job up: nothing about its children matters
     header = read_header(report)
@@ -1929,9 +1930,8 @@ def merge_job(job):
     if not current or (base and current != base):
         return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
                     % (current or "a detached HEAD", base))
-    with locked():  # a cancel since the checks above: merge nothing
-        if load_state()["jobs"].get(job, {}).get("phase") != "merging":
-            return fail("job %s left phase merging (cancelled?): not merged" % job)
+    if left_merging(job):
+        return 1
     pre = git_out(main, "rev-parse", "HEAD")[1]
     result = subprocess.run(["git", "-C", main, "merge", "--no-ff", "--no-edit",
                              "-m", "Merge branch 'oke/%s'" % job, tip],
@@ -1986,6 +1986,15 @@ def pending_tree(main):
             pass
 
 
+def left_merging(job):
+    """A cancel since merge_job's first checks: merge nothing."""
+    with locked():
+        if load_state()["jobs"].get(job, {}).get("phase") == "merging":
+            return False
+    fail("job %s left phase merging (cancelled?): not merged" % job)
+    return True
+
+
 def commit_direct(job, info, main, review, reviewed):
     """A job without a worktree: commit its reviewed, uncommitted changes in the main
     checkout and record that commit as the job's merge, so it is verified like one.
@@ -2004,6 +2013,8 @@ def commit_direct(job, info, main, review, reviewed):
     if tree != reviewed:
         return fail("the changes in %s are not the ones the review covered (tree %s, reviewed %s): give "
                     "the reviewer a new instruction with `tree: %s`, then merge" % (main, tree, reviewed, tree))
+    if left_merging(job):
+        return 1
     pre = git_out(main, "rev-parse", "HEAD")[1]
     for argv in (ADD, ["commit", "-q", "-m", "oke: %s" % job]):
         result = subprocess.run(["git", "-C", main] + argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

@@ -350,6 +350,14 @@ class TestWaitRevives(ReviveBase):
         self.assertEqual(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
                                        poll=0, max_polls=30), "deliver_failed")
 
+    def test_an_archived_job_ends_its_childs_wait_with_a_slash_path(self):
+        state = oke.load_state()
+        del state["jobs"]["fix-a"]
+        oke.save_state(state)
+        self.fake({})
+        report = os.path.join(self.child_dir, "report.md").replace("\\", "/")  # as `job new` prints it
+        self.assertEqual(oke.wait_loop("fix-a-w1", report, 2, poll=0, max_polls=2), "cancelled")
+
     def test_one_failed_look_is_not_a_death(self):
         self.fake({"agent get": [E("agent_not_found"), AGENT("working")]})
         self.assertIsNone(oke.wait_loop("fix-a-w1", os.path.join(self.child_dir, "report.md"), 2,
