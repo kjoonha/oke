@@ -90,6 +90,76 @@ class TestWiki(SpawnBase):
         self.assertEqual(self.cli("job", "archive", "fix-b"), 0, self.err)
         self.assertNotIn("curate", self.out)
 
+    def test_merging_a_page_may_repeat_its_lines(self):
+        self.assertEqual(self.page("a.md", "- run make test before every single commit\n"), 0, self.err)
+        self.assertEqual(self.page("b.md", "- run make test before every single commit\n"), 1)
+        self.assertEqual(self.page("b.md", "- run make test before every single commit\n", "new",
+                                   "--merging", "a.md"), 0, self.err)
+
+    def test_a_page_without_history_is_not_due_at_once(self):
+        path = self.write("home/wiki/r/old.md", "- written long before usage was kept\n")
+        os.utime(path, (1, 1))
+        self.assertEqual(wiki.prune(self.dir, False), [])
+        self.assertEqual(wiki.prune(self.dir, False, wiki.time.time() + 31 * wiki.DAY), ["old.md"])
+
+    def test_done_needs_a_log_line_of_this_job_not_of_an_earlier_one(self):
+        folder = self.path("plain")
+        os.makedirs(folder)
+        self.assertEqual(self.cli("job", "new", "calc", "--repo", folder), 0, self.err)
+        self.assertEqual(self.cli("job", "new", "calc2", "--repo", folder), 1)  # one direct job at a time
+        self.advance("calc", "working")
+        self.logged("calc")
+        self.assertEqual(self.cli("job", "phase", "calc", "done"), 0, self.err)
+        self.assertEqual(self.cli("job", "archive", "calc"), 0, self.err)
+        self.assertEqual(self.cli("job", "new", "calc", "--repo", folder), 0, self.err)
+        state = oke.load_state()
+        state["jobs"]["calc"]["created"] += 2  # the old line is now older than the job
+        oke.save_state(state)
+        self.assertEqual(self.cli("interview", "calc", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
+        for step in ("planning", "awaiting_approval", "working"):
+            self.assertEqual(self.cli("job", "phase", "calc", step), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "calc", "done"), 1)
+        self.assertIn("has not recorded", self.err)
+
+    def test_a_direct_jobs_lessons_wait_for_a_passing_review(self):
+        folder = self.path("plain")
+        os.makedirs(folder)
+        self.assertEqual(self.cli("job", "new", "calc", "--repo", folder), 0, self.err)
+        src = self.write("src.md", "- a fact about the calculator code\n")
+        args = ("wiki", "write", "calc.md", "--job", "calc", "--from", src, "--base", "new", "--note", "n")
+        self.assertEqual(self.cli(*args), 1)
+        self.write("home/jobs/calc/calc-rv/report.md", "type: done\nseq: 1\n---\nverdict: changes\n")
+        self.assertEqual(self.cli(*args), 1)
+        self.write("home/jobs/calc/calc-rv/report.md", "type: done\nseq: 1\n---\nverdict: pass\n")
+        self.assertEqual(self.cli(*args), 0, self.err)
+
+    def test_a_folder_git_refuses_is_not_a_direct_job(self):
+        folder = self.path("broken")
+        os.makedirs(os.path.join(folder, ".git"))
+        with self.assertRaises(ValueError):
+            oke.repo_key(folder)
+
+    def test_the_shared_wiki_catches_git_bash_paths_and_ignores_a_root(self):
+        if not oke.os.name == "nt":
+            self.skipTest("drive letters")
+        bash = "/" + self.repo[0].lower() + self.repo[2:].replace("\\", "/")
+        src = self.write("src.md", "- see %s/Makefile\n" % bash)
+        self.assertEqual(self.cli("wiki", "write", "x.md", "--shared", "--from", src, "--base", "new",
+                                  "--note", "n"), 1)
+        state = oke.load_state()
+        state["repos"]["c:/.git"] = {}
+        oke.save_state(state)
+        src = self.write("src.md", "- deploys use c:/tools only on a Monday\n")
+        self.assertEqual(self.cli("wiki", "write", "y.md", "--shared", "--from", src, "--base", "new",
+                                  "--note", "n"), 0, self.err)
+
+    def test_a_curation_job_resets_the_count(self):
+        for i in range(oke.CURATE_EVERY):
+            wiki.log(self.dir, "job%d" % i, "none")
+        wiki.log(self.dir, "tidy", "curated: merged two pages")
+        self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+        self.assertNotIn("curate", self.out)
+
     def test_report_entries(self):
         text = "## 요약\n- a.md: ok\n## wiki\n- `b.md`: ok\n* c.md: wrong - stale flag\n- d.md: unused\n## 배운 것\n- e.md: ok\n"
         self.assertEqual(wiki.report_entries(text),

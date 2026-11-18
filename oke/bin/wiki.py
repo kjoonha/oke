@@ -90,13 +90,14 @@ def facts(text):
     return [l.strip(" -*\t") for l in (text or "").splitlines() if len(l.strip(" -*\t")) >= DUP_MIN]
 
 
-def duplicates(wiki, page, text, old):
-    """New lines of `text` that reword a line already on another page."""
+def duplicates(wiki, page, text, old, merging=()):
+    """New lines of `text` that reword a line already on another page (not on the
+    pages being merged into it, which are archived next)."""
     known = set(facts(old))
     fresh = [l for l in facts(text) if l not in known]
     found = []
     for other in pages(wiki):
-        if other == page:
+        if other == page or other in merging:
             continue
         for line in facts(_read(os.path.join(wiki, other))):
             for new in fresh:
@@ -105,17 +106,25 @@ def duplicates(wiki, page, text, old):
     return found
 
 
+def stamp(now=None):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(now))
+
+
 def log(wiki, job, note, now=None):
-    line = "%s %s: %s\n" % (time.strftime("%Y-%m-%d", time.localtime(now)), job, " ".join(note.split()))
+    line = "%s %s: %s\n" % (stamp(now), job, " ".join(note.split()))
     with io.open(os.path.join(wiki, "log.md"), "a", encoding="utf-8", newline="\n") as f:
         f.write(line)
 
 
-def logged(wiki, job):
-    return bool(re.search(r"(?m)^\S+ %s: " % re.escape(job), _read(os.path.join(wiki, "log.md")) or ""))
+def logged(wiki, job, since=None):
+    """A log.md line for `job` written at or after `since` (a time): an earlier job of
+    the same name does not count."""
+    after = stamp(since) if since else ""
+    return any(m.group(1) >= after for m in re.finditer(
+        r"(?m)^(\S+) %s: " % re.escape(job), _read(os.path.join(wiki, "log.md")) or ""))
 
 
-def write(wiki, page, text, base, job, note, dup_ok=False, now=None):
+def write(wiki, page, text, base, job, note, dup_ok=False, now=None, merging=()):
     """Replace `page` with `text`. `base` is what `read` printed: a page changed since
     (or never read) is refused, so an edit always starts from the current text."""
     check_name(page)
@@ -130,7 +139,7 @@ def write(wiki, page, text, base, job, note, dup_ok=False, now=None):
         raise WikiError("%s would be %d characters, over its cap of %d: merge or drop entries "
                         "(on this page or by archiving another) and write it again"
                         % (page, len(text), cap(page)))
-    dups = [] if dup_ok or page == "index.md" else duplicates(wiki, page, text, old)
+    dups = [] if dup_ok or page == "index.md" else duplicates(wiki, page, text, old, merging)
     if dups:
         raise WikiError("these lines repeat another page; strengthen that line instead, or pass "
                         "--dup-ok if they really differ:\n" + "\n".join(
@@ -180,22 +189,18 @@ def record(wiki, entries, now=None):
         save_usage(wiki, usage)
 
 
-def created(wiki, page, u):
-    if "created" in u:
-        return u["created"]
-    try:
-        return os.path.getmtime(os.path.join(wiki, page))
-    except OSError:
-        return time.time()
-
-
 def status(wiki, now=None):
     now = time.time() if now is None else now
     usage = load_usage(wiki)
     out = []
+    new = [p for p in pages(wiki) if p not in usage]
+    for page in new:  # written before usage was kept: its 30 days start now
+        usage[page] = {"created": now}
+    if new:
+        save_usage(wiki, usage)
     for page in pages(wiki):
-        u = usage.get(page, {})
-        last = u.get("used") or created(wiki, page, u)
+        u = usage[page]
+        last = u.get("used") or u.get("created", now)
         idle = int((now - last) // DAY)
         out.append({"page": page, "chars": len(_read(os.path.join(wiki, page)) or ""), "cap": PAGE_CHARS,
                     "uses": u.get("uses", 0), "idle_days": idle, "wrong": u.get("wrong", 0),

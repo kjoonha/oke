@@ -266,12 +266,14 @@ def repo_key(path):
     try:
         p = subprocess.Popen(["git", "rev-parse", "--git-common-dir"], cwd=cwd,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, _ = p.communicate()
+        out, err = p.communicate()
     except (OSError, ValueError):
-        raise ValueError("not a folder: %s" % path)
+        raise ValueError("not a folder: %s" % path)  # git missing, or no such folder
     if p.returncode != 0:
         if not os.path.isdir(cwd):
             raise ValueError("not a folder: %s" % path)
+        if os.path.exists(os.path.join(cwd, ".git")):  # dubious ownership, a broken .git
+            raise ValueError("git refuses %s: %s" % (path, err.decode("utf-8", "replace").strip()))
         return normalize_path(os.path.join(os.path.realpath(cwd), ".git"))
     common = native_path(out.decode("utf-8", "replace").strip())
     if not os.path.isabs(common):
@@ -2282,6 +2284,11 @@ def job_locked(args):
         except ValueError as e:
             return fail(str(e))
         direct = not os.path.exists(key)
+        busy = [n for n, j in state["jobs"].items()
+                if direct and j.get("repo") == key and j.get("phase") not in DONE_PHASES]
+        if busy:
+            return fail("job %s already changes %s in place (no git, no undo): finish or archive it first"
+                        % (busy[0], args.repo))
         branch = "refs/heads/oke/" + args.slug
         if not direct and subprocess.call(["git", "-C", native_path(args.repo), "show-ref", "--verify",
                                            "--quiet", branch]) == 0:
@@ -2290,7 +2297,7 @@ def job_locked(args):
         # the branch the main checkout is on now: `job merge` merges only into it
         base = None if direct else git_out(native_path(os.path.dirname(key)), "symbolic-ref", "-q", "--short", "HEAD")[1]
         state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None,
-                                    "phase_at": time.time(), "base": base or None}
+                                    "phase_at": time.time(), "created": time.time(), "base": base or None}
         if args.research:
             state["jobs"][args.slug]["lane"] = "research"
         if direct:
@@ -2330,7 +2337,8 @@ def job_locked(args):
             # a job merged without a worktree has no ledger merge row: only OKe's merges are held
             return fail("job %s: its merge is %s, run `oke job verify` (or merge again) first"
                         % (args.slug, merge_state(args.slug)[0]))
-        if args.phase == "done" and info.get("repo") and not wiki.logged(wiki_dir(info["repo"]), args.slug):
+        if args.phase == "done" and info.get("repo") and not wiki.logged(wiki_dir(info["repo"]), args.slug,
+                                                                         info.get("created")):
             return fail("job %s: the PM has not recorded what it taught. It writes the lessons with "
                         "`oke wiki write --job %s`, or `oke wiki log --job %s --note none`"
                         % (args.slug, args.slug, args.slug))
@@ -2443,6 +2451,13 @@ def wiki_verified(job, info):
 
 
 def cmd_wiki(args):
+    if args.action == "read":
+        return wiki_locked(args)
+    with locked():  # .usage.json is read-modify-write, and `job archive` writes it too
+        return wiki_locked(args)
+
+
+def wiki_locked(args):
     state = load_state()
     label = "curate"
     if args.job:
@@ -2479,10 +2494,12 @@ def cmd_wiki(args):
                 keys = set(state["repos"]) | set(j.get("repo") for j in state["jobs"].values() if j.get("repo"))
                 for key in keys:
                     checkout = os.path.dirname(key).lower()
-                    if checkout and checkout in low:
+                    bash = re.sub(r"^([a-z]):/", r"/\1/", checkout)  # c:/x as Git Bash writes it: /c/x
+                    if len(checkout) > 3 and (checkout in low or bash in low):
                         return fail("the shared wiki holds what is true beyond one repository: drop the "
                                     "path %s" % os.path.dirname(key))
-            print(json.dumps(wiki.write(where, args.page, text, args.base, label, args.note, args.dup_ok)))
+            print(json.dumps(wiki.write(where, args.page, text, args.base, label, args.note, args.dup_ok,
+                                        merging=args.merging or ())))
             return 0
         if args.action == "log":
             wiki.log(where, label, args.note)
@@ -2722,6 +2739,7 @@ def build_parser():
             p.add_argument("--base", required=True, help="the base `oke wiki read` printed (new for a new page)")
             p.add_argument("--note", required=True, help="what changed, for log.md")
             p.add_argument("--dup-ok", action="store_true", help="lines that only look like another page's")
+            p.add_argument("--merging", action="append", help="a page merged into this one (archived next)")
         if name == "log":
             p.add_argument("--note", required=True)
         if name == "prune":

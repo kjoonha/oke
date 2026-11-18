@@ -235,6 +235,8 @@ Knowledge that holds beyond one repository (company rules, shared tools, how dep
 
 Change it only through `$OKE wiki ... --shared`, the same way a PM changes its wiki (see the PM's **Wiki**: `wiki read`, then `wiki write --from <file> --base <base> --note ..`). Add what a PM report's 배운 것 (공용) states and you believe, and what the user tells you to keep; add `--job <job>` for a job's lessons. Fix a page that turned out wrong. No repository names or paths: facts about one repository stay in that repository's wiki, which its PM keeps (`wiki write --shared` refuses a repository's path). The PM's rules for what to write hold here too.
 
+`job phase done` refuses a job whose PM did not log it in the wiki: give the PM `kind: answer` with "Record the wiki lines for job <job> (`oke wiki log --job <job> --note none` if it taught nothing), then report done again." Never write a repository wiki yourself.
+
 Curation: when `job archive` prints a `curate:` line, or the user asks to clean up a wiki, give that repository's PM `kind: curate` (it needs a job: `job new <name> --repo <path> --research`, no interview needed: run `$OKE interview <job> --goal 1 --constraints 1 --criteria 1`, then phase `working`). For the shared wiki do the same yourself with `--shared`.
 
 ## Autonomy
