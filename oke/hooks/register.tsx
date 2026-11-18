@@ -209,7 +209,11 @@ export function gitDenied(command: string): string | null {
     + 'Merges go through `oke job merge`; if you really need it, report a question instead.' : null
 }
 
-const REVIEWER_GIT = /^\s*git(?:\s+(?:-C\s+\S+|-c\s+\S+|--no-pager))*\s+(?:diff|log|show|status)\b/
+// no `-c`: `-c core.pager=<cmd>` and the like run commands
+const REVIEWER_GIT = /^\s*git(?:\s+(?:-C\s+\S+|--no-pager))*\s+(?:diff|log|show|status)\b/
+// Tools a reviewer gets at all (the launch's ROLE_TOOLS["reviewer"]); anything else, Agent and MCP tools included, is refused.
+const REVIEWER_TOOLS = ['Read', 'Grep', 'Glob', 'Skill', 'ToolSearch', 'TaskCreate', 'TaskUpdate', 'TaskList',
+  'WebFetch', 'WebSearch', 'Bash', 'Edit', 'Write']
 // Inside Orca a reviewer also reports with `orca orchestration send` (worker_done) or asks
 // with `ask`; a quoted orca path reads as "" here.
 const REVIEWER_ORCA = /^\s*(?:\S*orca(?:\.exe)?|"")\s+orchestration\s+(?:send|ask)\b/
@@ -217,7 +221,8 @@ const REVIEWER_ORCA = /^\s*(?:\S*orca(?:\.exe)?|"")\s+orchestration\s+(?:send|as
 /** The role and folder an OKe first or revive prompt names, else null: the mod knows
  * them from the first turn on, before `oke spawn` has recorded the agent. */
 export function promptRole(text: string): { role: string, folder: string } | null {
-  const m = /oke:(pm|worker|reviewer) skill\.[\s\S]*?assignment file (?:is )?(\S+?\.md)/.exec(text)
+  // a path may hold spaces (a user folder): it ends at assignment.md
+  const m = /oke:(pm|worker|reviewer) skill\.[\s\S]*?assignment file (?:is )?(\S.*?assignment\.md)/.exec(text)
   return m ? { role: m[1]!, folder: m[2]!.replace(/[\\/][^\\/]*$/, '') } : null
 }
 
@@ -225,15 +230,21 @@ export function promptRole(text: string): { role: string, folder: string } | nul
  * The reviewer's launch flags say the same; this holds where no flags reach the agent
  * (Orca starts it itself). It writes only its own folder (report, board). */
 export function reviewerDenied(tool: string, input: any, own: string | null): string | null {
-  if (tool === 'Edit' || tool === 'Write' || tool === 'NotebookEdit') {
+  if (!REVIEWER_TOOLS.includes(tool)) return `OKe reviewers do not use ${tool}: read, review and report.`
+  if (tool === 'Edit' || tool === 'Write') {
     const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-    const target = norm(String(input.file_path ?? input.notebook_path ?? ''))
-    if (own && target.startsWith(norm(own) + '/')) return null
+    const target = norm(String(input.file_path ?? ''))
+    // an absolute path without `..`: a prefix check is then enough
+    const plain = /^([a-z]:)?\//.test(target) && !/(^|\/)\.\.(\/|$)/.test(target)
+    if (own && plain && target.startsWith(norm(own) + '/')) return null
     return 'OKe reviewers change nothing: write only report.md and board.md in your own folder.'
   }
   if (tool !== 'Bash') return null
-  const cmd = unquoted(String(input.command ?? ''))
-  if ((REVIEWER_GIT.test(cmd) || REVIEWER_ORCA.test(cmd)) && !/[;&|`<>]|\$\(|--output/.test(cmd)) return null
+  const raw = String(input.command ?? '')
+  const cmd = unquoted(raw)
+  // `$`, backticks and line breaks act inside double quotes too, so they count before unquoting
+  const safe = !/[`$\r\n]/.test(raw) && !/[;&|<>]|--output|--ext-diff/.test(cmd)
+  if (safe && (REVIEWER_GIT.test(cmd) || REVIEWER_ORCA.test(cmd))) return null
   return 'OKe reviewers run only read-only git: git diff, log, show or status, one command, without --output.'
 }
 

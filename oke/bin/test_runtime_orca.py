@@ -48,6 +48,7 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(s(settled), "idle")  # seen live: a PM done with its task
         self.assertIsNone(s(dict(WORKING, liveness="exited")))
         self.assertIsNone(s(dict(WORKING, terminalState="released")))
+        self.assertIsNone(s(None))  # Orca no longer knows the dispatch
 
     def test_start_runs_a_kept_open_worker_with_the_model_and_records_it(self):
         self.fake({"orchestration worker-start": [OK(STARTED)]})
@@ -86,6 +87,22 @@ class TestOrcaRuntime(OrcaBase):
         with self.assertRaises(oke.HerdrError) as c:
             self.rt.agent("pm-toy")
         self.assertEqual(c.exception.code, "agent_not_found")
+
+    def test_an_unknown_dispatch_is_gone(self):
+        self.register()
+        self.fake({"orchestration worker-show": [ERR("dispatch_not_found")]})
+        self.assertEqual(self.rt.agents(), [])
+
+    def test_the_registry_survives_parallel_writers(self):
+        import threading
+        names = ["w%d" % i for i in range(8)]
+        threads = [threading.Thread(target=runtime_orca.update_registry,
+                                    args=(lambda r, n=n: r.__setitem__(n, {"dispatch": n}),)) for n in names]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sorted(runtime_orca.load_registry()), names)
 
     def test_orca_down_is_unavailable_not_dead(self):
         self.register()

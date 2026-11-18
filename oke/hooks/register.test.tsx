@@ -462,7 +462,11 @@ test('a reviewer writes only its own folder and runs only read-only git', async 
   const call = (e: any) => $.tool.call(e as any) as Promise<any>
   for (const bad of [{ tool: 'Edit', file_path: '/repo/calc.py' }, { tool: 'Write', file_path: '/oke/jobs/j/w1x/report.md' },
     { tool: 'Bash', command: 'python -c "open(1)"' }, { tool: 'Bash', command: 'git diff --output=x' },
-    { tool: 'Bash', command: 'git diff && rm -rf .' }, { tool: 'Bash', command: 'git apply p.diff' }]) {
+    { tool: 'Bash', command: 'git diff && rm -rf .' }, { tool: 'Bash', command: 'git apply p.diff' },
+    { tool: 'Bash', command: 'git -c core.pager=sh log' }, { tool: 'Bash', command: 'git diff "$(touch x)"' },
+    { tool: 'Bash', command: 'git status\nrm -rf src' }, { tool: 'Write', file_path: '/oke/jobs/j/w1/../../../repo/a.py' },
+    { tool: 'Write', file_path: 'w1/report.md' }, { tool: 'Agent', prompt: 'edit calc.py' },
+    { tool: 'mcp__fs__write', path: '/repo/a' }]) {
     expect((await call(bad)).deny).toMatch(/^OKe reviewers/)
   }
   for (const ok of [{ tool: 'Write', file_path: '\\oke\\jobs\\j\\w1\\report.md' }, { tool: 'Read', file_path: '/repo/a' },
@@ -479,6 +483,8 @@ test('the first or revive prompt names the role and folder', () => {
     .toEqual({ role: 'reviewer', folder: 'C:/oke/jobs/j/j-rv' })
   expect(promptRole('You were restarted after a crash. Use the oke:pm skill. Re-read your assignment file '
     + '/h/repos/r/pm/assignment.md and your board.md')).toEqual({ role: 'pm', folder: '/h/repos/r/pm' })
+  expect(promptRole('Use the oke:worker skill. Your assignment file is C:/Users/A B/.oke/jobs/j/j-w1/assignment.md. Read'))
+    .toEqual({ role: 'worker', folder: 'C:/Users/A B/.oke/jobs/j/j-w1' })
   expect(promptRole('please use the oke skill')).toBeNull()
 })
 
