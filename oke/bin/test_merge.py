@@ -182,6 +182,13 @@ class TestMainCheckout(MergeBase):
         self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
         self.assertIn("not clean", self.err)
 
+    def test_python_caches_left_by_a_verify_do_not_block(self):
+        self.write("toy/__pycache__/calc.cpython-311.pyc", "x")
+        self.write("toy/.pytest_cache/v", "x")
+        self.order(self.report("fix-a-w1", 1), self.review(1))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+        self.assertTrue(self.merged())
+
     def test_a_merge_in_progress_is_left_alone(self):
         # the user's own merge, half resolved: OKe must neither merge nor abort it
         self.git(self.repo, "checkout", "-q", "-b", "side")

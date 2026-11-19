@@ -28,6 +28,17 @@ class TestRuntimeCommands(SpawnBase):
         self.assertIn("agent focus pm-a", joined)
         self.assertIn("pane close w1:p4", joined)
 
+    def test_close_takes_several_panes_and_errors_name_the_runtime(self):
+        self.fake({"pane close": [J({})]})
+        self.assertEqual(self.cli("close", "w1:p4", "w1:p5"), 0, self.err)
+        joined = [" ".join(a) for a in self.argv()]
+        self.assertIn("pane close w1:p4", joined)
+        self.assertIn("pane close w1:p5", joined)
+        self.assertEqual(json.loads(self.out)["closed"], ["w1:p4", "w1:p5"])
+        self.fake({"pane close": [E("pane_not_found", "pane w1:p9 not found")]})
+        self.assertEqual(self.cli("close", "w1:p9"), 1)
+        self.assertIn("herdr error: pane_not_found", self.err)
+
     def test_place_splits_next_to_a_pane_in_the_repo(self):
         self.fake({"pane list": [J({"panes": [{"pane_id": "w1:p1", "cwd": "/elsewhere"},
                                               {"pane_id": "w2:p3", "cwd": self.repo}]})],

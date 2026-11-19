@@ -535,8 +535,9 @@ def cmd_rt(args):
         # herdr shows the pane itself; a bg session needs the user to run the hint
         out = {"agent": args.agent, "attached": hint is None, "hint": hint}
     elif args.rt == "close":
-        rt.close(args.place)
-        out = {"closed": args.place}
+        for place in args.place:  # a PM names the worker and the reviewer in one call (seen live)
+            rt.close(place)
+        out = {"closed": args.place if len(args.place) > 1 else args.place[0]}
     elif args.rt == "place":
         repo = native_path(args.repo)
         if not os.path.isdir(repo):  # herdr opens a missing --cwd in the home folder
@@ -1977,6 +1978,8 @@ def merge_job(job):
     if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
         return fail("a merge is already in progress in %s: leave it to the user" % main)
     code, dirty = git_out(main, "status", "--porcelain")
+    # untracked Python caches never block a merge: every verify run leaves them (seen live)
+    dirty = "\n".join(l for l in dirty.splitlines() if not BYPRODUCT.match(l))
     if code != 0 or dirty:
         return fail("the main checkout %s is not clean:\n%s" % (main, dirty))
     base = info.get("base")
@@ -2008,6 +2011,9 @@ def merge_job(job):
     print(json.dumps({"result": "conflict", "job": job, "files": files}))
     return 2
 
+
+# An untracked byproduct line of `git status --porcelain`: Python caches only.
+BYPRODUCT = re.compile(r"^\?\? (.*/)?(__pycache__/|\.pytest_cache/|[^/]*\.py[co])$")
 
 # Tracked changes always go in; a new file only when the PM staged it (`git add`): only
 # the PM can tell the job's new files from what its checks left (seen live: `add -A`
@@ -3018,7 +3024,7 @@ def build_parser():
         if name == "keys":
             p.add_argument("keys", nargs="+")
         if name == "close":
-            p.add_argument("place")
+            p.add_argument("place", nargs="+")
         if name == "place":
             p.add_argument("repo", help="the repository's path")
         if name == "worktree":
@@ -3052,7 +3058,11 @@ def main(argv=None):
         return fail(str(e))
     except HerdrError as e:
         if e.code != "herdr_unavailable":
-            return fail("herdr error: %s" % e)
+            try:
+                who = runtime().name
+            except Exception:  # noqa: BLE001 - only the message's first word
+                who = "runtime"
+            return fail("%s error: %s" % (who, e))
         # exit 2: herdr itself is unreachable. Callers must not read this as "agent gone".
         sys.stderr.write("herdr unavailable: %s\n" % e.message)
         return 2
