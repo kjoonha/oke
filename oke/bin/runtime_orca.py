@@ -388,6 +388,12 @@ class OrcaRuntime(object):
         except HerdrError as e:
             if NO_WORKER not in e.message:
                 raise
+            old = entry["dispatch"]
+            show = self.show(entry, name)
+            if entry["dispatch"] != old:  # a follow-up started meanwhile: mail that one
+                mutate(["orchestration", "send", "--to", "dispatch:" + entry["dispatch"],
+                        "--subject", "OKe", "--body", text], show)
+                return True
             # After the Orca app or the agent's claude died, Orca can no longer continue the
             # dispatch, though worker-show still reads it settled (seen live). The agent is
             # gone: forget it, so the wait reports `gone` and a revive may start it again.
@@ -396,7 +402,8 @@ class OrcaRuntime(object):
             except HerdrError as e2:
                 if e2.code in FATAL:
                     raise
-            update_registry(lambda r: r.pop(name, None))
+            # only this dispatch's row: a revive may have registered a new one meanwhile
+            update_registry(lambda r: r.pop(name) if (r.get(name) or {}).get("dispatch") == old else None)
             raise HerdrError("agent_not_found", "%s is gone: Orca cannot continue its dispatch" % name)
         return True
 
