@@ -719,7 +719,6 @@ def cmd_spawn(args):
         return fail("bad agent name %r: must match %s" % (agent, AGENT_NAME.pattern))
     if role not in ("pm", "worker", "reviewer"):
         return fail("bad role %r" % role)
-    clear_hold(agent)
     config = load_config()
     kind = str(header.get("kind") or "").strip().lower() or ("claude" if role == "pm" else config["agents"].get(role, "claude"))
     if kind not in KINDS:
@@ -741,6 +740,8 @@ def cmd_spawn(args):
         job = state["jobs"].get(header.get("job"))
         if job is None:
             return fail("unknown job %r in assignment" % header.get("job"))
+        if job.get("held"):
+            return fail("job %s is on hold: start none of its agents" % header["job"])
         if job["phase"] not in ("working", "reviewing", "merging"):
             return fail("plan not approved: job %s is in phase %s" % (header["job"], job["phase"]))
         over = role == "reviewer" and over_rounds(header["job"], job, config, int(header["seq"]))
@@ -792,8 +793,12 @@ def cmd_spawn(args):
     kind, cli_args = agent_command(kind, role, config, oke_home(), plugin_root(),
                                    os.path.dirname(path), args.resume)
     try:
-        info = runtime().start(agent, pane, cli_args, first_prompt(kind, role, path),
-                           trusted_folder, save_record, kind)
+        prompt = first_prompt(kind, role, path)
+        held = held_jobs(state, key) if role == "pm" else []
+        if held:  # a fresh PM never saw the hold notices of an earlier one
+            prompt += (" The user put these jobs on hold: %s. Do not work on them until a message "
+                       "says one is back." % ", ".join(held))
+        info = runtime().start(agent, pane, cli_args, prompt, trusted_folder, save_record, kind)
     except DialogError as e:
         # The record stays (the user may answer the dialog); a revive closes the old
         # pane only when it knows this terminal.
@@ -1347,20 +1352,10 @@ def relaunch(state, role, key, name, record, folder):
         raise
 
 
-def clear_hold(agent):
-    """The user's hold on a dead PM (the orchestrator's `$OKE_HOME/hold/<pm>`) ends when
-    the PM is started or revived again, or has no open job left."""
-    try:
-        os.remove(os.path.join(oke_home(), "hold", agent))
-    except OSError:
-        pass
-
-
 def revive(name):
     """Bring a dead OKe agent back in its own session. Returns revived, alive, busy
     (another process is reviving it), not_needed, failed or unknown. Only an explicit
     request revives: nothing in OKe restarts a dead agent by itself."""
-    clear_hold(name)
     state = load_state()
     found = find_target(state, name)
     if found is None:
@@ -1972,6 +1967,8 @@ def merge_job(job):
     abort after a conflict must only ever undo OKe's own merge."""
     state = load_state()
     info = state["jobs"].get(job)
+    if info and info.get("held"):
+        return fail("job %s is on hold: no merge until it is back" % job)
     if not info:
         return fail("unknown job: %s" % job)
     if info.get("size") == "research" or info.get("direct"):
@@ -2453,6 +2450,8 @@ def job_locked(args):
     if args.slug not in state["jobs"]:
         return fail("unknown job: %s" % args.slug)
     if args.action == "phase":
+        if state["jobs"][args.slug].get("held"):
+            return fail("job %s is on hold: leave it until a message says it is back" % args.slug)
         if args.phase not in PHASES:
             return fail("bad phase %r: one of %s" % (args.phase, ", ".join(PHASES)))
         now = state["jobs"][args.slug].get("phase")
@@ -2551,8 +2550,6 @@ def job_locked(args):
                        "left of it, and write no report for it." % args.slug)
         info.update(phase="failed", phase_at=time.time(), cancelled=True)
         save_state(state)  # nothing may start for this job from here on
-        if pm.get("agent") and not open_jobs(state, info.get("repo")):
-            clear_hold(pm["agent"])
         return 0
     if args.action == "archive":
         src = os.path.join(home, "jobs", args.slug)
@@ -2909,8 +2906,8 @@ def pending_item(name, job):
     """What job `name` waits on the user (or the orchestrator) for, or None. The key
     names this very item, so a deferral ends by itself when seq or phase moves on."""
     phase = job.get("phase")
-    if phase in DONE_PHASES:
-        return None
+    if phase in DONE_PHASES or job.get("held"):
+        return None  # a held job asks nothing until `job unhold`
     seq, report, mtime = pm_job_report(name)
     rtype = report.get("type") if seq is not None and report.get("seq") == seq else None
     if seq is None and phase in ("planning", "working", "reviewing", "merging"):

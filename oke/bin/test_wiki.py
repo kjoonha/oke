@@ -184,8 +184,6 @@ class TestWiki(SpawnBase):
         state["repos"][key] = {"pm": {"agent": pm, "pane": "w1:p9"}}
         oke.save_state(state)
         self.fake({})
-        hold = os.path.join(oke.oke_home(), "hold", pm)
-        self.write(hold, "user held the dead PM")
         self.assertEqual(self.cli("send", pm, "Job fix-a: assignment updated (seq 2)"), 0, self.err)
         self.assertEqual(self.cli("send", pm, "Job fix-b: go on"), 0, self.err)
         self.write(os.path.join(oke.inbox_dir("fix-a-w1"), "1.txt"), "Assignment updated")
@@ -196,7 +194,6 @@ class TestWiki(SpawnBase):
         self.assertEqual(texts[0], "Job fix-b: go on")  # the PM still hears of the cancel itself
         self.assertTrue(texts[1].startswith("Job fix-a was cancelled"))
         self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
-        self.assertFalse(os.path.exists(hold))  # its last open job is gone: the hold ends
 
     def test_a_held_job_is_left_alone_until_it_comes_back(self):
         key = oke.repo_key(self.repo)
@@ -221,6 +218,11 @@ class TestWiki(SpawnBase):
         self.assertEqual(len(texts), 1)  # the old assignment notice went; the hold notice stays
         self.assertTrue(texts[0].startswith("Job fix-a: the user put it on hold"))
         self.assertEqual(oke.board_tree(state, [])[0]["jobs"][0]["held"], True)
+        # nothing asks for it, and a PM that missed the notice cannot move it on
+        self.assertIsNone(oke.pending_item("fix-a", state["jobs"]["fix-a"]))
+        self.assertEqual(self.cli("job", "phase", "fix-a", "planning"), 1)
+        self.assertIn("on hold", self.err)
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
         # with fix-b gone too, nothing keeps the PM alive
         state["jobs"]["fix-b"]["phase"] = "done"
         oke.save_state(state)
