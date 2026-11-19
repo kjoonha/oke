@@ -39,12 +39,13 @@ Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`.
 4. `orchestrator_conflict` set: say which pane already runs the orchestrator, stop.
 5. Run `$OKE status --claim`.
 6. `state_recovered` true: tell the user state.json was unreadable and saved as `state.json.bad`.
-7. For each job with class `disconnected`, and each entry of `orphan_job_dirs`, ask: resume / archive / leave. Ask once per PM, not once per job: the jobs of one repository share their PM.
+7. For each job with class `disconnected`, and each entry of `orphan_job_dirs`, ask: resume / archive / hold. Ask once per PM, not once per job: the jobs of one repository share their PM. Jobs with class `held` are not asked: name them in one line ("On hold: <jobs>. Say so to continue or drop one.").
    - resume: `$OKE revive <pm agent> --reset`. It restarts the PM in its own session and tells it to re-read its assignments. `revived` or `alive`: go on. `unknown` (never spawned): spawn it as in "Give the job to the PM". `failed`: show the last line of `$OKE_HOME/events.log` to the user.
+   - hold: `$OKE job hold <job> --reason "<why, one line>"` for each of them (see "On hold"). An `orphan_job_dirs` entry has no job to hold: leave it.
    - archive: `$OKE job cancel <job>`, then `$OKE job archive <job>`; an `orphan_job_dirs` entry has no job to cancel: only `job archive`. If `job cancel` refuses (its merge is under way or in main), tell the user why and leave that job. Never delete a worktree or branch. Report the worktree path and `git -C <worktree> status --short | wc -l`.
 8. For each PM (`status.repos`) that has a job with class `alive`, start its wait (see "Wait").
 9. Run the queue (see "Queue"). Jobs with class `awaiting_user` come back there.
-10. Started by `/oke:resume` (everything was down, for example after a reboot): do not ask at step 7. Run `$OKE resume-all` instead; it revives every PM that has an unfinished job, and each PM restarts its own children when it comes back. Then steps 8 and 9.
+10. Started by `/oke:resume` (everything was down, for example after a reboot): do not ask at step 7. Run `$OKE resume-all` instead; it revives every PM that has an unfinished job (a held job does not count), and each PM restarts its own children when it comes back. Name the held jobs as step 7 does. Then steps 8 and 9.
 
 ## Watching
 
@@ -170,7 +171,7 @@ When it finishes, read the first line of its output. If the user speaks before i
 | `bad_report <job> ...` | `$OKE send <pm> --job <job> "Job <job>: rewrite <pm_job_dir>/report.md in the required format."` and wait again |
 | `idle_no_report again <job>`, `bad_report again <job> ...` | The nudge did not help. Do not nudge again: the wait now leaves that job alone and `pending` lists it as `silent`. Wait again (for the other jobs), then run the queue |
 | `no_jobs` | The PM has no open job left. Do not start its wait again |
-| `gone` | The PM died. OKe does not restart an agent by itself. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / cancel (see "Giving up") / hold. Hold: write the file `$OKE_HOME/hold/<pm>` (one line: why), do not start that PM's wait again and do not ask again until the user brings it up; a new wait would only end in `gone` again and repeat the same question. OKe deletes that file itself when the PM is started or revived again, or has no open job left |
+| `gone` | The PM died. OKe does not restart an agent by itself. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / cancel (see "Giving up") / hold (`$OKE job hold <job>` for each of them, see "On hold"; with no open job left, do not start that PM's wait again) |
 | `superseded` | A newer wait replaced this one. Do nothing: do not run the queue and do not start a wait |
 | `{"deliver": {"to": ..., "text": ...}}` | The PM runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again. Not a result to show the user |
 | `deliver_failed` | Messages for the PM could not be typed in three times in a row. Tell the user and offer to go to the PM pane (`$OKE attach <pm>`); the messages stay in `$OKE_HOME/inbox/<pm>/`. Start the wait again after the user says the pane is free |
@@ -195,7 +196,7 @@ Run the queue after every wait result except `superseded`, after the start proce
    - `plan`: the plan approval question (see "Flow").
    - `merge`: the merge question (see "Flow").
 4. When the user picks hold, "look myself" or "discuss in the PM pane": `$OKE job defer <job>`. Do not ask a deferred item again unless the user brings it up. It stops being deferred by itself when its job moves on.
-5. Repeat until no item is left whose `deferred` is false. Then make sure each PM with open jobs has a wait running, except a PM the user put on hold after `gone` (a file `$OKE_HOME/hold/<pm>` exists).
+5. Repeat until no item is left whose `deferred` is false. Then make sure each PM with open jobs has a wait running (a held job is not open).
 
 "Give the PM" always means the steps in "Give the job to the PM": a new `seq`, then `$OKE send`, then the wait.
 
@@ -206,6 +207,15 @@ A job is the unit of cancelling. When the user gives a job up, cancel it yoursel
 1. `$OKE job cancel <job>`. It closes the job first (phase `failed`, so nothing starts for it again), then closes its worker and reviewer, and drops the messages about it still queued for the PM and its children. It refuses a job whose merge is already in main: tell the user, and let the PM finish it (verify, or roll back when the user says so). Its output lists `not_closed` children (the runtime did not answer): run `job cancel` again before the archive; if they stay, tell the user which panes to close. `refused` children (the runtime would not close them, such as a worktree group root): do not run cancel again; tell the user which panes to close.
 2. `job cancel` also queued "Job <job> was cancelled" for the PM: a running PM gets it from its wait, a dead one is not started for it. If no wait of that PM runs, start one (see "Wait") so the notice goes in.
 3. `$OKE job archive <job>`. Its worktree and branch stay; tell the user where. Archive also closes the job's children the PM left open; a `not_closed:` line names the ones it could not close: tell the user which panes to close (after the archive nothing retries them). Archive prints its folder before it closes anything: if the call times out after that line, the archive itself is done.
+
+## On hold
+
+The user sets a job aside without giving it up, often after a crash ("leave it for now", "do the other thing first"). A held job stays in `$OKE status` (class `held`, `held` is the reason) with its worktree and branch, but nothing runs for it: OKe does not revive its PM or agents for it, the PM's wait does not watch it, and the start procedure does not ask about it again.
+
+- Hold: `$OKE job hold <job> --reason "<why>"`. It closes the job's worker and reviewer, drops its queued messages, and tells the PM to leave the job alone. It refuses a job that is done or merging.
+- Continue ("continue <job>", "pick up <job> again"): `$OKE job unhold <job>`. It prints `pm` and `pm_job_dir`. Then, if the PM is dead (`$OKE status`: `repos[..].pm` is `dead`), `$OKE revive <pm> --reset`: it tells the PM to re-read that job's assignment. If the PM is alive: `$OKE send <pm> --job <job> "Job <job>: back from hold. Re-read <pm_job_dir>/assignment.md and continue it."`. Then start its wait.
+- Drop it for good: cancel and archive it as in "Giving up".
+- A new job's name must differ from a held job too: `job new` refuses one that exists.
 
 ## Flow
 
@@ -257,7 +267,7 @@ With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merg
 ## Rules
 
 - Write a decision or a user instruction into the assignment or intake file the moment you get it. Your context can be compacted; the files cannot.
-- After compaction, run `$OKE status` and the queue, and start a wait for each PM with open jobs, except a PM on hold (`$OKE_HOME/hold/<pm>` exists).
+- After compaction, run `$OKE status` and the queue, and start a wait for each PM with open jobs (a held job is not open).
 - `$OKE attach <agent>` prints `"attached": false` and a `hint` when OKe cannot show the agent itself (background sessions, Orca workers): give the user that hint. `$OKE keys` fails there too: for a dialog, offer only that command.
 - Inside Orca, Orca also wakes you with its own messages from your PMs (`worker_done`, `escalation`). They only wake you: read the PM's report.md and handle it as the wait would, then start the wait again. Never answer them with `orca orchestration` commands. OKe needs Orca's Agent Orchestration setting on, and the OKe plugin installed in Claude Code (Orca starts the agents itself, without OKe's `--plugin-dir`).
 - Do not send text starting with `/` through `$OKE send` from Git Bash; it is rewritten into a Windows path.

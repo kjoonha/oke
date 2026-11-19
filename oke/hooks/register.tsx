@@ -630,8 +630,9 @@ function moodOf(tree: BoardRepo[], working: boolean): Mood {
   const jobs = tree.flatMap(r => r.jobs)
   if (jobs.some(j => j.pending)) return 'wave'
   const all = nodes(tree)
-  const open = jobs.filter(j => j.phase !== 'done' && j.phase !== 'failed')
-  if (open.some(j => j.agents.some(n => n.status === 'dead')) || (tree.some(r => r.pm?.status === 'dead') && open.length)) {
+  // a held job's dead agents and PM are expected: they are not stuck
+  const open = jobs.filter(j => j.phase !== 'done' && j.phase !== 'failed' && !j.held)
+  if (open.some(j => j.agents.some(n => n.status === 'dead')) || tree.some(r => r.pm?.status === 'dead' && r.jobs.some(j => open.includes(j)))) {
     return 'stop'
   }
   return working || all.some(n => n.status === 'working') ? 'conduct' : 'rest'
@@ -757,7 +758,9 @@ export const register: Register = on => {
         <Text wrap="truncate-end">
           <Text dimColor>{role === 'orchestrator' ? (r.last ? '└ ' : '├ ') : '• '}</Text>
           {job.job}
-          <Text color={job.pending ? 'yellow' : 'cyan'}>{` ${job.pending ? 'waiting' : STEPS[step(job)] ?? 'done'}`}</Text>
+          {job.held
+            ? <Text dimColor>{' on hold'}</Text>
+            : <Text color={job.pending ? 'yellow' : 'cyan'}>{` ${job.pending ? 'waiting' : STEPS[step(job)] ?? 'done'}`}</Text>}
           {cost ? <Text dimColor>{` ${usd(cost)}`}</Text> : ''}
           {agentDots(job)}
         </Text>
@@ -960,13 +963,14 @@ export const register: Register = on => {
         if (finished.includes(job)) continue
         const [label, labelColor] = LEDGER[job.merge] ?? ['', undefined]
         const at = step(job)
-        const hurt = job.agents.some(n => n.status === 'dead')
+        const hurt = !job.held && job.agents.some(n => n.status === 'dead')
         cards.push(
           <Box flexDirection="column" borderStyle="round" borderColor={job.pending ? INK.yellow : hurt ? INK.red : INK.lavender} paddingX={1} marginTop={1}>
             <Text>
               <Text bold color={INK.white}>{job.job}</Text>
               {job.size ? <Text color={INK.dim}>{` · ${job.size}`}</Text> : ''}
               {label ? <Text color={labelColor}>{`  ${label}`}</Text> : ''}
+              {job.held ? <Text color={INK.dim}>{'  ⏸ on hold'}</Text> : ''}
             </Text>
             <Text>
               {STEPS.flatMap((s, i) => [

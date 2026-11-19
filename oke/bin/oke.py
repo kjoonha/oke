@@ -1147,12 +1147,24 @@ def pm_jobs_note(state, key):
     paths = [os.path.join(pm_job_dir(j), "assignment.md").replace("\\", "/")
              for j in sorted(open_jobs(state, key))]
     paths = [p for p in paths if os.path.exists(p)]
-    return (" Then re-read the assignment of each open job: %s." % ", ".join(paths)) if paths else ""
+    note = (" Then re-read the assignment of each open job: %s." % ", ".join(paths)) if paths else ""
+    held = held_jobs(state, key)
+    if held:
+        note += (" The user put these jobs on hold: %s. Do not work on them or start their agents "
+                 "until a message says one is back." % ", ".join(held))
+    return note
 
 
 def open_jobs(state, key=None):
+    """Jobs with work left. A job the user put on hold (`job hold`) is not one: nothing
+    revives or watches agents for it until `job unhold`."""
     return [n for n, j in state["jobs"].items()
-            if j.get("phase") not in DONE_PHASES and (key is None or j.get("repo") == key)]
+            if j.get("phase") not in DONE_PHASES and not j.get("held") and (key is None or j.get("repo") == key)]
+
+
+def held_jobs(state, key=None):
+    return sorted(n for n, j in state["jobs"].items()
+                  if j.get("held") and j.get("phase") not in DONE_PHASES and (key is None or j.get("repo") == key))
 
 
 def all_keys(state):
@@ -1215,7 +1227,7 @@ def should_be_alive(state, role, key, name, record):
     if role == "pm":
         return bool(open_jobs(state, key))
     job = state["jobs"].get(record.get("job"))
-    if not job or job.get("phase") in DONE_PHASES:
+    if not job or job.get("phase") in DONE_PHASES or job.get("held"):
         return False
     folder = agent_folder(role, name, key, record)
     assignment = read_header(os.path.join(folder, "assignment.md")) or {}
@@ -1498,7 +1510,7 @@ def board_tree(state, agents, only_key=None):
             waiting = pending_item(job, info)
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
                          "size": info.get("size"), "direct": bool(info.get("direct")),
-                         "merge": merge_state(job)[0],
+                         "merge": merge_state(job)[0], "held": bool(info.get("held")),
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None})
         tree.append({"repo": repo_name(key), "key": key, "jobs": jobs,
                      "pm": board_node("pm", pm["agent"], key, pm, agents) if pm and pm.get("agent") else None})
@@ -1525,7 +1537,7 @@ def board_lines(tree):
         for job in repo["jobs"]:
             if job["phase"] in DONE_PHASES:
                 continue
-            out.append((1, "job %s: %s%s" % (job["job"], job["phase"],
+            out.append((1, "job %s: %s%s%s" % (job["job"], job["phase"], ", on hold" if job.get("held") else "",
                                              ", waiting for you (%s)" % job["pending"] if job["pending"] else "")))
             for n in job["agents"]:
                 agent(n, 2)
@@ -1767,7 +1779,9 @@ def status_locked(args, herdr_info):
         children = read_children(key) if key else {}
         job_agents = dict((a, "alive" if a in names else "dead")
                           for a, rec in children.items() if rec.get("job") == name)
-        if job.get("phase") in ("awaiting_approval", "awaiting_merge"):
+        if job.get("held") and job.get("phase") not in DONE_PHASES:
+            cls = "held"
+        elif job.get("phase") in ("awaiting_approval", "awaiting_merge"):
             cls = "awaiting_user"
         elif result["repos"].get(key, {}).get("pm") == "alive":
             cls = "alive"
@@ -1776,7 +1790,8 @@ def status_locked(args, herdr_info):
         result["jobs"][name] = {"phase": job.get("phase"), "class": cls, "agents": job_agents,
                                 "pm_seq": pm_job_report(name)[0],
                                 "pm_job_dir": pm_job_dir(name).replace("\\", "/"),
-                                "size": job.get("size"), "direct": bool(job.get("direct"))}
+                                "size": job.get("size"), "direct": bool(job.get("direct")),
+                                "held": job.get("held")}
 
     here = runtime().whoami()
     recorded = state["orchestrator"].get("pane")
@@ -1878,6 +1893,20 @@ def cmd_job(args):
         if code:
             return code
         return cancel_children(args.slug, load_state()["jobs"][args.slug].get("repo"))
+    if args.action == "hold":
+        with locked():
+            code = job_locked(args)
+        if code:
+            return code
+        info = load_state()["jobs"][args.slug]
+        cancel_children(args.slug, info.get("repo"))  # closes its agents, drops its queued mail
+        pm = (load_state()["repos"].get(info.get("repo")) or {}).get("pm") or {}
+        if pm.get("agent"):
+            # after the drop, so it stays; a PM that is down reads it when it comes back
+            queue_mail(pm["agent"], "oke", "Job %s: the user put it on hold. Stop working on it, "
+                       "start none of its agents, leave its worktree, and write no report for it "
+                       "until a message says it is back." % args.slug)
+        return 0
     if args.action == "verify":
         if bool(args.command) == bool(args.accept):
             return fail("give the 검증 명령, or --accept \"<why>\" when the user accepts the merge as it is")
@@ -2487,6 +2516,27 @@ def job_locked(args):
         state["jobs"][args.slug]["deferred"] = item["key"]
         save_state(state)
         return 0
+    if args.action == "hold":
+        info = state["jobs"][args.slug]
+        if info.get("phase") in DONE_PHASES or info.get("phase") == "merging"                 or merge_state(args.slug)[0] in ("unverified", "verified"):
+            return fail("job %s is %s: only a job before its merge can go on hold"
+                        % (args.slug, info.get("phase")))
+        info.update(held=args.reason or "the user", held_at=time.time())
+        save_state(state)
+        return 0
+    if args.action == "unhold":
+        info = state["jobs"][args.slug]
+        if not info.get("held"):
+            return fail("job %s is not on hold" % args.slug)
+        info.pop("held", None)
+        info.pop("held_at", None)
+        save_state(state)
+        if info.get("repo"):
+            drop_job_mail(args.slug, info["repo"])  # the hold notice, if the PM has not read it
+        pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}
+        print(json.dumps({"job": args.slug, "pm": pm.get("agent"),
+                          "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/")}))
+        return 0
     if args.action == "cancel":
         info = state["jobs"][args.slug]
         merged = merge_state(args.slug)[0]
@@ -2913,6 +2963,10 @@ def build_parser():
     phase.add_argument("slug")
     phase.add_argument("phase")
     job_sub.add_parser("cancel", help="the user gave the job up: close it, its children and its mail").add_argument("slug")
+    hold = job_sub.add_parser("hold", help="the user sets the job aside: its agents close, nothing revives them")
+    hold.add_argument("slug")
+    hold.add_argument("--reason")
+    job_sub.add_parser("unhold", help="bring a held job back").add_argument("slug")
     archive = job_sub.add_parser("archive")
     archive.add_argument("slug")
     defer = job_sub.add_parser("defer")

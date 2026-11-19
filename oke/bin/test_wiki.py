@@ -198,6 +198,45 @@ class TestWiki(SpawnBase):
         self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
         self.assertFalse(os.path.exists(hold))  # its last open job is gone: the hold ends
 
+    def test_a_held_job_is_left_alone_until_it_comes_back(self):
+        key = oke.repo_key(self.repo)
+        self.assertEqual(self.cli("job", "new", "fix-b", "--repo", self.repo), 0, self.err)
+        oke.write_json_atomic(oke.children_path(key), {"fix-a-w1": {"job": "fix-a", "role": "worker"}})
+        pm = "pm-" + oke.repo_name(key)
+        state = oke.load_state()
+        state["repos"][key] = {"pm": {"agent": pm, "pane": "w1:p9"}}
+        oke.save_state(state)
+        self.fake({})
+        self.assertEqual(self.cli("send", pm, "Job fix-a: assignment updated (seq 2)"), 0, self.err)
+        self.assertEqual(self.cli("job", "hold", "fix-a", "--reason", "later"), 0, self.err)
+        state = oke.load_state()
+        self.assertEqual(state["jobs"]["fix-a"]["held"], "later")
+        self.assertEqual(oke.open_jobs(state, key), ["fix-b"])
+        self.assertEqual(oke.held_jobs(state, key), ["fix-a"])
+        # its own agents are not revived; the PM is, for fix-b, and hears to leave fix-a alone
+        self.assertFalse(oke.should_be_alive(state, "worker", key, "fix-a-w1", {"job": "fix-a"}))
+        self.assertTrue(oke.should_be_alive(state, "pm", key, pm, {}))
+        self.assertIn("on hold: fix-a", oke.pm_jobs_note(state, key))
+        texts = [t.split(": ", 1)[1] for _, t in oke.inbox_messages(pm)]
+        self.assertEqual(len(texts), 1)  # the old assignment notice went; the hold notice stays
+        self.assertTrue(texts[0].startswith("Job fix-a: the user put it on hold"))
+        self.assertEqual(oke.board_tree(state, [])[0]["jobs"][0]["held"], True)
+        # with fix-b gone too, nothing keeps the PM alive
+        state["jobs"]["fix-b"]["phase"] = "done"
+        oke.save_state(state)
+        self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, pm, {}))
+        # back: open again, and the unread hold notice is dropped
+        self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["pm"], pm)
+        state = oke.load_state()
+        self.assertNotIn("held", state["jobs"]["fix-a"])
+        self.assertEqual(oke.open_jobs(state, key), ["fix-a"])
+        self.assertEqual(oke.inbox_messages(pm), [])
+        self.assertEqual(self.cli("job", "unhold", "fix-a"), 1)
+        state["jobs"]["fix-a"]["phase"] = "done"
+        oke.save_state(state)
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 1)  # a finished job has nothing to hold
+
     def test_cancel_closes_only_panes_still_the_childs_and_never_a_done_job(self):
         key = oke.repo_key(self.repo)
         oke.write_json_atomic(oke.children_path(key), {

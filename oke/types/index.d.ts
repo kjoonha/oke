@@ -25,6 +25,8 @@ export type BoardJob = {
   size?: string
   /** What the job waits on the user for (`oke pending` kind), null when nothing or deferred. */
   pending: string | null
+  /** The user put it on hold (`oke job hold`): nothing runs for it until it is back. */
+  held?: boolean
 }
 
 export type BoardRepo = { repo: string; key: string; pm: BoardNode | null; jobs: BoardJob[] }
