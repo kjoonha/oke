@@ -501,7 +501,10 @@ ROLE_TOOLS = {
     "worker": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "TaskStop",
                "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch"],
     # Edit and Write so a pane reviewer can write its report.md and board.md (seen live: it
-    # could not); its permission rules still allow writes only under the OKe folders
+    # could not); its permission rules still allow writes only under the OKe folders.
+    # shortcut: a repo's own .claude settings allowing Edit would merge in (project,local
+    # sources); the mod's reviewerDenied is then the guard. Add a deny rule for the repo
+    # path to launch_args if a repo ever does that.
     "reviewer": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "TaskCreate", "TaskUpdate",
                  "TaskList", "WebFetch", "WebSearch"],
 }
