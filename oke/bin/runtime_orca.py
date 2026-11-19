@@ -431,7 +431,11 @@ class OrcaRuntime(object):
     def close(self, place):
         name, entry = self.entry_of(place)
         if not entry:
-            return  # a folder: never started
+            if os.path.isdir(place):
+                return  # a folder: never started
+            # a wrong place (an agent name, a follow-up's terminal) must not read as closed
+            raise HerdrError("agent_not_found", "no open OKe agent in %s: already closed (job cancel "
+                             "closes a job's children), or not a pane spawn printed" % place)
         show = self.show(entry, name)  # stop the follow-up that runs now, not the dispatch it replaced
         try:
             stopped = mutate(["orchestration", "worker-stop", "--dispatch", entry["dispatch"]], show)

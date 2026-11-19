@@ -232,6 +232,110 @@ class TestWiki(SpawnBase):
         self.assertEqual(self.cli("job", "cancel", "fix-a"), 1)  # merged, not verified yet
         self.assertIn("in main", self.err)
 
+    def test_archive_closes_the_panes_a_pm_left_open(self):
+        # live: a PM skipped closing a finished job's worker; archive closes it
+        key = oke.repo_key(self.repo)
+        oke.write_json_atomic(oke.children_path(key), {
+            "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p1", "terminal": "t1"},
+            "fix-b-w1": {"job": "fix-b", "role": "worker", "pane": "w1:p3", "terminal": "t3"}})
+        closed = []
+
+        class Stub(object):
+            def place_id(self, pane):
+                return {"w1:p1": "t1", "w1:p3": "t3"}[pane]
+
+            def close(self, pane):
+                closed.append(pane)
+        state = oke.load_state()
+        state["jobs"]["fix-a"]["phase"] = "done"
+        oke.save_state(state)
+        real = oke.runtime
+        oke.runtime = lambda *a: Stub()
+        try:
+            self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+        finally:
+            oke.runtime = real
+        self.assertEqual(closed, ["w1:p1"])  # only this job's child
+        self.assertIsNone(oke.read_children(key)["fix-a-w1"]["pane"])
+        self.assertNotIn("fix-a", oke.load_state()["jobs"])
+
+    def test_archive_keeps_what_an_outage_left_and_still_succeeds(self):
+        key = oke.repo_key(self.repo)
+        oke.write_json_atomic(oke.children_path(key), {
+            "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p1", "terminal": "t1"}})
+
+        class Stub(object):
+            def place_id(self, pane):
+                return None  # herdr answers None in an outage too
+
+            def place_exists(self, pane):
+                raise oke.HerdrError("herdr_unavailable", "down")
+        real = oke.runtime
+        oke.runtime = lambda *a: Stub()
+        try:
+            self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+        finally:
+            oke.runtime = real
+        self.assertIn("not_closed: fix-a-w1", self.out)
+        self.assertEqual(oke.read_children(key)["fix-a-w1"]["pane"], "w1:p1")
+        self.assertNotIn("fix-a", oke.load_state()["jobs"])
+
+    def test_archive_reports_a_pane_that_refuses_to_close(self):
+        key = oke.repo_key(self.repo)
+        oke.write_json_atomic(oke.children_path(key), {
+            "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p1", "terminal": "t1"}})
+
+        class Stub(object):
+            def place_id(self, pane):
+                return "t1"
+
+            def close(self, pane):
+                raise oke.HerdrError("confirmation_required", "worktree group root")
+        real = oke.runtime
+        oke.runtime = lambda *a: Stub()
+        try:
+            self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+        finally:
+            oke.runtime = real
+        self.assertIn("not_closed: fix-a-w1", self.out)
+        self.assertEqual(oke.read_children(key)["fix-a-w1"]["pane"], "w1:p1")
+
+    def test_a_pane_gone_meanwhile_clears_its_record(self):
+        key = oke.repo_key(self.repo)
+        oke.write_json_atomic(oke.children_path(key), {
+            "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p1", "terminal": "t1"}})
+
+        class Stub(object):
+            def place_id(self, pane):
+                return "t1"
+
+            def close(self, pane):
+                raise oke.HerdrError("pane_not_found", "gone")
+        real = oke.runtime
+        oke.runtime = lambda *a: Stub()
+        try:
+            self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
+        finally:
+            oke.runtime = real
+        out = json.loads(self.out.strip().splitlines()[-1])
+        self.assertEqual((out["not_closed"], out["refused"]), ([], []))
+        self.assertIsNone(oke.read_children(key)["fix-a-w1"]["pane"])
+
+    def test_archive_survives_a_broken_cleanup(self):
+        class Stub(object):
+            def place_id(self, pane):
+                raise ValueError("bad json from the runtime")
+        key = oke.repo_key(self.repo)
+        oke.write_json_atomic(oke.children_path(key), {
+            "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p1", "terminal": "t1"}})
+        real = oke.runtime
+        oke.runtime = lambda *a: Stub()
+        try:
+            self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+        finally:
+            oke.runtime = real
+        self.assertNotIn("fix-a", oke.load_state()["jobs"])
+
     def test_report_entries(self):
         text = "## 요약\n- a.md: ok\n## wiki\n- `b.md`: ok\n* c.md: wrong - stale flag\n- d.md: unused\n## 배운 것\n- e.md: ok\n"
         self.assertEqual(wiki.report_entries(text),

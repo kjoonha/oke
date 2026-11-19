@@ -1859,8 +1859,24 @@ def cmd_job(args):
         if bool(args.command) == bool(args.accept):
             return fail("give the 검증 명령, or --accept \"<why>\" when the user accepts the merge as it is")
         return verify_job(args.slug, args.command, args.accept)  # can take hours
+    key = None
+    if args.action == "archive":
+        key = (load_state()["jobs"].get(args.slug) or {}).get("repo")
     with locked():
-        return job_locked(args)
+        code = job_locked(args)
+    if code == 0 and key:
+        # a PM can forget to close a finished job's worker (seen live): archive does it,
+        # outside the state lock. Best effort: the archive already happened, so its exit
+        # code and printed lines never depend on this (flushed first, in case it hangs).
+        sys.stdout.flush()
+        try:
+            _, left, refused = close_children(args.slug, key)
+            left = left + refused
+        except Exception:  # noqa: BLE001 - cleanup only
+            left = None
+        if left:
+            print("not_closed: %s (the runtime did not close them: tell the user to close them)" % ", ".join(left))
+    return code
 
 
 def latest_report(job_dir, pattern):
@@ -2486,15 +2502,39 @@ CURATE_EVERY = 10  # jobs logged in a wiki since its last curation
 def cancel_children(job, key):
     """After `job cancel` closed the job: close its children's panes and drop its mail,
     outside the state lock (runtime calls and the delivery lock can be slow)."""
-    closed, left = [], []
+    closed, left, refused = close_children(job, key)
+    print(json.dumps({"job": job, "closed": closed, "not_closed": left, "refused": refused,
+                      "dropped_messages": drop_job_mail(job, key) if key else 0}))
+    return 0
+
+
+def close_children(job, key):
+    """Close the panes of `job`'s children that are still theirs: ([closed], [not closed:
+    the runtime did not answer], [refused to close: a retry does not help])."""
+    closed, left, refused = [], [], []
     for name, rec in sorted(read_children(key).items() if key else []):
         if rec.get("job") != job or not rec.get("pane"):
             continue
         try:
             # a pane id comes back after a herdr restart: close it only while it is still this child's
-            if rec.get("terminal") and runtime().place_id(rec["pane"]) == rec["terminal"]:
-                runtime().close(rec["pane"])
+            terminal = runtime().place_id(rec["pane"]) if rec.get("terminal") else None
+            if terminal and terminal == rec["terminal"]:
+                try:
+                    runtime().close(rec["pane"])
+                except HerdrError as e:
+                    if e.code == "registry_locked":
+                        left.append(name)  # a passing lock: a retry closes it
+                        continue
+                    if e.code in ("herdr_unavailable", "agent_not_found", "pane_not_found"):
+                        raise  # an outage, or it went away meanwhile: handled below
+                    # it is still there and refused (a worktree group root): keep its record
+                    refused.append(name)
+                    continue
                 closed.append(name)
+            elif rec.get("terminal") and not terminal:
+                # herdr's place_id answers None in an outage too: ask once more, so an
+                # outage keeps the record (place_exists raises it) and a closed pane drops it
+                runtime().place_exists(rec["pane"])
         except HerdrError as e:
             if e.code == "herdr_unavailable":
                 left.append(name)  # keep its record: `job cancel` again closes it later
@@ -2502,9 +2542,7 @@ def cancel_children(job, key):
         except OSError:
             pass  # already gone
         update_record(rec.get("role") or "worker", key, name, {"pane": None, "terminal": None})
-    print(json.dumps({"job": job, "closed": closed, "not_closed": left,
-                      "dropped_messages": drop_job_mail(job, key) if key else 0}))
-    return 0
+    return closed, left, refused
 
 
 def drop_job_mail(job, key):
