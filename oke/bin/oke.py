@@ -500,8 +500,13 @@ ROLE_TOOLS = {
            "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch", "SendMessage"],
     "worker": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "TaskStop",
                "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch"],
-    "reviewer": ["Bash", "Read", "Glob", "Grep", "Skill", "TaskCreate", "TaskUpdate", "TaskList",
-                 "WebFetch", "WebSearch"],
+    # Edit and Write so a pane reviewer can write its report.md and board.md (seen live: it
+    # could not); its permission rules still allow writes only under the OKe folders.
+    # shortcut: a repo's own .claude settings allowing Edit would merge in (project,local
+    # sources); the mod's reviewerDenied is then the guard. Add a deny rule for the repo
+    # path to launch_args if a repo ever does that.
+    "reviewer": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "TaskCreate", "TaskUpdate",
+                 "TaskList", "WebFetch", "WebSearch"],
 }
 # Always on, whatever the PM writes: built-in tools only (user's choice). MCP servers
 # and plugins come only from the assignment header.
@@ -530,8 +535,26 @@ def cmd_rt(args):
         # herdr shows the pane itself; a bg session needs the user to run the hint
         out = {"agent": args.agent, "attached": hint is None, "hint": hint}
     elif args.rt == "close":
-        rt.close(args.place)
-        out = {"closed": args.place}
+        if len(args.place) == 1:
+            rt.close(args.place[0])
+            out = {"closed": args.place[0]}
+        else:
+            # a PM names the worker and the reviewer in one call (seen live): try each one,
+            # so an "already closed" first one does not hide a second that stayed open
+            closed, failed = [], {}
+            for place in args.place:
+                try:
+                    rt.close(place)
+                    closed.append(place)
+                except HerdrError as e:
+                    if e.code == "herdr_unavailable":
+                        # say what closed before the outage: a retry would call it not found
+                        print(json.dumps({"closed": closed, "failed": failed, "unavailable": e.message},
+                                         ensure_ascii=False))
+                        return 2
+                    failed[place] = str(e)
+            print(json.dumps({"closed": closed, "failed": failed}, ensure_ascii=False))
+            return 1 if failed else 0
     elif args.rt == "place":
         repo = native_path(args.repo)
         if not os.path.isdir(repo):  # herdr opens a missing --cwd in the home folder
@@ -1972,6 +1995,8 @@ def merge_job(job):
     if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
         return fail("a merge is already in progress in %s: leave it to the user" % main)
     code, dirty = git_out(main, "status", "--porcelain")
+    # untracked Python caches never block a merge: every verify run leaves them (seen live)
+    dirty = "\n".join(l for l in dirty.splitlines() if not BYPRODUCT.match(l))
     if code != 0 or dirty:
         return fail("the main checkout %s is not clean:\n%s" % (main, dirty))
     base = info.get("base")
@@ -2003,6 +2028,9 @@ def merge_job(job):
     print(json.dumps({"result": "conflict", "job": job, "files": files}))
     return 2
 
+
+# An untracked byproduct line of `git status --porcelain`: Python caches only.
+BYPRODUCT = re.compile(r"^\?\? (.*/)?(__pycache__/|\.pytest_cache/|[^/]*\.py[co])$")
 
 # Tracked changes always go in; a new file only when the PM staged it (`git add`): only
 # the PM can tell the job's new files from what its checks left (seen live: `add -A`
@@ -3013,7 +3041,7 @@ def build_parser():
         if name == "keys":
             p.add_argument("keys", nargs="+")
         if name == "close":
-            p.add_argument("place")
+            p.add_argument("place", nargs="+")
         if name == "place":
             p.add_argument("repo", help="the repository's path")
         if name == "worktree":
@@ -3047,9 +3075,17 @@ def main(argv=None):
         return fail(str(e))
     except HerdrError as e:
         if e.code != "herdr_unavailable":
-            return fail("herdr error: %s" % e)
-        # exit 2: herdr itself is unreachable. Callers must not read this as "agent gone".
-        sys.stderr.write("herdr unavailable: %s\n" % e.message)
+            try:
+                who = runtime().name
+            except Exception:  # noqa: BLE001 - only the message's first word
+                who = "runtime"
+            return fail("%s error: %s" % (who, e))
+        # exit 2: the runtime itself is unreachable. Callers must not read this as "agent gone".
+        try:
+            who = runtime().name
+        except Exception:  # noqa: BLE001 - only the message's first word
+            who = "runtime"
+        sys.stderr.write("%s unavailable: %s\n" % (who, e.message))
         return 2
 
 
