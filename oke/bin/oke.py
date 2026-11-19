@@ -548,7 +548,10 @@ def cmd_rt(args):
                     closed.append(place)
                 except HerdrError as e:
                     if e.code == "herdr_unavailable":
-                        raise
+                        # say what closed before the outage: a retry would call it not found
+                        print(json.dumps({"closed": closed, "failed": failed, "unavailable": e.message},
+                                         ensure_ascii=False))
+                        return 2
                     failed[place] = str(e)
             print(json.dumps({"closed": closed, "failed": failed}, ensure_ascii=False))
             return 1 if failed else 0
