@@ -55,6 +55,9 @@ class TestOrcaRuntime(OrcaBase):
         self.assertIsNone(s(dict(WORKING, liveness="exited")))  # died mid-task
         self.assertIsNone(s(dict(WORKING, terminalState="released")))
         self.assertIsNone(s(None))  # Orca no longer knows the dispatch
+        # seen live after an Orca app restart: the PM's terminal is gone, the task abandoned
+        self.assertIsNone(s({"state": "abandoned", "stage": "terminal_missing", "liveness": "unverifiable",
+                             "terminalState": "retained"}))
 
     def test_start_runs_a_kept_open_worker_with_the_model_and_records_it(self):
         self.fake({"orchestration worker-start": [OK(STARTED)]})

@@ -173,6 +173,10 @@ def status_of(show):
     (no result: Orca no longer knows the dispatch)."""
     if not show:
         return None
+    # seen live after the Orca app was killed: "The assigned worker terminal is no longer
+    # live after orchestration recovery". Nothing runs the dispatch any more.
+    if show.get("state") == "abandoned" or show.get("stage") == "terminal_missing":
+        return None
     # A settled task waits for the next one: Orca mail starts it as a follow-up dispatch,
     # in the same kept terminal or, when Orca closed that one, in a new terminal on the
     # same session ("send reopens a closed worker"). Liveness then reads "exited" or
