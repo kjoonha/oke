@@ -1507,8 +1507,10 @@ def board_tree(state, agents, only_key=None):
                          "size": info.get("size"), "direct": bool(info.get("direct")),
                          "merge": merge_state(job)[0], "held": bool(info.get("held")),
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None})
-        tree.append({"repo": repo_name(key), "key": key, "jobs": jobs,
-                     "pm": board_node("pm", pm["agent"], key, pm, agents) if pm and pm.get("agent") else None})
+        node = board_node("pm", pm["agent"], key, pm, agents) if pm and pm.get("agent") else None
+        if node and node["status"] == "dead" and not open_jobs(state, key):
+            node["status"] = "off"  # nothing for it to do (its jobs are done or on hold): not stuck
+        tree.append({"repo": repo_name(key), "key": key, "jobs": jobs, "pm": node})
     return tree
 
 

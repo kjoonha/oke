@@ -228,6 +228,7 @@ class TestWiki(SpawnBase):
         state["jobs"]["fix-b"]["phase"] = "done"
         oke.save_state(state)
         self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, pm, {}))
+        self.assertEqual(oke.board_tree(oke.load_state(), [])[0]["pm"]["status"], "off")  # not stuck
         # back: open again, and the unread hold notice is dropped
         self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
         self.assertEqual(json.loads(self.out)["pm"], pm)

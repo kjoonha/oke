@@ -14,8 +14,9 @@ def OK(result):
     return {"stdout": json.dumps({"ok": True, "result": result}), "exit": 0}
 
 
-def ERR(code):
-    return {"stdout": json.dumps({"ok": False, "error": {"code": code, "message": code + " here"}}), "exit": 1}
+def ERR(code, message=None):
+    return {"stdout": json.dumps({"ok": False, "error": {"code": code, "message": message or code + " here"}}),
+            "exit": 1}
 
 
 STARTED = {"dispatchId": "ctx_1", "terminal": "structworker_1", "state": "ready"}
@@ -206,6 +207,20 @@ class TestOrcaRuntime(OrcaBase):
         cmds = [c[:2] for c in self.calls()]
         self.assertEqual(cmds[-3:], [["orchestration", "send"], ["orchestration", "run-use"], ["orchestration", "send"]])
         self.assertIn("run_7", self.calls()[-2])
+
+    def test_a_dispatch_orca_cannot_continue_is_a_gone_agent(self):
+        # seen live after the Orca app was killed: worker-show still reads settled
+        self.register("pm-r-abc123", "ctx_2f", "term_9")
+        msg = ("Dispatch ctx_2f has no worker Orca started that it can continue; start a new worker "
+               "with worker-start. No effects were applied.")
+        self.fake({"orchestration send": [ERR("runtime_error", msg)],
+                   "orchestration worker-release": [OK({})],
+                   "orchestration worker-show": [OK(dict(WORKING, activity="idle"))]})
+        with self.assertRaises(runtime_orca.HerdrError) as c:
+            self.rt.prompt("pm-r-abc123", "OKe inbox: go")
+        self.assertEqual(c.exception.code, "agent_not_found")
+        self.assertNotIn("pm-r-abc123", runtime_orca.load_registry())  # a revive may start it again
+        self.assertIn(["orchestration", "worker-release"], [c[:2] for c in self.calls()])
 
     def test_a_fenced_send_without_a_run_still_fails(self):
         self.register()

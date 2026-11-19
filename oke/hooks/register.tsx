@@ -174,6 +174,7 @@ const STATUS: Record<string, [string, string, string | undefined]> = {
   idle: ['○', 'idle', undefined],
   blocked: ['!', 'blocked', INK.yellow],
   dead: ['✗', 'dead', INK.red],
+  off: ['–', 'off', INK.dim],
 }
 
 /** `oke pending` kinds, as the person reads them. */
