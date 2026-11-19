@@ -205,7 +205,7 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
    3. Worker `question` or `failed`, or the merge conflicts again after the rebase: report `question` for the job with the conflicting files. The user decides.
 5. Update the wiki from the reports' 배운 것 and fix the pages they marked `wrong` (see **Wiki**). What holds beyond this repository goes into your done report's 배운 것 (공용) instead.
 6. Remove the worktree once it is merged: `$OKE worktree --remove <its id>`. First look at `git status --short` there. Changed tracked files: keep the worktree and say so. Untracked files: judge them. Byproducts of builds and checks (caches such as `__pycache__`, compiled files, test logs) do not stop the removal. Anything that looks like work (source, docs, data) keeps the worktree: list those files in your report.
-7. Close the worker and reviewer: `$OKE close <pane>` (the `pane` that `spawn` printed).
+7. Close the worker and reviewer: `$OKE close <pane>` (the `pane` that `spawn` printed). This holds for a job without a worktree too: its worker still has a pane.
 8. Report `done` for the job. If a merge waited for this one, start it now.
 
 ### A cancelled job

@@ -1859,8 +1859,19 @@ def cmd_job(args):
         if bool(args.command) == bool(args.accept):
             return fail("give the 검증 명령, or --accept \"<why>\" when the user accepts the merge as it is")
         return verify_job(args.slug, args.command, args.accept)  # can take hours
+    key = None
+    if args.action == "archive":
+        key = (load_state()["jobs"].get(args.slug) or {}).get("repo")
     with locked():
-        return job_locked(args)
+        code = job_locked(args)
+    if code == 0 and key:
+        # a PM can forget to close a finished job's worker (seen live): archive does it,
+        # outside the state lock; a child the runtime cannot reach now stays open
+        try:
+            close_children(args.slug, key)
+        except (HerdrError, OSError):
+            pass
+    return code
 
 
 def latest_report(job_dir, pattern):
@@ -2486,6 +2497,15 @@ CURATE_EVERY = 10  # jobs logged in a wiki since its last curation
 def cancel_children(job, key):
     """After `job cancel` closed the job: close its children's panes and drop its mail,
     outside the state lock (runtime calls and the delivery lock can be slow)."""
+    closed, left = close_children(job, key)
+    print(json.dumps({"job": job, "closed": closed, "not_closed": left,
+                      "dropped_messages": drop_job_mail(job, key) if key else 0}))
+    return 0
+
+
+def close_children(job, key):
+    """Close the panes of `job`'s children that are still theirs: ([closed], [not closed
+    because the runtime did not answer])."""
     closed, left = [], []
     for name, rec in sorted(read_children(key).items() if key else []):
         if rec.get("job") != job or not rec.get("pane"):
@@ -2502,9 +2522,7 @@ def cancel_children(job, key):
         except OSError:
             pass  # already gone
         update_record(rec.get("role") or "worker", key, name, {"pane": None, "terminal": None})
-    print(json.dumps({"job": job, "closed": closed, "not_closed": left,
-                      "dropped_messages": drop_job_mail(job, key) if key else 0}))
-    return 0
+    return closed, left
 
 
 def drop_job_mail(job, key):
