@@ -535,9 +535,23 @@ def cmd_rt(args):
         # herdr shows the pane itself; a bg session needs the user to run the hint
         out = {"agent": args.agent, "attached": hint is None, "hint": hint}
     elif args.rt == "close":
-        for place in args.place:  # a PM names the worker and the reviewer in one call (seen live)
-            rt.close(place)
-        out = {"closed": args.place if len(args.place) > 1 else args.place[0]}
+        if len(args.place) == 1:
+            rt.close(args.place[0])
+            out = {"closed": args.place[0]}
+        else:
+            # a PM names the worker and the reviewer in one call (seen live): try each one,
+            # so an "already closed" first one does not hide a second that stayed open
+            closed, failed = [], {}
+            for place in args.place:
+                try:
+                    rt.close(place)
+                    closed.append(place)
+                except HerdrError as e:
+                    if e.code == "herdr_unavailable":
+                        raise
+                    failed[place] = str(e)
+            print(json.dumps({"closed": closed, "failed": failed}, ensure_ascii=False))
+            return 1 if failed else 0
     elif args.rt == "place":
         repo = native_path(args.repo)
         if not os.path.isdir(repo):  # herdr opens a missing --cwd in the home folder
@@ -3063,8 +3077,12 @@ def main(argv=None):
             except Exception:  # noqa: BLE001 - only the message's first word
                 who = "runtime"
             return fail("%s error: %s" % (who, e))
-        # exit 2: herdr itself is unreachable. Callers must not read this as "agent gone".
-        sys.stderr.write("herdr unavailable: %s\n" % e.message)
+        # exit 2: the runtime itself is unreachable. Callers must not read this as "agent gone".
+        try:
+            who = runtime().name
+        except Exception:  # noqa: BLE001 - only the message's first word
+            who = "runtime"
+        sys.stderr.write("%s unavailable: %s\n" % (who, e.message))
         return 2
 
 

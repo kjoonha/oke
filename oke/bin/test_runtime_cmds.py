@@ -35,6 +35,11 @@ class TestRuntimeCommands(SpawnBase):
         self.assertIn("pane close w1:p4", joined)
         self.assertIn("pane close w1:p5", joined)
         self.assertEqual(json.loads(self.out)["closed"], ["w1:p4", "w1:p5"])
+        self.fake({"pane close": [E("pane_not_found", "pane w1:p3 not found"), J({})]})
+        self.assertEqual(self.cli("close", "w1:p3", "w1:p6"), 1)
+        out = json.loads(self.out)
+        self.assertEqual(out["closed"], ["w1:p6"])  # the first failing did not stop the second
+        self.assertIn("pane_not_found", out["failed"]["w1:p3"])
         self.fake({"pane close": [E("pane_not_found", "pane w1:p9 not found")]})
         self.assertEqual(self.cli("close", "w1:p9"), 1)
         self.assertIn("herdr error: pane_not_found", self.err)
