@@ -2517,7 +2517,8 @@ def job_locked(args):
         return 0
     if args.action == "hold":
         info = state["jobs"][args.slug]
-        if info.get("phase") in DONE_PHASES or info.get("phase") == "merging"                 or merge_state(args.slug)[0] in ("unverified", "verified"):
+        if (info.get("phase") in DONE_PHASES or info.get("phase") == "merging"
+                or merge_state(args.slug)[0] in ("unverified", "verified")):
             return fail("job %s is %s: only a job before its merge can go on hold"
                         % (args.slug, info.get("phase")))
         info.update(held=args.reason or "the user", held_at=time.time())

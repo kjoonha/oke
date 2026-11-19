@@ -223,6 +223,7 @@ class TestWiki(SpawnBase):
         self.assertEqual(self.cli("job", "phase", "fix-a", "planning"), 1)
         self.assertIn("on hold", self.err)
         self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("on hold", self.err)
         # with fix-b gone too, nothing keeps the PM alive
         state["jobs"]["fix-b"]["phase"] = "done"
         oke.save_state(state)
