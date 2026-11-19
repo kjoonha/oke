@@ -17,11 +17,15 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
 import time
 
 from runtime_herdr import HerdrError
 
+# errors no lookup may read as "agent gone": the caller sees them
+FATAL = ("herdr_unavailable", "orca_cli_unknown")
 ORCA_TIMEOUT = 300  # seconds: worker-start waits for the agent to take its first prompt
 # Orca's worker activity -> herdr agent_status. "waiting" is a permission prompt or a
 # question to the user (Orca's claude hooks); an unknown activity of a live worker
@@ -38,7 +42,20 @@ TASK_NOTE = ("This task is an OKe role. It asks you to use subagents and to star
 
 
 def orca_argv():
-    value = os.environ.get("OKE_ORCA") or os.environ.get("ORCA_CLI_COMMAND") or "orca"
+    """The Orca CLI, chosen the way Orca's own orchestration skill does. On Linux a bare
+    `orca` is usually the GNOME screen reader (/usr/bin/orca), which takes our flags,
+    prints nothing and starts speech: refuse it loudly instead of failing silently."""
+    value = os.environ.get("OKE_ORCA") or os.environ.get("ORCA_CLI_COMMAND")
+    if not value:
+        if os.environ.get("ORCA_DEV_REPO_ROOT"):
+            value = "orca-dev"
+        elif sys.platform.startswith("linux"):
+            value = shutil.which("orca-ide") or "orca"
+            if value == "orca" and os.path.realpath(shutil.which("orca") or "") == "/usr/bin/orca":
+                raise HerdrError("orca_cli_unknown", "`orca` here is the GNOME screen reader and "
+                                 "orca-ide is not on PATH: set OKE_ORCA to the Orca CLI path")
+        else:
+            value = "orca"
     if value.lstrip().startswith("["):
         return json.loads(value)
     return [value] if os.path.isfile(value) else value.split()
@@ -71,6 +88,34 @@ def run_orca(args):
     if code == "runtime_unavailable":
         code = "herdr_unavailable"  # Orca is down or restarting: the domain waits, it does not revive
     raise HerdrError(code, message.splitlines()[0] if message else code)
+
+
+def mutate(args, show):
+    """run_orca for a command that changes a worker. Orca binds a Run to the terminal that
+    started it, so a new session in the same role (an orchestrator after /oke:start, a
+    revived PM) is fenced from the agents it inherited: resume coordinating their Run
+    (`run-use`) and try once more (consumer_fenced seen live on a company PC).
+    shortcut: run-use keeps only the Run it names, so a session mailing agents of two Runs
+    in turn rebinds on each switch (two extra Orca calls, still correct); pass --run to
+    worker-start if that ever costs too much."""
+    try:
+        return run_orca(args)
+    except HerdrError as e:
+        rebind(e, show)
+    return run_orca(args)
+
+
+def rebind(e, show):
+    """Bind this session to the Run of `show` after the fence `e`, or raise `e`."""
+    run = (show or {}).get("runId")
+    if e.code != "consumer_fenced" or not run:
+        raise e
+    try:
+        run_orca(["orchestration", "run-use", "--id", run])
+    except HerdrError as e2:
+        if e2.code in FATAL:
+            raise  # an outage stays an outage: callers wait instead of counting a refusal
+        raise e  # Orca refused the bind too: the fence is what the caller should see
 
 
 def registry_path():
@@ -196,7 +241,7 @@ class OrcaRuntime(object):
         try:
             show = run_orca(["orchestration", "worker-show", "--dispatch", entry["dispatch"]])
         except HerdrError as e:
-            if e.code == "herdr_unavailable":
+            if e.code in FATAL:
                 raise
             return None  # unknown dispatch: gone, so the watcher revives it
         nxt = self.follow_up(show, entry, name) if show and show.get("stage") == "settled" else None
@@ -205,9 +250,11 @@ class OrcaRuntime(object):
         entry.setdefault("origin", entry["dispatch"])
         entry.update(nxt)
         try:
+            # plain run_orca: a status read must never rebind this session's Run (run-use
+            # keeps only the Run it names); a fenced keep-open is caught below
             run_orca(["orchestration", "worker-keep-open", "--dispatch", nxt["dispatch"]])
         except HerdrError as e:
-            if e.code == "herdr_unavailable":
+            if e.code in FATAL:
                 raise  # else it settled and closed already: the next mail reopens it
         if name:
             update_registry(lambda r: r.get(name) and r[name].update(origin=entry["origin"], **nxt))
@@ -242,7 +289,7 @@ class OrcaRuntime(object):
                 if name:
                     update_registry(lambda r: r.get(name) and r[name].update(seen=newest))
         except HerdrError as e:
-            if e.code == "herdr_unavailable":
+            if e.code in FATAL:
                 raise
         return None
 
@@ -283,12 +330,14 @@ class OrcaRuntime(object):
         return "\n".join(lines[-40:]) + "\n"
 
     def start(self, name, place, argv, prompt, trusted, registered=lambda: None, kind="claude"):
-        """Start a supervised Orca worker in folder `place`. Only --model and --resume of
-        `argv` mean anything here (see the module doc)."""
+        """Start a supervised Orca worker in folder `place`. Only --model and the resumed
+        session of `argv` mean anything here (see the module doc)."""
         argv = list(argv)
         spec = TASK_NOTE + prompt
-        if "--resume" in argv:
-            old = argv[argv.index("--resume") + 1]
+        # the replaced session: claude --resume, codex resume, opencode --session
+        old = next((argv[argv.index(f) + 1] for f in ("--resume", "resume", "--session")
+                    if f in argv[:-1]), None)
+        if old and kind == "claude":  # codex and opencode keep no Claude transcript
             path = transcript_of(old, place)
             if path:
                 spec += ("\n\nThe session you replace died. Its transcript is %s: read its end "
@@ -297,7 +346,22 @@ class OrcaRuntime(object):
                 "--worktree", "path:" + place.replace("\\", "/"), "--keep-open", "--task-title", name]
         if "--model" in argv:
             args += ["--model", argv[argv.index("--model") + 1]]
-        result = run_orca(args)
+        try:
+            result = run_orca(args)
+        except HerdrError as e:
+            # a revive from a new session: the dead agent's Run may fence the start. Its
+            # origin dispatch (--resume) names that Run; relaunch already dropped the
+            # registry row, and its follow-ups share the origin's Run.
+            if e.code != "consumer_fenced" or not old:
+                raise
+            try:
+                show = run_orca(["orchestration", "worker-show", "--dispatch", old])
+            except HerdrError as e2:
+                if e2.code in FATAL:
+                    raise  # an outage is no crash: the revive try is not spent
+                show = None
+            rebind(e, show)
+            result = run_orca(args)
         entry = {"dispatch": result["dispatchId"], "handle": result["terminal"], "cwd": place}
         try:  # Orca titles every tab worker-task_<id>: say who it is (seen live)
             run_orca(["terminal", "rename", "--terminal", entry["handle"], "--title", title_of(name)])
@@ -313,9 +377,9 @@ class OrcaRuntime(object):
         entry = load_registry().get(name)
         if not entry:
             raise HerdrError("agent_not_found", name)
-        self.show(entry, name)  # mail the current dispatch, not one a follow-up replaced
-        run_orca(["orchestration", "send", "--to", "dispatch:" + entry["dispatch"],
-                  "--subject", "OKe", "--body", text])
+        show = self.show(entry, name)  # mail the current dispatch, not one a follow-up replaced
+        mutate(["orchestration", "send", "--to", "dispatch:" + entry["dispatch"],
+                "--subject", "OKe", "--body", text], show)
         return True
 
     def keys(self, name, keys):
@@ -368,11 +432,11 @@ class OrcaRuntime(object):
         name, entry = self.entry_of(place)
         if not entry:
             return  # a folder: never started
-        self.show(entry, name)  # stop the follow-up that runs now, not the dispatch it replaced
+        show = self.show(entry, name)  # stop the follow-up that runs now, not the dispatch it replaced
         try:
-            run_orca(["orchestration", "worker-stop", "--dispatch", entry["dispatch"]])
+            mutate(["orchestration", "worker-stop", "--dispatch", entry["dispatch"]], show)
         except HerdrError as e:
-            if e.code == "herdr_unavailable":
+            if e.code in FATAL:
                 raise  # already settled or stopped: forget it anyway
         update_registry(lambda r: r.pop(name, None))
 

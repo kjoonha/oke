@@ -196,6 +196,137 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(argv[argv.index("--to") + 1], "dispatch:ctx_1")
         self.assertEqual(argv[argv.index("--body") + 1], "OKe inbox: go")
 
+    def test_a_fenced_send_resumes_the_run_and_retries(self):
+        # a new orchestrator session is not bound to the Run its PM was started in
+        self.register()
+        self.fake({"orchestration send": [ERR("consumer_fenced"), OK({"id": "msg_1"})],
+                   "orchestration run-use": [OK({})],
+                   "orchestration worker-show": [OK(dict(WORKING, runId="run_7"))]})
+        self.assertTrue(self.rt.prompt("fix-a-w1", "OKe inbox: go"))
+        cmds = [c[:2] for c in self.calls()]
+        self.assertEqual(cmds[-3:], [["orchestration", "send"], ["orchestration", "run-use"], ["orchestration", "send"]])
+        self.assertIn("run_7", self.calls()[-2])
+
+    def test_a_fenced_send_without_a_run_still_fails(self):
+        self.register()
+        self.fake({"orchestration send": [ERR("consumer_fenced")],
+                   "orchestration worker-show": [OK(WORKING)]})
+        with self.assertRaises(runtime_orca.HerdrError):
+            self.rt.prompt("fix-a-w1", "OKe inbox: go")
+
+    def test_the_incident_a_resting_pm_from_an_earlier_session(self):
+        # company PC: the PM settled in the earlier session's Run, no follow-up since;
+        # the new orchestrator's mail is fenced until it binds that Run
+        self.register("pm-master-abc123", "ctx_bc", "term_19")
+        settled = {"dispatchId": "ctx_bc", "runId": "run_79", "state": "succeeded", "stage": "settled",
+                   "liveness": "unverifiable", "terminal": "term_19", "terminalState": "retained"}
+        rows = {"workers": [{"dispatchId": "ctx_bc", "resource": {"terminalHandle": "term_19",
+                                                                  "ownerDispatchId": "ctx_bc"}}]}
+        self.fake({"orchestration worker-show": [OK(settled)],
+                   "orchestration worker-list": [OK(rows)],
+                   "orchestration send": [ERR("consumer_fenced"), OK({"id": "msg_1"})],
+                   "orchestration run-use": [OK({})]})
+        self.assertEqual(self.rt.agent("pm-master-abc123")["agent_status"], "idle")
+        self.assertNotIn("run-use", [c[1] for c in self.calls()])  # a status read binds nothing
+        self.assertTrue(self.rt.prompt("pm-master-abc123", "OKe inbox: job j"))
+        self.assertEqual([c[1] for c in self.calls()][-3:], ["send", "run-use", "send"])
+        self.assertIn(["orchestration", "run-use", "--id", "run_79", "--json"], self.calls())
+
+    def test_a_fenced_keep_open_does_not_rebind(self):
+        self.register("fix-a-rv", "ctx_1", "term_1")
+        settled = {"stage": "settled", "liveness": "exited", "terminalState": "released", "runId": "run_1"}
+        rows = {"workers": [
+            {"dispatchId": "ctx_2", "resource": {"terminalHandle": "term_1", "ownerDispatchId": "ctx_2"}}]}
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(settled)],
+                   "orchestration worker-show --dispatch ctx_2": [OK(WORKING)],
+                   "orchestration worker-list": [OK(rows)],
+                   "orchestration worker-keep-open": [ERR("consumer_fenced")]})
+        self.assertEqual(self.rt.agent("fix-a-rv")["agent_status"], "working")
+        self.assertNotIn("run-use", [c[1] for c in self.calls()])
+
+    def test_a_refused_bind_raises_the_fence(self):
+        self.register()
+        self.fake({"orchestration send": [ERR("consumer_fenced")],
+                   "orchestration run-use": [ERR("invalid_argument")],
+                   "orchestration worker-show": [OK(dict(WORKING, runId="run_7"))]})
+        with self.assertRaises(runtime_orca.HerdrError) as e:
+            self.rt.prompt("fix-a-w1", "OKe inbox: go")
+        self.assertEqual(e.exception.code, "consumer_fenced")
+
+    def test_an_outage_in_the_bind_stays_an_outage(self):
+        self.register()
+        self.fake({"orchestration send": [ERR("consumer_fenced")],
+                   "orchestration run-use": [ERR("runtime_unavailable")],
+                   "orchestration worker-show": [OK(dict(WORKING, runId="run_7"))]})
+        with self.assertRaises(runtime_orca.HerdrError) as e:
+            self.rt.prompt("fix-a-w1", "OKe inbox: go")
+        self.assertEqual(e.exception.code, "herdr_unavailable")
+
+    def test_a_fenced_stop_rebinds_and_forgets(self):
+        self.register()
+        self.fake({"orchestration worker-stop": [ERR("consumer_fenced"), OK({})],
+                   "orchestration run-use": [OK({})],
+                   "orchestration worker-show": [OK(dict(WORKING, runId="run_7"))]})
+        self.rt.close("structworker_1")
+        self.assertEqual([c[1] for c in self.calls()][-2:], ["run-use", "worker-stop"])
+        self.assertEqual(runtime_orca.load_registry(), {})
+
+    def test_a_fenced_revive_binds_the_dead_agents_run(self):
+        # relaunch closes the dead agent first (its row leaves the registry), then starts
+        self.register()
+        self.fake({"orchestration worker-start": [ERR("consumer_fenced"), OK(dict(STARTED, dispatchId="ctx_9"))],
+                   "orchestration worker-stop": [ERR("already_settled")],
+                   "orchestration run-use": [OK({})],
+                   "orchestration worker-show": [OK(dict(WORKING, runId="run_7"))],
+                   "terminal rename": [OK({})]})
+        self.rt.close("structworker_1")
+        self.assertEqual(runtime_orca.load_registry(), {})
+        n = len(self.calls())
+        self.rt.start("fix-a-w1", self.repo, ["--resume", "ctx_1"], "go", lambda: False)
+        self.assertIn(["orchestration", "worker-show", "--dispatch", "ctx_1", "--json"], self.calls()[n:])
+        self.assertIn(["orchestration", "run-use", "--id", "run_7", "--json"], self.calls()[n:])
+        self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["dispatch"], "ctx_9")
+
+    def test_a_fenced_codex_revive_binds_too(self):
+        self.fake({"orchestration worker-start": [ERR("consumer_fenced"), OK(STARTED)],
+                   "orchestration run-use": [OK({})],
+                   "orchestration worker-show": [OK(dict(WORKING, runId="run_7"))],
+                   "terminal rename": [OK({})]})
+        self.rt.start("fix-a-w1", self.repo, ["-c", "features.hooks=false", "resume", "ctx_1"], "go",
+                      lambda: False, kind="codex")
+        self.assertIn(["orchestration", "worker-show", "--dispatch", "ctx_1", "--json"], self.calls())
+        self.assertIn(["orchestration", "run-use", "--id", "run_7", "--json"], self.calls())
+
+    def test_an_outage_in_the_revive_lookup_stays_an_outage(self):
+        self.fake({"orchestration worker-start": [ERR("consumer_fenced")],
+                   "orchestration worker-show": [ERR("runtime_unavailable")]})
+        with self.assertRaises(runtime_orca.HerdrError) as e:
+            self.rt.start("fix-a-w1", self.repo, ["--resume", "ctx_1"], "go", lambda: False)
+        self.assertEqual(e.exception.code, "herdr_unavailable")
+
+    def test_a_fenced_start_without_resume_still_fails(self):
+        self.fake({"orchestration worker-start": [ERR("consumer_fenced")]})
+        with self.assertRaises(runtime_orca.HerdrError) as e:
+            self.rt.start("fix-a-w1", self.repo, [], "go", lambda: False)
+        self.assertEqual(e.exception.code, "consumer_fenced")
+        self.assertEqual([c[1] for c in self.calls()], ["worker-start"])
+
+    def test_an_unknown_cli_is_never_read_as_gone(self):
+        self.register()
+        os.environ["OKE_ORCA"] = ""
+        os.environ.pop("ORCA_CLI_COMMAND", None)
+        which, platform, real = runtime_orca.shutil.which, runtime_orca.sys.platform, runtime_orca.os.path.realpath
+        runtime_orca.sys.platform = "linux"
+        runtime_orca.os.path.realpath = lambda p: p
+        runtime_orca.shutil.which = lambda n: "/usr/bin/orca" if n == "orca" else None
+        try:
+            with self.assertRaises(runtime_orca.HerdrError) as e:
+                self.rt.agents()
+        finally:
+            runtime_orca.shutil.which, runtime_orca.sys.platform = which, platform
+            runtime_orca.os.path.realpath = real
+        self.assertEqual(e.exception.code, "orca_cli_unknown")
+
     def test_close_stops_and_forgets(self):
         self.register()
         self.fake({"orchestration worker-stop": [ERR("already_settled")]})
@@ -267,6 +398,48 @@ class TestOrcaChoice(OrcaBase):
         self.assertEqual(self.cli("tick", "--pane", "term_2"), 0, self.err)
         self.assertIsNone(json.loads(self.out)["role"])
 
+
+
+
+class TestOrcaCli(unittest.TestCase):
+    """Which Orca CLI OKe runs when nothing names one (Orca's own skill order)."""
+
+    def setUp(self):
+        self.saved = {k: os.environ.pop(k, None) for k in ("OKE_ORCA", "ORCA_CLI_COMMAND", "ORCA_DEV_REPO_ROOT")}
+        self.which, self.realpath, self.platform = runtime_orca.shutil.which, runtime_orca.os.path.realpath, runtime_orca.sys.platform
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+        runtime_orca.shutil.which, runtime_orca.os.path.realpath = self.which, self.realpath
+        runtime_orca.sys.platform = self.platform
+
+    def linux(self, found):
+        runtime_orca.sys.platform = "linux"
+        runtime_orca.shutil.which = lambda name: found.get(name)
+        runtime_orca.os.path.realpath = lambda p: p
+
+    def test_linux_prefers_orca_ide(self):
+        self.linux({"orca-ide": "/opt/orca-ide", "orca": "/usr/bin/orca"})
+        self.assertEqual(runtime_orca.orca_argv(), ["/opt/orca-ide"])
+
+    def test_linux_refuses_the_screen_reader(self):
+        self.linux({"orca": "/usr/bin/orca"})
+        with self.assertRaises(runtime_orca.HerdrError) as e:
+            runtime_orca.orca_argv()
+        self.assertEqual(e.exception.code, "orca_cli_unknown")
+
+    def test_a_dev_checkout_uses_orca_dev(self):
+        self.linux({"orca-ide": "/opt/orca-ide"})
+        os.environ["ORCA_DEV_REPO_ROOT"] = "/src/orca"
+        self.assertEqual(runtime_orca.orca_argv(), ["orca-dev"])
+
+    def test_env_wins(self):
+        self.linux({"orca": "/usr/bin/orca"})
+        os.environ["ORCA_CLI_COMMAND"] = "my-orca --x"
+        self.assertEqual(runtime_orca.orca_argv(), ["my-orca", "--x"])
 
 if __name__ == "__main__":
     unittest.main()

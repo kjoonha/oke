@@ -1071,6 +1071,10 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
                     sent = None  # a passing outage: the next check_once counts it
                     if e.code != "herdr_unavailable":
                         failed_deliveries += 1  # refused (a lost name): never loop on it
+                        try:  # the reason, for whoever reads deliver_failed later
+                            log_event("deliver_refused %s: %s" % (agent, (str(e).strip().splitlines() or [""])[0]))
+                        except (IOError, OSError):
+                            pass
                 except OSError:
                     sent = None
                 if isinstance(sent, str):
