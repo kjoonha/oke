@@ -259,6 +259,42 @@ class TestWiki(SpawnBase):
         self.assertIsNone(oke.read_children(key)["fix-a-w1"]["pane"])
         self.assertNotIn("fix-a", oke.load_state()["jobs"])
 
+    def test_archive_keeps_what_an_outage_left_and_still_succeeds(self):
+        key = oke.repo_key(self.repo)
+        oke.write_json_atomic(oke.children_path(key), {
+            "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p1", "terminal": "t1"}})
+
+        class Stub(object):
+            def place_id(self, pane):
+                return None  # herdr answers None in an outage too
+
+            def place_exists(self, pane):
+                raise oke.HerdrError("herdr_unavailable", "down")
+        real = oke.runtime
+        oke.runtime = lambda *a: Stub()
+        try:
+            self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+        finally:
+            oke.runtime = real
+        self.assertIn("not_closed: fix-a-w1", self.out)
+        self.assertEqual(oke.read_children(key)["fix-a-w1"]["pane"], "w1:p1")
+        self.assertNotIn("fix-a", oke.load_state()["jobs"])
+
+    def test_archive_survives_a_broken_cleanup(self):
+        class Stub(object):
+            def place_id(self, pane):
+                raise ValueError("bad json from the runtime")
+        key = oke.repo_key(self.repo)
+        oke.write_json_atomic(oke.children_path(key), {
+            "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p1", "terminal": "t1"}})
+        real = oke.runtime
+        oke.runtime = lambda *a: Stub()
+        try:
+            self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+        finally:
+            oke.runtime = real
+        self.assertNotIn("fix-a", oke.load_state()["jobs"])
+
     def test_report_entries(self):
         text = "## 요약\n- a.md: ok\n## wiki\n- `b.md`: ok\n* c.md: wrong - stale flag\n- d.md: unused\n## 배운 것\n- e.md: ok\n"
         self.assertEqual(wiki.report_entries(text),

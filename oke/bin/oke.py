@@ -1866,11 +1866,15 @@ def cmd_job(args):
         code = job_locked(args)
     if code == 0 and key:
         # a PM can forget to close a finished job's worker (seen live): archive does it,
-        # outside the state lock; a child the runtime cannot reach now stays open
+        # outside the state lock. Best effort: the archive already happened, so its exit
+        # code and printed lines never depend on this (flushed first, in case it hangs).
+        sys.stdout.flush()
         try:
-            close_children(args.slug, key)
-        except (HerdrError, OSError):
-            pass
+            left = close_children(args.slug, key)[1]
+        except Exception:  # noqa: BLE001 - cleanup only
+            left = None
+        if left:
+            print("not_closed: %s (the runtime did not answer: tell the user to close them)" % ", ".join(left))
     return code
 
 
@@ -2512,9 +2516,14 @@ def close_children(job, key):
             continue
         try:
             # a pane id comes back after a herdr restart: close it only while it is still this child's
-            if rec.get("terminal") and runtime().place_id(rec["pane"]) == rec["terminal"]:
+            terminal = runtime().place_id(rec["pane"]) if rec.get("terminal") else None
+            if terminal and terminal == rec["terminal"]:
                 runtime().close(rec["pane"])
                 closed.append(name)
+            elif rec.get("terminal") and not terminal:
+                # herdr's place_id answers None in an outage too: ask once more, so an
+                # outage keeps the record (place_exists raises it) and a closed pane drops it
+                runtime().place_exists(rec["pane"])
         except HerdrError as e:
             if e.code == "herdr_unavailable":
                 left.append(name)  # keep its record: `job cancel` again closes it later

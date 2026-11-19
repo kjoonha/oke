@@ -345,6 +345,13 @@ class TestOrcaRuntime(OrcaBase):
         self.rt.close("structworker_1")
         self.assertNotIn("worker-release", [c[1] for c in self.calls()])
 
+    def test_close_of_an_unknown_place_says_so(self):
+        self.register()
+        with self.assertRaises(runtime_orca.HerdrError) as e:
+            self.rt.close("fix-a-w1")  # the agent's name, not its pane
+        self.assertEqual(e.exception.code, "agent_not_found")
+        self.assertIn("fix-a-w1", runtime_orca.load_registry())
+
     def test_close_stops_and_forgets(self):
         self.register()
         self.fake({"orchestration worker-stop": [ERR("already_settled")]})
