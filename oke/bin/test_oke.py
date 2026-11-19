@@ -664,7 +664,12 @@ class TestSpawn(SpawnBase):
         plain = oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p")
         self.assertNotIn("--setting-sources", plain)
         self.assertEqual(plain.count("--add-dir"), 2)
-        self.assertNotIn("Edit", args[args.index("--tools") + 1].split(","))
+        # the reviewer has the write tools for its report, but no bare Edit/Write allow rule:
+        # only the OKe folders' Edit(...) rules let it write
+        self.assertTrue({"Edit", "Write"} <= set(args[args.index("--tools") + 1].split(",")))
+        allowed = args[args.index("--allowedTools") + 1:args.index("--disallowedTools")]
+        self.assertFalse({"Edit", "Write"} & set(allowed))
+        self.assertTrue(any(a.startswith("Edit(") for a in allowed))
         for role in ("pm", "worker", "reviewer"):
             tools = oke.launch_args(role, c, self.home, "/p")
             self.assertTrue({"WebFetch", "WebSearch"} <= set(tools[tools.index("--tools") + 1].split(",")))

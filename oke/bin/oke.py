@@ -500,8 +500,10 @@ ROLE_TOOLS = {
            "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch", "SendMessage"],
     "worker": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "Agent", "TaskStop",
                "TaskCreate", "TaskUpdate", "TaskList", "WebFetch", "WebSearch"],
-    "reviewer": ["Bash", "Read", "Glob", "Grep", "Skill", "TaskCreate", "TaskUpdate", "TaskList",
-                 "WebFetch", "WebSearch"],
+    # Edit and Write so a pane reviewer can write its report.md and board.md (seen live: it
+    # could not); its permission rules still allow writes only under the OKe folders
+    "reviewer": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Skill", "TaskCreate", "TaskUpdate",
+                 "TaskList", "WebFetch", "WebSearch"],
 }
 # Always on, whatever the PM writes: built-in tools only (user's choice). MCP servers
 # and plugins come only from the assignment header.
