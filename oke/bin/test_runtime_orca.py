@@ -335,6 +335,7 @@ class TestOrcaRuntime(OrcaBase):
                    "orchestration worker-show": [OK(WORKING)]})
         self.rt.close("structworker_1")
         self.assertEqual([c[1] for c in self.calls()][-2:], ["worker-stop", "worker-release"])
+        self.assertEqual(self.calls()[-1][2:4], ["--dispatch", "ctx_1"])
         self.assertEqual(runtime_orca.load_registry(), {})
 
     def test_close_of_a_running_worker_only_stops(self):
