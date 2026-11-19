@@ -327,6 +327,24 @@ class TestOrcaRuntime(OrcaBase):
             runtime_orca.os.path.realpath = real
         self.assertEqual(e.exception.code, "orca_cli_unknown")
 
+    def test_close_releases_a_settled_worker(self):
+        self.register()
+        self.fake({"orchestration worker-stop": [OK({"state": "succeeded", "alreadySettled": True,
+                                                       "processAction": "none"})],
+                   "orchestration worker-release": [OK({"state": "released"})],
+                   "orchestration worker-show": [OK(WORKING)]})
+        self.rt.close("structworker_1")
+        self.assertEqual([c[1] for c in self.calls()][-2:], ["worker-stop", "worker-release"])
+        self.assertEqual(self.calls()[-1][2:4], ["--dispatch", "ctx_1"])
+        self.assertEqual(runtime_orca.load_registry(), {})
+
+    def test_close_of_a_running_worker_only_stops(self):
+        self.register()
+        self.fake({"orchestration worker-stop": [OK({"state": "stopped", "processAction": "closed_agent_terminal"})],
+                   "orchestration worker-show": [OK(WORKING)]})
+        self.rt.close("structworker_1")
+        self.assertNotIn("worker-release", [c[1] for c in self.calls()])
+
     def test_close_stops_and_forgets(self):
         self.register()
         self.fake({"orchestration worker-stop": [ERR("already_settled")]})
