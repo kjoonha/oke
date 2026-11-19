@@ -434,10 +434,14 @@ class OrcaRuntime(object):
             return  # a folder: never started
         show = self.show(entry, name)  # stop the follow-up that runs now, not the dispatch it replaced
         try:
-            mutate(["orchestration", "worker-stop", "--dispatch", entry["dispatch"]], show)
+            stopped = mutate(["orchestration", "worker-stop", "--dispatch", entry["dispatch"]], show)
+            if stopped.get("alreadySettled"):
+                # a settled worker's stop changes nothing and its kept-open terminal stays
+                # (measured): release closes it
+                mutate(["orchestration", "worker-release", "--dispatch", entry["dispatch"]], show)
         except HerdrError as e:
             if e.code in FATAL:
-                raise  # already settled or stopped: forget it anyway
+                raise  # already stopped or released: forget it anyway
         update_registry(lambda r: r.pop(name, None))
 
     def worktree_create(self, repo, branch, label):
