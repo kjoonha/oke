@@ -253,6 +253,15 @@ class TestOrcaRuntime(OrcaBase):
             self.rt.prompt("fix-a-w1", "OKe inbox: go")
         self.assertEqual(e.exception.code, "consumer_fenced")
 
+    def test_an_outage_in_the_bind_stays_an_outage(self):
+        self.register()
+        self.fake({"orchestration send": [ERR("consumer_fenced")],
+                   "orchestration run-use": [ERR("runtime_unavailable")],
+                   "orchestration worker-show": [OK(dict(WORKING, runId="run_7"))]})
+        with self.assertRaises(runtime_orca.HerdrError) as e:
+            self.rt.prompt("fix-a-w1", "OKe inbox: go")
+        self.assertEqual(e.exception.code, "herdr_unavailable")
+
     def test_a_fenced_stop_rebinds_and_forgets(self):
         self.register()
         self.fake({"orchestration worker-stop": [ERR("consumer_fenced"), OK({})],
@@ -272,9 +281,10 @@ class TestOrcaRuntime(OrcaBase):
                    "terminal rename": [OK({})]})
         self.rt.close("structworker_1")
         self.assertEqual(runtime_orca.load_registry(), {})
+        n = len(self.calls())
         self.rt.start("fix-a-w1", self.repo, ["--resume", "ctx_1"], "go", lambda: False)
-        self.assertIn(["orchestration", "worker-show", "--dispatch", "ctx_1", "--json"], self.calls())
-        self.assertIn(["orchestration", "run-use", "--id", "run_7", "--json"], self.calls())
+        self.assertIn(["orchestration", "worker-show", "--dispatch", "ctx_1", "--json"], self.calls()[n:])
+        self.assertIn(["orchestration", "run-use", "--id", "run_7", "--json"], self.calls()[n:])
         self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["dispatch"], "ctx_9")
 
     def test_a_fenced_codex_revive_binds_too(self):

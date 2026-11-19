@@ -112,7 +112,9 @@ def rebind(e, show):
         raise e
     try:
         run_orca(["orchestration", "run-use", "--id", run])
-    except HerdrError:
+    except HerdrError as e2:
+        if e2.code in FATAL:
+            raise  # an outage stays an outage: callers wait instead of counting a refusal
         raise e  # Orca refused the bind too: the fence is what the caller should see
 
 
