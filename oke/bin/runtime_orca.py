@@ -94,7 +94,10 @@ def mutate(args, show):
     """run_orca for a command that changes a worker. Orca binds a Run to the terminal that
     started it, so a new session in the same role (an orchestrator after /oke:start, a
     revived PM) is fenced from the agents it inherited: resume coordinating their Run
-    (`run-use`) and try once more (consumer_fenced seen live on a company PC)."""
+    (`run-use`) and try once more (consumer_fenced seen live on a company PC).
+    shortcut: run-use keeps only the Run it names, so a session mailing agents of two Runs
+    in turn rebinds on each switch (two extra Orca calls, still correct); pass --run to
+    worker-start if that ever costs too much."""
     try:
         return run_orca(args)
     except HerdrError as e:
@@ -245,7 +248,9 @@ class OrcaRuntime(object):
         entry.setdefault("origin", entry["dispatch"])
         entry.update(nxt)
         try:
-            mutate(["orchestration", "worker-keep-open", "--dispatch", nxt["dispatch"]], show)
+            # plain run_orca: a status read must never rebind this session's Run (run-use
+            # keeps only the Run it names); a fenced keep-open is caught below
+            run_orca(["orchestration", "worker-keep-open", "--dispatch", nxt["dispatch"]])
         except HerdrError as e:
             if e.code in FATAL:
                 raise  # else it settled and closed already: the next mail reopens it
@@ -330,7 +335,7 @@ class OrcaRuntime(object):
         # the replaced session: claude --resume, codex resume, opencode --session
         old = next((argv[argv.index(f) + 1] for f in ("--resume", "resume", "--session")
                     if f in argv[:-1]), None)
-        if old:
+        if old and kind == "claude":  # codex and opencode keep no Claude transcript
             path = transcript_of(old, place)
             if path:
                 spec += ("\n\nThe session you replace died. Its transcript is %s: read its end "

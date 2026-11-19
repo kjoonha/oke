@@ -214,6 +214,36 @@ class TestOrcaRuntime(OrcaBase):
         with self.assertRaises(runtime_orca.HerdrError):
             self.rt.prompt("fix-a-w1", "OKe inbox: go")
 
+    def test_the_incident_a_resting_pm_from_an_earlier_session(self):
+        # company PC: the PM settled in the earlier session's Run, no follow-up since;
+        # the new orchestrator's mail is fenced until it binds that Run
+        self.register("pm-master-abc123", "ctx_bc", "term_19")
+        settled = {"dispatchId": "ctx_bc", "runId": "run_79", "state": "succeeded", "stage": "settled",
+                   "liveness": "unverifiable", "terminal": "term_19", "terminalState": "retained"}
+        rows = {"workers": [{"dispatchId": "ctx_bc", "resource": {"terminalHandle": "term_19",
+                                                                  "ownerDispatchId": "ctx_bc"}}]}
+        self.fake({"orchestration worker-show": [OK(settled)],
+                   "orchestration worker-list": [OK(rows)],
+                   "orchestration send": [ERR("consumer_fenced"), OK({"id": "msg_1"})],
+                   "orchestration run-use": [OK({})]})
+        self.assertEqual(self.rt.agent("pm-master-abc123")["agent_status"], "idle")
+        self.assertNotIn("run-use", [c[1] for c in self.calls()])  # a status read binds nothing
+        self.assertTrue(self.rt.prompt("pm-master-abc123", "OKe inbox: job j"))
+        self.assertEqual([c[1] for c in self.calls()][-3:], ["send", "run-use", "send"])
+        self.assertIn(["orchestration", "run-use", "--id", "run_79", "--json"], self.calls())
+
+    def test_a_fenced_keep_open_does_not_rebind(self):
+        self.register("fix-a-rv", "ctx_1", "term_1")
+        settled = {"stage": "settled", "liveness": "exited", "terminalState": "released", "runId": "run_1"}
+        rows = {"workers": [
+            {"dispatchId": "ctx_2", "resource": {"terminalHandle": "term_1", "ownerDispatchId": "ctx_2"}}]}
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(settled)],
+                   "orchestration worker-show --dispatch ctx_2": [OK(WORKING)],
+                   "orchestration worker-list": [OK(rows)],
+                   "orchestration worker-keep-open": [ERR("consumer_fenced")]})
+        self.assertEqual(self.rt.agent("fix-a-rv")["agent_status"], "working")
+        self.assertNotIn("run-use", [c[1] for c in self.calls()])
+
     def test_a_refused_bind_raises_the_fence(self):
         self.register()
         self.fake({"orchestration send": [ERR("consumer_fenced")],
@@ -235,7 +265,7 @@ class TestOrcaRuntime(OrcaBase):
     def test_a_fenced_revive_binds_the_dead_agents_run(self):
         # relaunch closes the dead agent first (its row leaves the registry), then starts
         self.register()
-        self.fake({"orchestration worker-start": [ERR("consumer_fenced"), OK(STARTED)],
+        self.fake({"orchestration worker-start": [ERR("consumer_fenced"), OK(dict(STARTED, dispatchId="ctx_9"))],
                    "orchestration worker-stop": [ERR("already_settled")],
                    "orchestration run-use": [OK({})],
                    "orchestration worker-show": [OK(dict(WORKING, runId="run_7"))],
@@ -245,7 +275,7 @@ class TestOrcaRuntime(OrcaBase):
         self.rt.start("fix-a-w1", self.repo, ["--resume", "ctx_1"], "go", lambda: False)
         self.assertIn(["orchestration", "worker-show", "--dispatch", "ctx_1", "--json"], self.calls())
         self.assertIn(["orchestration", "run-use", "--id", "run_7", "--json"], self.calls())
-        self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["dispatch"], "ctx_1")
+        self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["dispatch"], "ctx_9")
 
     def test_a_fenced_codex_revive_binds_too(self):
         self.fake({"orchestration worker-start": [ERR("consumer_fenced"), OK(STARTED)],
