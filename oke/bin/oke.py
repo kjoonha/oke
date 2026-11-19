@@ -1874,7 +1874,7 @@ def cmd_job(args):
         except Exception:  # noqa: BLE001 - cleanup only
             left = None
         if left:
-            print("not_closed: %s (the runtime did not answer: tell the user to close them)" % ", ".join(left))
+            print("not_closed: %s (the runtime did not close them: tell the user to close them)" % ", ".join(left))
     return code
 
 
@@ -2508,8 +2508,8 @@ def cancel_children(job, key):
 
 
 def close_children(job, key):
-    """Close the panes of `job`'s children that are still theirs: ([closed], [not closed
-    because the runtime did not answer])."""
+    """Close the panes of `job`'s children that are still theirs: ([closed], [not closed:
+    the runtime did not answer or refused])."""
     closed, left = [], []
     for name, rec in sorted(read_children(key).items() if key else []):
         if rec.get("job") != job or not rec.get("pane"):
@@ -2518,7 +2518,12 @@ def close_children(job, key):
             # a pane id comes back after a herdr restart: close it only while it is still this child's
             terminal = runtime().place_id(rec["pane"]) if rec.get("terminal") else None
             if terminal and terminal == rec["terminal"]:
-                runtime().close(rec["pane"])
+                try:
+                    runtime().close(rec["pane"])
+                except HerdrError:
+                    # it is still there and refused (a worktree group root): keep its record
+                    left.append(name)
+                    continue
                 closed.append(name)
             elif rec.get("terminal") and not terminal:
                 # herdr's place_id answers None in an outage too: ask once more, so an

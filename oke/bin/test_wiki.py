@@ -280,6 +280,26 @@ class TestWiki(SpawnBase):
         self.assertEqual(oke.read_children(key)["fix-a-w1"]["pane"], "w1:p1")
         self.assertNotIn("fix-a", oke.load_state()["jobs"])
 
+    def test_archive_reports_a_pane_that_refuses_to_close(self):
+        key = oke.repo_key(self.repo)
+        oke.write_json_atomic(oke.children_path(key), {
+            "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p1", "terminal": "t1"}})
+
+        class Stub(object):
+            def place_id(self, pane):
+                return "t1"
+
+            def close(self, pane):
+                raise oke.HerdrError("confirmation_required", "worktree group root")
+        real = oke.runtime
+        oke.runtime = lambda *a: Stub()
+        try:
+            self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+        finally:
+            oke.runtime = real
+        self.assertIn("not_closed: fix-a-w1", self.out)
+        self.assertEqual(oke.read_children(key)["fix-a-w1"]["pane"], "w1:p1")
+
     def test_archive_survives_a_broken_cleanup(self):
         class Stub(object):
             def place_id(self, pane):

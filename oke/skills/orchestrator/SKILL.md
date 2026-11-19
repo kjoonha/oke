@@ -205,7 +205,7 @@ A job is the unit of cancelling. When the user gives a job up, cancel it yoursel
 
 1. `$OKE job cancel <job>`. It closes the job first (phase `failed`, so nothing starts for it again), then closes its worker and reviewer, and drops the messages about it still queued for the PM and its children. It refuses a job whose merge is already in main: tell the user, and let the PM finish it (verify, or roll back when the user says so). Its output lists `not_closed` children (the runtime did not answer): run `job cancel` again before the archive; if they stay, tell the user which panes to close.
 2. `job cancel` also queued "Job <job> was cancelled" for the PM: a running PM gets it from its wait, a dead one is not started for it. If no wait of that PM runs, start one (see "Wait") so the notice goes in.
-3. `$OKE job archive <job>`. Its worktree and branch stay; tell the user where.
+3. `$OKE job archive <job>`. Its worktree and branch stay; tell the user where. Archive also closes the job's children the PM left open; a `not_closed:` line names the ones it could not close: tell the user which panes to close (after the archive nothing retries them).
 
 ## Flow
 
@@ -218,7 +218,7 @@ A job is the unit of cancelling. When the user gives a job up, cancel it yoursel
 | PM reports research done, or a direct job's work reviewed (`report_done`, phase `working` or `reviewing`) | Nothing to merge. Tell the user the report's 요약 (for research, its findings; offer the report path), update the shared wiki from 배운 것 (공용), `$OKE job phase <job> done` (refused: see "Shared wiki"), then `$OKE job archive <job>` | |
 | PM reports work reviewed (`report_done`, phase `working` or `reviewing`) | Size `small`: the user approved the merge with the plan, so assign `kind: merge` now and tell the user in one line. Otherwise it becomes a `merge` item | `merging` for `small`, else `awaiting_merge` |
 | User says merge | Assign `kind: merge` | `merging` |
-| PM reports merged (`report_done`, phase `merging`) | Update the shared wiki from the report's 배운 것 (공용) (see "Shared wiki"), `$OKE job phase <job> done`, `$OKE job archive <job>`, tell the user what changed | |
+| PM reports merged (`report_done`, phase `merging`) | Update the shared wiki from the report's 배운 것 (공용) (see "Shared wiki"), `$OKE job phase <job> done`, `$OKE job archive <job>` (a `not_closed:` line: tell the user which panes to close), tell the user what changed | |
 
 Plan approval question: put a short summary of the plan in the option `preview`, mention the plan file path, and offer: approve / request changes / discuss in the PM pane (then `$OKE attach <pm>` and defer).
 
