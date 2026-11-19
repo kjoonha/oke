@@ -2522,6 +2522,9 @@ def close_children(job, key):
                 try:
                     runtime().close(rec["pane"])
                 except HerdrError as e:
+                    if e.code == "registry_locked":
+                        left.append(name)  # a passing lock: a retry closes it
+                        continue
                     if e.code in ("herdr_unavailable", "agent_not_found", "pane_not_found"):
                         raise  # an outage, or it went away meanwhile: handled below
                     # it is still there and refused (a worktree group root): keep its record

@@ -205,7 +205,7 @@ A job is the unit of cancelling. When the user gives a job up, cancel it yoursel
 
 1. `$OKE job cancel <job>`. It closes the job first (phase `failed`, so nothing starts for it again), then closes its worker and reviewer, and drops the messages about it still queued for the PM and its children. It refuses a job whose merge is already in main: tell the user, and let the PM finish it (verify, or roll back when the user says so). Its output lists `not_closed` children (the runtime did not answer): run `job cancel` again before the archive; if they stay, tell the user which panes to close. `refused` children (the runtime would not close them, such as a worktree group root): do not run cancel again; tell the user which panes to close.
 2. `job cancel` also queued "Job <job> was cancelled" for the PM: a running PM gets it from its wait, a dead one is not started for it. If no wait of that PM runs, start one (see "Wait") so the notice goes in.
-3. `$OKE job archive <job>`. Its worktree and branch stay; tell the user where. Archive also closes the job's children the PM left open; a `not_closed:` line names the ones it could not close: tell the user which panes to close (after the archive nothing retries them).
+3. `$OKE job archive <job>`. Its worktree and branch stay; tell the user where. Archive also closes the job's children the PM left open; a `not_closed:` line names the ones it could not close: tell the user which panes to close (after the archive nothing retries them). Archive prints its folder before it closes anything: if the call times out after that line, the archive itself is done.
 
 ## Flow
 
