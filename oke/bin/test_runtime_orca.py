@@ -243,6 +243,33 @@ class TestOrcaRuntime(OrcaBase):
         self.assertNotIn("pm-r-abc123", runtime_orca.load_registry())  # a revive may start it again
         self.assertIn(["orchestration", "worker-release"], [c[:2] for c in self.calls()])
 
+    def test_a_follow_up_orca_cannot_start_is_a_gone_agent(self):
+        # O5, seen live: Orca killed and restarted; the PM's mail needs a follow-up dispatch,
+        # which fails at terminal_create. Its worker-show (verbatim fields) reads failed.
+        self.register("pm-repo-4612b2", "ctx_55cf9f4912f7", "term_9")
+        settled = {"dispatchId": "ctx_55cf9f4912f7", "runId": "run_a6", "state": "succeeded", "stage": "settled",
+                   "liveness": "unverifiable", "terminal": "term_9", "terminalState": "retained"}
+        failed = {"dispatchId": "ctx_f04d0236a217", "taskId": "task_cb381d4c6199", "runId": "run_a6",
+                  "followUpOf": "ctx_55cf9f4912f7", "state": "failed", "stage": "terminal_create",
+                  "liveness": "unverifiable", "attention": ["failure", "unverifiable"], "waitingOnHuman": "unknown",
+                  "lastError": "never started: The worker's conversation is open somewhere Orca cannot reach; "
+                               "nothing was sent."}
+        self.assertIsNone(runtime_orca.status_of(failed))
+        msg = ("error: start_failed: terminal_create: The worker's conversation is open somewhere Orca "
+               "cannot reach; nothing was sent.")
+        self.fake({"orchestration send": [{"stdout": "", "stderr": msg, "exit": 1}],
+                   "orchestration worker-show": [OK(settled), OK(settled), OK(settled),
+                                                 OK({"dispatch": {"followUpOf": "ctx_55cf9f4912f7"}}), OK(failed)],
+                   "orchestration worker-list": [OK({"workers": []}),
+                                                 OK({"workers": [{"dispatchId": "ctx_f04d0236a217"}]})],
+                   "orchestration worker-keep-open": [OK({})],
+                   "orchestration worker-release": [OK({})]})
+        with self.assertRaises(runtime_orca.HerdrError) as c:
+            self.rt.prompt("pm-repo-4612b2", "OKe inbox: merge")
+        self.assertEqual(c.exception.code, "agent_not_found")
+        self.assertNotIn("pm-repo-4612b2", runtime_orca.load_registry())  # gone: a revive starts a fresh one
+        self.assertEqual([c for c in self.calls() if c[:2] == ["orchestration", "send"]].__len__(), 1)
+
     def test_a_fenced_send_without_a_run_still_fails(self):
         self.register()
         self.fake({"orchestration send": [ERR("consumer_fenced")],

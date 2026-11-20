@@ -166,6 +166,12 @@ def update_registry(change):
 
 # Orca's refusal to mail a dispatch whose worker it no longer runs
 NO_WORKER = "has no worker Orca started that it can continue"
+# Orca's refusal to start the follow-up a mail needs (seen live after an Orca restart: "error:
+# start_failed: terminal_create: The worker's conversation is open somewhere Orca cannot
+# reach; nothing was sent"): the same end, nothing can continue the dispatch
+START_FAILED = "start_failed"
+# dispatch states nothing continues; "failed" seen live: that follow-up, stage terminal_create
+ENDED = ("abandoned", "failed", "cancelled", "canceled", "stopped")
 
 
 def status_of(show):
@@ -175,7 +181,7 @@ def status_of(show):
         return None
     # seen live after the Orca app was killed: "The assigned worker terminal is no longer
     # live after orchestration recovery". Nothing runs the dispatch any more.
-    if show.get("state") == "abandoned" or show.get("stage") == "terminal_missing":
+    if show.get("state") in ENDED or show.get("stage") == "terminal_missing":
         return None
     # A settled task waits for the next one: Orca mail starts it as a follow-up dispatch,
     # in the same kept terminal or, when Orca closed that one, in a new terminal on the
@@ -388,24 +394,25 @@ class OrcaRuntime(object):
             mutate(["orchestration", "send", "--to", "dispatch:" + entry["dispatch"],
                     "--subject", "OKe", "--body", text], show)
         except HerdrError as e:
-            if NO_WORKER not in e.message:
+            if NO_WORKER not in e.message and START_FAILED not in e.message:
                 raise
             old = entry["dispatch"]
             show = self.show(entry, name)
-            if entry["dispatch"] != old:  # a follow-up started meanwhile: mail that one
+            if entry["dispatch"] != old and status_of(show):  # a follow-up started meanwhile: mail that one
                 mutate(["orchestration", "send", "--to", "dispatch:" + entry["dispatch"],
                         "--subject", "OKe", "--body", text], show)
                 return True
             # After the Orca app or the agent's claude died, Orca can no longer continue the
             # dispatch, though worker-show still reads it settled (seen live). The agent is
             # gone: forget it, so the wait reports `gone` and a revive may start it again.
+            ours = (old, entry["dispatch"])  # the failed follow-up too, when show moved to it
             try:
                 run_orca(["orchestration", "worker-release", "--dispatch", entry["dispatch"]])
             except HerdrError as e2:
                 if e2.code in FATAL:
                     raise
             # only this dispatch's row: a revive may have registered a new one meanwhile
-            update_registry(lambda r: r.pop(name) if (r.get(name) or {}).get("dispatch") == old else None)
+            update_registry(lambda r: r.pop(name) if (r.get(name) or {}).get("dispatch") in ours else None)
             raise HerdrError("agent_not_found", "%s is gone: Orca cannot continue its dispatch" % name)
         return True
 
