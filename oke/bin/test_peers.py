@@ -320,6 +320,13 @@ class TestReviewFixes5(PeerBase):
         self.assertEqual(second["peers"], ["pm-b", "pm-c"])
         self.assertFalse(second["deferred"])
 
+    def test_a_question_item_also_names_the_pms_to_rule_on(self):
+        from test_slice3 import REPORT
+        oke.peer_nudge("pm-c", "fix-a")
+        self.pm_job("fix-a", 1, REPORT("question", 1))
+        item = self.item()
+        self.assertEqual((item["kind"], item["peers"]), ("question", ["pm-c"]))
+
     def test_status_keeps_a_pm_being_ruled_on_out_of_no_answer(self):
         oke.peer_nudge("pm-c", "fix-a")
         self.as_agent("pm-a")

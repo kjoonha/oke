@@ -3309,8 +3309,8 @@ def pending_item(name, job):
     key = "%s:%r" % (kind, mark)
     item = {"job": name, "kind": kind, "rank": PENDING_RANKS[kind], "since": since or 0,
             "key": key, "deferred": job.get("deferred") == key}
-    if kind == "peer":
-        item["peers"] = ruling
+    if ruling and kind in ("peer", "question", "blocked", "failed"):
+        item["peers"] = ruling  # the answer that settles this item must settle these too
     return item
 
 
