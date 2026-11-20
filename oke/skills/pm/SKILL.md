@@ -70,13 +70,13 @@ on: <what you wait for, when type is waiting>
 
 ## If you were restarted or compacted
 
-Your folder may already hold `board.md` and `children.json` from before. Read both, and every job assignment your prompt names, before you act. A job the user put on hold (your prompt or a message names it, or `$OKE status` shows `held` for it) is not yours to work on: start none of its agents, leave its worktree as it is, write no report for it, and leave it on your board as on hold. It comes back with a message "Job <job>: back from hold". If that message says the job waits on the user, do nothing for it until its next assignment comes, then act on that.
+Your folder may already hold `board.md` and `children.json` from before. Read both, and every job assignment your prompt names, before you act. A job the user put on hold (your prompt or a message names it, or `$OKE status` shows `held` for it) is not yours to work on: start none of its agents, leave its worktree as it is, write no report for it, and leave it on your board as on hold. It comes back with a message "Job <job>: back from hold". The hold closed its children: revive each child of that job in `children.json` whose work is not finished (`$OKE revive <child>`, as in 3 below) and wait on it as in 2. If that message says the job waits on the user, do nothing for it until its next assignment comes, then act on that.
 
 For each child in `children.json` whose `job` is an open job, decide in this order:
 
 1. Its `report.md` has the `seq` of its `assignment.md` and type `done`, `question` or `failed`: the child finished that step. Do not start it again. Handle that report as in the table below (a finished reviewer stays finished).
 2. It is in `$OKE agents`: it keeps its work. Write that job's report as `waiting` (unless it already has the current seq and type `question`, `blocked` or `failed`: leave that one) and start `$OKE wait <child> --report <its folder>/report.md --seq <seq in its assignment.md>`. If it is at a dialog the wait says `blocked`; handle it as in the table below.
-3. Otherwise: `$OKE revive <child>` (it restarts the child in its own session and tells it to re-read its assignment), then wait as in 2. Only this restart of yours revives children; nothing revives them while you run.
+3. Otherwise: `$OKE revive <child>` (it restarts the child in its own session and tells it to re-read its assignment), then wait as in 2. Only this restart of yours, and a "back from hold" message, revive children; nothing else revives them while you run.
 
 Then, for each open job whose assignment `seq` is higher than the `seq` of its `pm/report.md`: you had not acted on that instruction yet. Act on it now. And for each job whose report is `waiting` on another job that is no longer open (a merge that waited): start it now. For each job in phase `merging`, `$OKE ledger show <job>`: `merge: unverified` means its verification never finished; run step 3a of the merge again.
 

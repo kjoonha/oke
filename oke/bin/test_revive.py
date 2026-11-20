@@ -123,6 +123,17 @@ class TestRevive(ReviveBase):
         self.assertEqual(len(self.argv_of("pane", "close")), 2)  # the old pane, then the new one
         self.assertIsNone(self.child()["pane"])
 
+    def test_a_child_the_hold_closed_revives_after_unhold(self):
+        # the PM revives it on "back from hold"
+        self.git(self.repo, "branch", "oke/fix-a")
+        self.revive_scenario()
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
+        self.assertIsNone(self.child()["pane"])
+        self.assertEqual(oke.revive("fix-a-w1"), "not_needed")
+        self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")
+        self.assertIsNotNone(self.child()["pane"])
+
     def test_revive_records_the_new_terminal(self):
         self.revive_scenario()
         oke.revive("fix-a-w1")
