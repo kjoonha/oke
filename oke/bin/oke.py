@@ -561,7 +561,17 @@ def cmd_rt(args):
         out = {"place": rt.place_for_repo(repo, os.path.basename(repo.rstrip("/\\")))}
     elif args.rt == "worktree":
         if args.remove:
-            rt.worktree_remove(args.remove)
+            try:
+                rt.worktree_remove(args.remove)
+            except HerdrError as e:
+                # herdr: closing a worktree's last pane (a hold, a cancel) closes its workspace
+                # too, and the id goes with it; the checkout stays: remove it by its path
+                state = load_state()
+                path = [j["worktree"]["path"] for j in state["jobs"].values()
+                        if (j.get("worktree") or {}).get("id") == args.remove]
+                if e.code != "workspace_not_found" or not path:
+                    raise
+                runtime_bg.git_worktree_remove(path[0])
             out = {"removed": args.remove}
         else:
             if not args.job or not args.repo:
@@ -570,6 +580,11 @@ def cmd_rt(args):
                 return fail("worktree --repo needs the repository's path: %s is no directory" % args.repo)
             # shortcut: `oke job merge` merges only oke/<job>, so the branch name is fixed here
             out = rt.worktree_create(native_path(args.repo), "oke/" + args.job, args.job)
+            with locked():
+                state = load_state()
+                if args.job in state["jobs"]:  # for --remove once its id is gone
+                    state["jobs"][args.job]["worktree"] = {"id": out["id"], "path": out["path"]}
+                    save_state(state)
     print(json.dumps(out, ensure_ascii=False))
     return 0
 

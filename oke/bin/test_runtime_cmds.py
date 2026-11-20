@@ -3,6 +3,7 @@ import json
 import os
 import unittest
 
+import oke
 from test_oke import Base, J, E, OK, spawn_ok, SpawnBase  # noqa: F401
 
 
@@ -77,6 +78,21 @@ class TestRuntimeCommands(SpawnBase):
         self.assertIn("--branch oke/fix-a", " ".join(self.argv()[0]))
         self.assertEqual(self.cli("worktree", "--remove", "w7"), 0)
         self.assertEqual(self.argv()[-1][-2:], ["--workspace", "w7"])
+
+    def test_worktree_remove_after_its_workspace_closed(self):
+        # a hold closed the worker's pane, the worktree's last: herdr forgot the workspace
+        self.job("fix-a", "working")
+        wt = self.path("wt-fix-a")
+        self.git(self.repo, "worktree", "add", "-q", wt, "-b", "oke/fix-a")
+        ws = {"workspace_id": "w7", "worktree": {"checkout_path": wt}}
+        self.fake({"worktree create": [J({"type": "worktree_created", "workspace": ws})],
+                   "pane list": [J({"panes": [{"pane_id": "w7:p1"}]})],
+                   "worktree remove": [E("workspace_not_found", "workspace w7 not found")]})
+        self.assertEqual(self.cli("worktree", "fix-a", "--repo", self.repo), 0, self.err)
+        self.assertEqual(self.cli("worktree", "--remove", "w7"), 0, self.err)
+        self.assertFalse(os.path.exists(wt))
+        self.assertEqual(oke.git_out(self.repo, "rev-parse", "-q", "--verify", "oke/fix-a")[0], 0)  # the branch stays, as herdr leaves it
+        self.assertEqual(self.cli("worktree", "--remove", "w8"), 1)  # unknown id: herdr's error
 
     def test_herdr_refusal_is_exit_1(self):
         self.fake({"agent focus": [E("agent_not_found")]})

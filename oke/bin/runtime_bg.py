@@ -258,12 +258,17 @@ class BgRuntime(object):
         return {"id": path, "path": path, "place": path}
 
     def worktree_remove(self, wid):
-        # Run from the main checkout: on Windows git cannot delete the folder it runs in.
-        common = subprocess.check_output(["git", "-C", wid, "rev-parse", "--git-common-dir"])
-        common = os.path.join(wid, common.decode("utf-8").strip())  # may be relative to wid
-        # Without --force, git refuses a worktree with changes, like herdr does.
-        p = subprocess.Popen(["git", "-C", os.path.dirname(common), "worktree", "remove", wid],
-                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = p.communicate()
-        if p.returncode != 0:
-            raise HerdrError("worktree_failed", err.decode("utf-8", "replace").strip())
+        git_worktree_remove(wid)
+
+
+def git_worktree_remove(wid):
+    """Remove the git worktree at path `wid`; its branch stays (as herdr does)."""
+    # Run from the main checkout: on Windows git cannot delete the folder it runs in.
+    common = subprocess.check_output(["git", "-C", wid, "rev-parse", "--git-common-dir"])
+    common = os.path.join(wid, common.decode("utf-8").strip())  # may be relative to wid
+    # Without --force, git refuses a worktree with changes, like herdr does.
+    p = subprocess.Popen(["git", "-C", os.path.dirname(common), "worktree", "remove", wid],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = p.communicate()
+    if p.returncode != 0:
+        raise HerdrError("worktree_failed", err.decode("utf-8", "replace").strip())
