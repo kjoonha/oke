@@ -4,6 +4,7 @@
 Python 3.6 compatible, standard library only.
 """
 import argparse
+import glob
 import hashlib
 import io
 import json
@@ -1022,6 +1023,8 @@ def check_pm_once(agent, key):
             continue  # the orchestrator is still handing it over: the message is not sent yet
         if is_silent(state["jobs"][name], seq):
             continue  # the user was told twice; `pending` keeps it in view
+        if peer_waiting(state, name):
+            continue  # it waits for other PMs' answers (oke peer ask): not stopped short
         if not (header.get("seq") == seq and header.get("type") in REPORT_TYPES):
             report = os.path.join(pm_job_dir(name), "report.md")
             problem = report_problem(report, read_header(report))
@@ -1029,6 +1032,10 @@ def check_pm_once(agent, key):
                 word, why = problem.split(" ", 1)
                 return "?%s %s %s" % (word, name, why)
             return "?idle_no_report %s" % name
+    owed = owed_answers(state, agent)
+    if owed:
+        # idle with an empty inbox: the question went in, and no answer came
+        return "?peer_idle %s" % owed[0][0]
     return None
 
 
@@ -1131,6 +1138,16 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
         elif result.startswith("?"):
             idle += 1
             if idle >= IDLE_CONFIRMATIONS:
+                if result.startswith("?peer_idle "):
+                    if superseded(agent, token):
+                        return "superseded"
+                    job = result.split(" ", 1)[1]
+                    if peer_nudge(agent, job):
+                        idle = 0  # the next look finds the reminder and delivers it
+                        if poll:
+                            time.sleep(poll)
+                        continue
+                    return "peer_no_answer %s %s" % (job, agent)
                 if result != "?deliver":
                     if superseded(agent, token):
                         return "superseded"
@@ -1566,7 +1583,10 @@ def board_tree(state, agents, only_key=None):
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
                          "size": info.get("size"), "direct": bool(info.get("direct")),
                          "merge": merge_state(job)[0], "held": bool(info.get("held")),
-                         "pending": waiting["kind"] if waiting and not waiting["deferred"] else None})
+                         "pending": waiting["kind"] if waiting and not waiting["deferred"] else None,
+                         "peer_wait": sorted(repo_name(e["repo"]) for e in peer_waiting(state, job).values()),
+                         "after_wait": [o for o in after_jobs(job) if after_block(state, o)]
+                         if info.get("phase") in ("awaiting_merge", "merging") else []})
         node = board_node("pm", pm["agent"], key, pm, agents) if pm and pm.get("agent") else None
         if node and node["status"] == "dead" and not open_jobs(state, key):
             node["status"] = "off"  # nothing for it to do (its jobs are done or on hold): not stuck
@@ -1594,8 +1614,11 @@ def board_lines(tree):
         for job in repo["jobs"]:
             if job["phase"] in DONE_PHASES:
                 continue
-            out.append((1, "job %s: %s%s%s" % (job["job"], job["phase"], ", on hold" if job.get("held") else "",
-                                             ", waiting for you (%s)" % job["pending"] if job["pending"] else "")))
+            out.append((1, "job %s: %s%s%s%s%s" % (
+                job["job"], job["phase"], ", on hold" if job.get("held") else "",
+                ", waiting for you (%s)" % job["pending"] if job["pending"] else "",
+                ", waiting for PM %s" % ", ".join(job["peer_wait"]) if job.get("peer_wait") else "",
+                ", waiting for %s to merge" % ", ".join(job["after_wait"]) if job.get("after_wait") else "")))
             for n in job["agents"]:
                 agent(n, 2)
     return out or [(0, "no OKe agents yet")]
@@ -2022,6 +2045,40 @@ def git_out(cwd, *args):
     return p.returncode, p.stdout.decode("utf-8", "replace").strip()
 
 
+def after_jobs(job):
+    """The jobs that must be merged and verified before `job` merges: its plan's `after:`."""
+    header = read_header(os.path.join(oke_home(), "jobs", job, "plan.md")) or {}
+    return [n.strip() for n in str(header.get("after") or "").split(",") if n.strip()]
+
+
+def after_block(state, other):
+    """Why `other` still holds back a job that must merge after it, or None."""
+    info = state["jobs"].get(other)
+    if info is not None:
+        if info.get("phase") == "failed":
+            return "after %s was cancelled: ask the user" % other
+        if merge_state(other)[0] != "verified":
+            return "waiting for %s to merge" % other
+        return None
+    archived = sorted(glob.glob(os.path.join(oke_home(), "archive", glob.escape(other) + "-*")))
+    archived = [d for d in archived if re.match(re.escape(other) + r"-\d{8}-\d{6}$", os.path.basename(d))]
+    if archived and merge_state(other, os.path.join(archived[-1], "ledger.tsv"))[0] == "verified":
+        return None
+    return "after %s was archived without a verified merge: ask the user" % other
+
+
+AFTER_VERIFIED = "is merged and verified. Run the merge again."
+
+
+def tell_after_waiters(state, job, news):
+    """Queue `news` about `job` to the PM of every open job whose plan says `after: <job>`."""
+    for other in sorted(open_jobs(state)):
+        if other != job and job in after_jobs(other):
+            pm = (state["repos"].get(state["jobs"][other].get("repo")) or {}).get("pm") or {}
+            if pm.get("agent"):
+                queue_mail(pm["agent"], "oke", "Job %s: after-job %s %s" % (other, job, news))
+
+
 def merge_job(job):
     """Merge oke/<job> into the main checkout, only if the user approved the merge and
     the last review passed on the very commit the branch points at. A worker that
@@ -2039,6 +2096,10 @@ def merge_job(job):
     if info.get("phase") != "merging":
         return fail("job %s is in phase %s: set phase merging after the user approves the merge"
                     % (job, info.get("phase")))
+    for other in after_jobs(job):
+        why = after_block(state, other)
+        if why:
+            return fail("job %s: %s" % (job, why))
     already = merge_state(job)[0]
     if already in ("unverified", "verified"):
         return fail("job %s is already merged (%s): run `oke job verify %s`, not a second merge"
@@ -2262,9 +2323,9 @@ def ledger_add(job, by, commit, check, result, detail=""):
         f.write((u"\n" if torn else u"") + line + u"\n")
 
 
-def ledger_rows(job):
+def ledger_rows(job, path=None):
     try:
-        with io.open(ledger_path(job), encoding="utf-8") as f:
+        with io.open(path or ledger_path(job), encoding="utf-8") as f:
             lines = f.read().splitlines()
     except (IOError, OSError, UnicodeDecodeError):
         return []
@@ -2275,9 +2336,10 @@ def ledger_rows(job):
 OKE_CHECKS = ("review", "merge", "verify", "rollback")
 
 
-def merge_state(job):
-    """(state, last merge row): state is none, unverified, verified or rolled_back."""
-    rows = ledger_rows(job)
+def merge_state(job, path=None):
+    """(state, last merge row): state is none, unverified, verified or rolled_back.
+    `path`: a ledger.tsv elsewhere (an archived job's)."""
+    rows = ledger_rows(job, path)
     merges = [i for i, r in enumerate(rows) if r["check"] == "merge"]
     if not merges:
         return "none", None
@@ -2354,6 +2416,7 @@ def verify_locked(job, command, accept, info, lock):
     if accept:
         # the user's call, e.g. after the main branch moved on: recorded as such
         ledger_add(job, "user", row["commit"], "verify", "pass", "accepted: " + accept)
+        tell_after_waiters(load_state(), job, AFTER_VERIFIED)
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "accepted": True}))
         return 0
     main = native_path(os.path.dirname(info["repo"]))
@@ -2368,6 +2431,7 @@ def verify_locked(job, command, accept, info, lock):
     log = log.replace("\\", "/")
     if code == 0:
         ledger_add(job, "oke", row["commit"], "verify", "pass", command)
+        tell_after_waiters(load_state(), job, AFTER_VERIFIED)
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "log": log}))
         return 0
     if code in (126, 127):  # the shell could not run the command: not a verdict on the merge
@@ -2697,6 +2761,7 @@ def job_locked(args):
             # queued before the phase changes: the PM's wait delivers it before it can say no_jobs
             queue_mail(pm["agent"], "oke", "Job %s was cancelled by the user. Forget it, close what is "
                        "left of it, and write no report for it." % args.slug)
+        tell_after_waiters(state, args.slug, "was cancelled. Report question to the user.")
         info.update(phase="failed", phase_at=time.time(), cancelled=True)
         save_state(state)  # nothing may start for this job from here on
         return 0
@@ -3010,6 +3075,101 @@ def cmd_send(args):
     return 0
 
 
+# ---------------------------------------------------------------- peers
+
+ANSWER_HINT = "oke peer answer %s <no impact | impact: ...>"
+
+
+def peers_path(job):
+    return os.path.join(oke_home(), "jobs", job, "peers.json")
+
+
+def read_peers(job):
+    data = read_json(peers_path(job), {})
+    return data if isinstance(data, dict) else {}
+
+
+def peer_waiting(state, job):
+    """The PMs that still owe `job` an answer. A PM whose repository has no open job left
+    (done, archived, cancelled or held) is left out: nothing revives or watches it."""
+    waiting = read_peers(job).get("waiting") or {}
+    return dict((pm, e) for pm, e in waiting.items()
+                if isinstance(e, dict) and open_jobs(state, e.get("repo")))
+
+
+def owed_answers(state, agent):
+    """[(job, round)] of every open job that waits on an answer from `agent`."""
+    return [(job, read_peers(job).get("round", 1)) for job in sorted(open_jobs(state))
+            if agent in peer_waiting(state, job)]
+
+
+def peer_nudge(agent, job):
+    """Remind `agent` once of the answer it owes `job`. False when it was reminded already."""
+    with locked():
+        data = read_peers(job)
+        entry = (data.get("waiting") or {}).get(agent)
+        if not isinstance(entry, dict) or entry.get("nudged"):
+            return False
+        entry["nudged"] = 1
+        write_json_atomic(peers_path(job), data)
+        queue_mail(agent, "oke", "Answer the peer ask of job %s (round %d): %s"
+                   % (job, data.get("round", 1), ANSWER_HINT % job))
+    return True
+
+
+def peer_log(job, line):
+    with io.open(os.path.join(oke_home(), "jobs", job, "peers.md"), "a", encoding="utf-8", newline="\n") as f:
+        f.write(line + u"\n")
+
+
+def cmd_peer(args):
+    text = " ".join(" ".join(args.text).split())
+    if not text:
+        return fail("empty message")
+    if text.startswith("/"):
+        return fail("a message must not start with '/': Git Bash rewrites it into a Windows path")
+    state = load_state()
+    info = state["jobs"].get(args.job)
+    if info is None:
+        return fail("unknown job: %s" % args.job)
+    pane = runtime().whoami()
+    me = whoami(state, pane)[0] if pane else None
+    if not me or me[0] != "pm":
+        return fail("only a PM can use oke peer")
+    name = me[1]
+    with locked():
+        state = load_state()
+        if args.action == "ask":
+            if me[2] != info.get("repo"):
+                return fail("job %s belongs to another repository's PM" % args.job)
+            n = read_peers(args.job).get("round", 0) + 1
+            waiting = {}
+            for key in all_keys(state):
+                pm = (state["repos"].get(key) or {}).get("pm") or {}
+                if key != me[2] and pm.get("agent") and open_jobs(state, key):
+                    waiting[pm["agent"]] = {"repo": key, "nudged": 0}
+            write_json_atomic(peers_path(args.job), {"round": n, "asker": name, "waiting": waiting})
+            peer_log(args.job, u"## round %d (%s)" % (n, time.strftime("%Y-%m-%d %H:%M")))
+            peer_log(args.job, u"- ask (%s): %s" % (name, text))
+            for pm in sorted(waiting):
+                queue_mail(pm, name, "peer ask (job %s, round %d): %s. Answer with: %s"
+                           % (args.job, n, text, ANSWER_HINT % args.job))
+            print(json.dumps({"round": n, "asked": sorted(waiting)}))
+            return 0
+        if name not in peer_waiting(state, args.job):
+            return fail("%s was not asked about job %s (or answered already)" % (name, args.job))
+        data = read_peers(args.job)
+        data["waiting"].pop(name, None)
+        write_json_atomic(peers_path(args.job), data)
+        peer_log(args.job, u"- answer (%s): %s" % (name, text))
+        asker = data.get("asker") or ((state["repos"].get(info.get("repo")) or {}).get("pm") or {}).get("agent")
+        if asker:
+            queue_mail(asker, name, "Job %s: peer answer from %s (round %d): %s"
+                       % (args.job, name, data.get("round", 1), text))
+        print(json.dumps({"waiting": sorted(peer_waiting(state, args.job))}))
+        return 0
+
+
 def deliver(agent):
     """Type the queued messages into `agent`, which the caller saw idle. They leave the
     inbox only after herdr took them, so a failed prompt loses nothing. A runtime that
@@ -3272,6 +3432,12 @@ def build_parser():
     send.add_argument("text", nargs="+")
     send.add_argument("--job")
     send.set_defaults(func=cmd_send)
+
+    peer = sub.add_parser("peer", help="PMs ask each other about cross-repo impact")
+    peer.add_argument("action", choices=["ask", "answer"])
+    peer.add_argument("job")
+    peer.add_argument("text", nargs="+")
+    peer.set_defaults(func=cmd_peer)
 
     hook = sub.add_parser("compact-hook")
     hook.set_defaults(func=cmd_compact_hook)
