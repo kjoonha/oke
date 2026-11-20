@@ -212,10 +212,14 @@ class TestClaudeDevFixes(unittest.TestCase):
 
     def test_a_worker_may_not_edit_the_files_the_merge_gate_trusts(self):
         denied = self.denied("worker", "/h/jobs/j/j-w1")
-        for tail in ("/*.md", "/*-rv*/**", "/pm/**", "/*.tsv"):
+        for tail in ("/*.md", "/j-rv*/**", "/pm/**", "/*.tsv"):
             self.assertIn(oke.edit_rules("/h/jobs/j", tail=tail)[0], denied)
         self.assertFalse(any("j-w1" in r for r in denied))
         self.assertFalse(any("/jobs/" in r for r in self.denied("reviewer", "/h/jobs/j/j-rv")))
+        # a job named with -rv must not deny its own worker folder
+        denied = self.denied("worker", "/h/jobs/fix-rv/fix-rv-w1")
+        self.assertIn(oke.edit_rules("/h/jobs/fix-rv", tail="/fix-rv-rv*/**")[0], denied)
+        self.assertFalse(any("/*-rv*" in r for r in denied))
 
     def test_effort_per_role_reaches_the_lean_settings(self):
         tmp = tempfile.mkdtemp()

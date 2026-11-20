@@ -17,7 +17,7 @@ const todos = atom({ plugin: 'oke', key: 'todos' } as const, [] as Todo[], { sha
 const answeredSeen = atom({ plugin: 'oke', key: 'answered' } as const, [] as string[], { shape: 'answered-1' })
 const bandOpen = atom({ plugin: 'oke', key: 'bandOpen' } as const, false as boolean, { shape: 'band-open-1' })
 // the role survives a hot reload here: until the first tick, the guards below depend on it
-const who = atom({ plugin: 'oke', key: 'who' } as const, null as { role: string, folder: string | null } | null, { shape: 'who-1' })
+const who = atom({ plugin: 'oke', key: 'who' } as const, null as { role: string, folder: string | null, named: boolean } | null, { shape: 'who-2' })
 
 // Module state starts over on a reload; session.start runs again then.
 let pane: string | undefined
@@ -73,7 +73,7 @@ async function tick($: any) {
       role = out.role
       folder = out.folder ?? null
       named = false
-      await update($, who, () => (role ? { role, folder } : null))
+      await update($, who, () => (role ? { role, folder, named: false } : null))
     }
     home = out.home ?? home
     claudeDir = out.claude_dir ?? claudeDir
@@ -687,7 +687,7 @@ export const register: Register = on => {
       if (was) {
         role = was.role
         folder = was.folder
-        named = true
+        named = was.named  // a role oke recorded clears again when oke stops naming it
       }
     }
     await tick($)
@@ -850,7 +850,7 @@ export const register: Register = on => {
       role = said.role
       folder = said.folder
       named = true
-      await update($, who, () => ({ role: said.role, folder: said.folder }))
+      await update($, who, () => ({ role: said.role, folder: said.folder, named: true }))
     }
     // a new assignment's seq for the status line; workers and reviewers do not tick otherwise
     if (role === 'worker' || role === 'reviewer') void tick($)

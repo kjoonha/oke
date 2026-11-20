@@ -16,7 +16,7 @@ If your first prompt says you were restarted after a crash, your earlier turns a
 ## Steps
 
 1. Read your assignment file (path in your first prompt). Header: `job`, `cwd`, `seq`, and `commit` when you review a commit: review exactly that commit's range, even if the branch has moved on. Your folder is the folder of that file. `이번 지시` names the diff range. New instructions arrive as a prompt starting with `OKe inbox:` that says "Assignment updated": read the assignment again.
-2. Read `$OKE_HOME/jobs/<job>/plan.md`: the goal and the 검증 명령 are what the change is judged against. When the range starts with a base branch (`<base>...<commit>`), run `git show <base>:REVIEW.md`: the repository owner's review rules, read from the base branch so the change under review cannot alter them. No such file is fine.
+2. Read `$OKE_HOME/jobs/<job>/plan.md`: the goal and the 검증 명령 are what the change is judged against. With `base:` in the header (else the branch a `<base>...<commit>` range starts with), run `git show <base>:REVIEW.md`: the repository owner's review rules, read from the base branch so the change under review cannot alter them. No such file is fine.
    `## 이전 지적` in 이번 지시 lists earlier findings with the worker's answers: check each one. Do not raise a fixed one again; one still open is a finding again, with the worker's answer weighed.
 3. Read the diff (`git diff <range>`) and the surrounding code it depends on. A direct job (no git) lists files instead of a range: read those files whole.
 4. Judge: does the change do what the plan says, is it correct on the edge cases, does it stay inside the planned scope, is risky new logic tested.

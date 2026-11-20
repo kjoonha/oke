@@ -432,7 +432,8 @@ def worker_deny_rules(folder):
     if os.path.basename(os.path.dirname(job_dir)) != "jobs":
         return []
     rules = []
-    for tail in ("/*.md", "/*.tsv", "/*.json", "/*.log", "/pm/**", "/*-rv*/**"):
+    # reviewer folders are <job>-rv[N]: a bare *-rv* would also match `fix-rv-w1`
+    for tail in ("/*.md", "/*.tsv", "/*.json", "/*.log", "/pm/**", "/%s-rv*/**" % os.path.basename(job_dir)):
         rules += edit_rules(job_dir, tail=tail)
     return rules
 
