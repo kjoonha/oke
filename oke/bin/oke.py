@@ -2052,9 +2052,7 @@ def merge_job(job):
                     "with `commit: %s`, then merge" % (job, tip[:12], reviewed, tip))
     if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
         return fail("a merge is already in progress in %s: leave it to the user" % main)
-    code, dirty = git_out(main, "status", "--porcelain")
-    # untracked Python caches never block a merge: every verify run leaves them (seen live)
-    dirty = "\n".join(l for l in dirty.splitlines() if not BYPRODUCT.match(l))
+    code, dirty = main_changes(main)
     if code != 0 or dirty:
         return fail("the main checkout %s is not clean:\n%s" % (main, dirty))
     base = info.get("base")
@@ -2102,6 +2100,13 @@ BYPRODUCT = re.compile(r"^\?\? (.*/)?(__pycache__/|\.pytest_cache/|[^/]*\.py[co]
 # the PM can tell the job's new files from what its checks left (seen live: `add -A`
 # committed __pycache__).
 ADD = ["add", "-u"]
+
+
+def main_changes(main):
+    """(code, porcelain lines) of the main checkout, untracked Python caches left out: every
+    verify run leaves them (seen live), and they never block a merge."""
+    code, dirty = git_out(main, "status", "--porcelain")
+    return code, "\n".join(l for l in dirty.splitlines() if not BYPRODUCT.match(l))
 
 
 def pending_tree(main):
@@ -2588,6 +2593,8 @@ def job_locked(args):
         return 0
     if args.action == "hold":
         info = state["jobs"][args.slug]
+        if info.get("held"):
+            return 0  # held already: cmd_job only retries the closes; no second notice, same held_at
         if (info.get("phase") in DONE_PHASES or info.get("phase") == "merging"
                 or merge_state(args.slug)[0] in ("unverified", "verified")):
             return fail("job %s is %s: only a job before its merge can go on hold"
@@ -2609,7 +2616,7 @@ def job_locked(args):
             section = None
         # a plan with a worktree names its branch: main's changes are the user's, not this job's
         uses_worktree = bool(section) and ("oke/" + args.slug) in section.group(1)
-        if not early and not uses_worktree and info.get("repo") and git_out(main, "status", "--porcelain", "-uno")[1] \
+        if not early and not uses_worktree and info.get("repo") and main_changes(main)[1] \
                 and git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/" + args.slug)[0] != 0:
             # no branch: its edits (a worker's or the PM's own) sit uncommitted in the main
             # checkout, in every other job's way

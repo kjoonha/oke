@@ -199,12 +199,18 @@ class TestWiki(SpawnBase):
     def test_a_job_without_a_branch_cannot_go_on_hold_with_edits_in_main(self):
         self.advance("fix-a", "working")
         self.fake({})
-        # approved, nothing edited yet (an untracked file is not an edit of the job's)
-        self.write(os.path.join(self.repo, "notes.txt"), "x\n")
+        # approved, nothing edited yet (a Python cache is no edit)
+        self.write(os.path.join(self.repo, "__pycache__", "x.pyc"), "x")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
+        held_at = oke.load_state()["jobs"]["fix-a"]["held_at"]
+        # held again (to retry the closes): no second notice, the same held_at
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["held_at"], held_at)
         self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
-        # no branch, no child record (the PM's own subagent): its edits sit in the main checkout
+        # no branch, no child record (the PM's own subagent): its edits sit in the main checkout,
+        # a new file too
         self.write(os.path.join(self.repo, "a.txt"), "a\n")
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
         self.git(self.repo, "add", "a.txt")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
         self.assertIn("no branch oke/fix-a", self.err)
