@@ -203,7 +203,7 @@ class TestReviewFixes(PeerBase):
         oke.save_state(s)
         self.as_agent("pm-a")
         self.assertEqual(self.cli("peer", "status", "fix-a"), 0, self.err)
-        self.assertEqual(json.loads(self.out), {"round": 1, "waiting": [], "dropped": ["pm-b"], "no_answer": []})
+        self.assertEqual(json.loads(self.out), {"round": 1, "waiting": [], "ruling": [], "dropped": ["pm-b"], "no_answer": []})
 
     def test_ask_and_answer_refuse_a_closed_job(self):
         self.ask()
@@ -224,7 +224,7 @@ class TestReviewFixes2(PeerBase):
         self.assertEqual(oke.peer_waiting(oke.load_state(), "fix-a"), {})
         self.as_agent("pm-a")
         self.cli("peer", "status", "fix-a")
-        self.assertEqual(json.loads(self.out), {"round": 1, "waiting": [], "dropped": [], "no_answer": ["pm-b"]})
+        self.assertEqual(json.loads(self.out), {"round": 1, "waiting": [], "ruling": [], "dropped": [], "no_answer": ["pm-b"]})
         self.assertEqual(self.answer(), 0, self.err)
 
     def test_the_askers_final_report_ends_the_talk(self):
@@ -295,6 +295,39 @@ class TestReviewFixes4(PeerBase):
         self.assertEqual(item["kind"], "peer")
         self.pm_job("fix-a", 2)  # the orchestrator gave the PM the user's choice
         self.assertIsNone(oke.pending_item("fix-a", oke.load_state()["jobs"]["fix-a"]))
+
+
+class TestReviewFixes5(PeerBase):
+    def setUp(self):
+        PeerBase.setUp(self)
+        self.add_repo("web", "pm-c", "fix-c", "working")
+        self.pm_job("fix-a", 1)
+        oke.write_json_atomic(oke.peers_path("fix-a"), {"round": 1, "asker": "pm-a", "waiting": {
+            "pm-b": {"repo": self.key_b, "nudged": 1},
+            "pm-c": {"repo": oke.repo_key(os.path.join(os.path.dirname(self.repo_b), "web")), "nudged": 1}}})
+
+    def item(self):
+        return oke.pending_item("fix-a", oke.load_state()["jobs"]["fix-a"])
+
+    def test_a_second_ruling_is_a_new_item_after_a_deferral(self):
+        oke.peer_nudge("pm-b", "fix-a")
+        first = self.item()
+        self.assertEqual(first["peers"], ["pm-b"])
+        self.as_agent("pm-a")
+        self.assertEqual(self.cli("job", "defer", "fix-a"), 0, self.err)
+        oke.peer_nudge("pm-c", "fix-a")
+        second = self.item()
+        self.assertEqual(second["peers"], ["pm-b", "pm-c"])
+        self.assertFalse(second["deferred"])
+
+    def test_status_keeps_a_pm_being_ruled_on_out_of_no_answer(self):
+        oke.peer_nudge("pm-c", "fix-a")
+        self.as_agent("pm-a")
+        self.cli("peer", "status", "fix-a")
+        out = json.loads(self.out)
+        self.assertEqual(out["ruling"], ["pm-c"])
+        self.assertEqual(out["no_answer"], [])
+        self.assertEqual(out["waiting"], ["pm-b"])
 
 
 class TestAfter(PeerBase):

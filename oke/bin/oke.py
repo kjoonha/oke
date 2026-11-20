@@ -3112,7 +3112,7 @@ def peer_ruling(state, job):
     has had no new assignment since (ruled at its current seq). `pending` lists them."""
     seq = state["jobs"].get(job, {}).get("sent_seq")
     return sorted(pm for pm, e in (read_peers(job).get("waiting") or {}).items()
-                  if isinstance(e, dict) and not e.get("closed") and e.get("ruled_seq") == seq
+                  if isinstance(e, dict) and not e.get("closed") and "ruled_seq" in e and e["ruled_seq"] == seq
                   and open_jobs(state, e.get("repo")))
 
 
@@ -3176,10 +3176,12 @@ def cmd_peer(args):
     if args.action == "status":
         raw = read_peers(args.job).get("waiting") or {}
         waiting = peer_waiting(state, args.job)
+        ruling = set(peer_ruling(state, args.job))  # the user has not decided yet
         ruled = set(pm for pm, e in raw.items()
-                    if isinstance(e, dict) and (e.get("nudged", 0) >= 2 or e.get("closed")))
+                    if isinstance(e, dict) and (e.get("nudged", 0) >= 2 or e.get("closed"))) - ruling
         print(json.dumps({"round": read_peers(args.job).get("round", 0), "waiting": sorted(waiting),
-                          "dropped": sorted(set(raw) - set(waiting) - ruled), "no_answer": sorted(ruled)}))
+                          "ruling": sorted(ruling), "dropped": sorted(set(raw) - set(waiting) - ruled - ruling),
+                          "no_answer": sorted(ruled)}))
         return 0
     if info.get("phase") in DONE_PHASES:
         return fail("job %s is closed (%s): nothing to ask or answer" % (args.job, info.get("phase")))
@@ -3284,6 +3286,7 @@ def pending_item(name, job):
         return None  # a held job asks nothing until `job unhold`
     seq, report, mtime = pm_job_report(name)
     rtype = report.get("type") if seq is not None and report.get("seq") == seq else None
+    ruling = peer_ruling(load_state(), name) if os.path.exists(peers_path(name)) else []
     if seq is None and phase in ("planning", "working", "reviewing", "merging"):
         kind, since, mark = "legacy", job.get("phase_at"), phase  # started before slice 3
     elif seq is not None and job.get("sent_seq") != seq:
@@ -3292,8 +3295,9 @@ def pending_item(name, job):
         kind, since, mark = rtype, mtime, seq
     elif rtype not in REPORT_TYPES and is_silent(job, seq):
         kind, since, mark = "silent", mtime, seq
-    elif os.path.exists(peers_path(name)) and peer_ruling(load_state(), name):
-        kind, since, mark = "peer", os.path.getmtime(peers_path(name)), job.get("sent_seq")
+    elif ruling:
+        # the PMs are in the mark: a later missing answer is a new item, even after a deferral
+        kind, since, mark = "peer", os.path.getmtime(peers_path(name)), "%s:%s" % (job.get("sent_seq"), ",".join(ruling))
     elif rtype == "done" and phase in ASKING_PHASES:
         kind, since, mark = "report_done", mtime, seq
     elif phase == "awaiting_approval":
@@ -3303,8 +3307,11 @@ def pending_item(name, job):
     else:
         return None
     key = "%s:%r" % (kind, mark)
-    return {"job": name, "kind": kind, "rank": PENDING_RANKS[kind], "since": since or 0,
+    item = {"job": name, "kind": kind, "rank": PENDING_RANKS[kind], "since": since or 0,
             "key": key, "deferred": job.get("deferred") == key}
+    if kind == "peer":
+        item["peers"] = ruling
+    return item
 
 
 def cmd_pending(args):
