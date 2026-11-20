@@ -398,7 +398,6 @@ class TestTick(ReviveBase):
         out = self.tick("w1:p3", [AG("pm-toy", pane="w1:p3", session="s-pm")])
         self.assertEqual(out["role"], "pm")
         self.assertEqual(self.revived, [])
-        self.assertEqual(out["revived"], {})
 
     def test_pm_skips_a_child_with_its_final_report(self):
         self.write_file(os.path.join(self.child_dir, "report.md"), "type: done\nseq: 2\n---\n")

@@ -11,6 +11,8 @@ import re
 import shutil
 import time
 
+from runtime_herdr import replace_file
+
 PAGE_CHARS = 3000
 INDEX_CHARS = 2000
 STALE_DAYS = 14
@@ -44,7 +46,7 @@ def _write(path, text):
     tmp = "%s.%d.tmp" % (path, os.getpid())
     with io.open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write(text)
-    os.replace(tmp, path)
+    replace_file(tmp, path)
 
 
 def sha(text):

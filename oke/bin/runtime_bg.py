@@ -120,8 +120,6 @@ def with_bg_settings(argv, folder):
 
 class BgRuntime(object):
     name = "bg"
-    Error = HerdrError
-
     owns_orchestrator = False  # the orchestrator is the user's own session: never revived
 
     def inside(self):
@@ -218,9 +216,6 @@ class BgRuntime(object):
 
     def place_exists(self, place):
         return any(a.get("id") == place and status_of(a) for a in self.rows())
-
-    def has_claude(self, place):
-        return self.place_exists(place)
 
     def processes(self, place):
         return []

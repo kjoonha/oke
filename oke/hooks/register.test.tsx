@@ -22,7 +22,7 @@ let autoCompact = true
 
 function answer(args: readonly string[]) {
   if (args[0] === 'tick') {
-    return { role: tickRole, folder: '/oke/jobs/j/w1', home: 'C:/oke', wiki: 'C:/oke/wiki', claude_dir: 'C:/Users/u/.claude', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : tickBoard, revived: {} }
+    return { role: tickRole, folder: '/oke/jobs/j/w1', home: 'C:/oke', wiki: 'C:/oke/wiki', claude_dir: 'C:/Users/u/.claude', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : tickBoard }
   }
   if (args[0] === 'boundary') return { role: tickRole, answered: answeredNow }
   if (args[0] === 'api-retry' && args.includes('--clear')) return { action: 'cleared' }

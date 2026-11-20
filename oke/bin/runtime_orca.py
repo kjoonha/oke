@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 
-from runtime_herdr import HerdrError
+from runtime_herdr import HerdrError, replace_file
 
 # errors no lookup may read as "agent gone": the caller sees them
 FATAL = ("herdr_unavailable", "orca_cli_unknown")
@@ -137,7 +137,7 @@ def save_registry(data):
     tmp = "%s.%d.tmp" % (path, os.getpid())
     with io.open(tmp, "w", encoding="utf-8") as f:
         f.write(json.dumps(data, indent=2, ensure_ascii=False))
-    os.replace(tmp, path)
+    replace_file(tmp, path)
 
 
 def update_registry(change):
@@ -220,8 +220,6 @@ def title_of(name):
 
 class OrcaRuntime(object):
     name = "orca"
-    Error = HerdrError
-
     owns_orchestrator = False  # the orchestrator is the user's own Orca session: never revived
 
     def inside(self):
@@ -450,9 +448,6 @@ class OrcaRuntime(object):
     def place_exists(self, place):
         name, entry = self.entry_of(place)
         return bool(entry and status_of(self.show(entry, name)))
-
-    def has_claude(self, place):
-        return self.place_exists(place)
 
     def processes(self, place):
         return []

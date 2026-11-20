@@ -18,7 +18,7 @@ import runtime_bg
 import runtime_herdr
 import runtime_orca
 import wiki
-from runtime_herdr import DialogError, HerdrError, herdr, herdr_text, session_of  # noqa: F401 (tests)
+from runtime_herdr import DialogError, HerdrError, herdr, herdr_text, replace_file, session_of  # noqa: F401 (tests)
 
 PHASES = ("intake", "planning", "awaiting_approval", "working", "reviewing",
           "awaiting_merge", "merging", "done", "failed")
@@ -118,18 +118,9 @@ def write_json_atomic(path, obj):
     with io.open(tmp, "w", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(obj, ensure_ascii=False, indent=2, sort_keys=True))
         f.write(u"\n")
+        f.flush()
+        os.fsync(f.fileno())  # a crash must not leave state.json empty
     replace_file(tmp, path)
-
-
-def replace_file(src, dst):
-    for attempt in range(20):
-        try:
-            os.replace(src, dst)
-            return
-        except OSError:  # Windows: another process has the file open for a moment
-            if attempt == 19:
-                raise
-            time.sleep(0.05)
 
 
 def read_json(path, default):
@@ -196,13 +187,19 @@ def lock_path(name):
     return os.path.join(oke_home(), "locks", name)
 
 
+_lock_tokens = {}
+
+
 def try_lock(name):
     path = lock_path(name)
     if not os.path.isdir(os.path.dirname(path)):
         os.makedirs(os.path.dirname(path), exist_ok=True)
     for _ in range(2):
         try:
-            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            _lock_tokens[name] = "%d-%.6f" % (os.getpid(), time.time())
+            os.write(fd, _lock_tokens[name].encode())
+            os.close(fd)
             return True
         except OSError:
             try:
@@ -215,9 +212,13 @@ def try_lock(name):
 
 
 def unlock(name):
+    """Only our own lock: one we held past LOCK_STALE may be another process's by now."""
     try:
-        os.remove(lock_path(name))
-    except OSError:
+        with io.open(lock_path(name), encoding="utf-8") as f:
+            mine = f.read() == _lock_tokens.pop(name, None)
+        if mine:
+            os.remove(lock_path(name))
+    except (IOError, OSError):
         pass
 
 
@@ -299,8 +300,6 @@ def slug(text, limit=24):
         s = "x" + s
     return s[:limit].rstrip("-")
 
-
-# ---------------------------------------------------------------- herdr
 
 # ---------------------------------------------------------------- runtime
 
@@ -1578,7 +1577,7 @@ def cmd_tick(args):
     """One watcher round for a mod: who am I, revive what died, new events, the board."""
     state = load_state()
     events, offset = read_events(args.events_from)
-    out = {"role": None, "agent": None, "revived": {}, "events": events,
+    out = {"role": None, "agent": None, "events": events,
            "events_offset": offset, "board": None}
     me, agents = whoami(state, args.pane)
     if me is not None:
@@ -1689,9 +1688,11 @@ def cmd_api_retry(args):
             folders = [folder] if folder else []
         for f_dir in folders:
             seq = (read_header(os.path.join(f_dir, "assignment.md")) or {}).get("seq")
-            with io.open(os.path.join(f_dir, "report.md"), "w", encoding="utf-8", newline="\n") as f:
+            report = os.path.join(f_dir, "report.md")
+            with io.open(report + ".tmp", "w", encoding="utf-8", newline="\n") as f:  # a wait reads it
                 f.write(u"type: failed\nseq: %s\n---\n## 요약\nAPI error %s: automatic retry stopped "
                         u"after %d attempts.\n" % (seq, kind or "unknown", args.attempt))
+            replace_file(report + ".tmp", report)
     if marker and os.path.exists(marker):
         os.remove(marker)
     print(json.dumps(out))
@@ -2325,6 +2326,8 @@ def verify_locked(job, command, accept, info, lock):
 
 
 def cmd_ledger(args):
+    if args.job != slug(args.job):  # a name like ../x would write outside the jobs folder
+        return fail("bad job name %r" % args.job)
     if args.action == "add":
         if not os.path.isdir(os.path.dirname(ledger_path(args.job))):
             return fail("unknown job: %s" % args.job)
@@ -2388,7 +2391,7 @@ def cmd_interview(args):
     """One round of the intake interview: record the orchestrator's clarity scores
     (and the question just answered), compute ambiguity, say what to ask next."""
     path = interview_path(args.job)
-    if not os.path.isdir(os.path.dirname(path)):
+    if args.job != slug(args.job) or not os.path.isdir(os.path.dirname(path)):
         return fail("unknown job: %s (run `oke job new` first)" % args.job)
     scores = {}
     for name, _ in DIMENSIONS:
@@ -2914,6 +2917,12 @@ def deliver(agent):
         # compacted before its SendMessage loses it (the file stays in read/)
         for path, _ in msgs:
             replace_file(path, os.path.join(done, os.path.basename(path)))
+        for old in os.listdir(done):  # read mail is kept a week, for a look back
+            try:
+                if os.path.getmtime(os.path.join(done, old)) < time.time() - 7 * 86400:
+                    os.remove(os.path.join(done, old))
+            except OSError:
+                pass
         return text if took == "ask_caller" else True
     finally:
         unlock(lock)

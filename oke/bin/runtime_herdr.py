@@ -13,6 +13,17 @@ REQUIRED_COMMANDS = ("agent start", "agent prompt", "agent wait", "agent read",
                      "agent send-keys", "pane split", "worktree create")
 
 
+def replace_file(src, dst):
+    for attempt in range(20):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError:  # Windows: another process has the file open for a moment
+            if attempt == 19:
+                raise
+            time.sleep(0.05)
+
+
 class HerdrError(Exception):
     def __init__(self, code, message):
         Exception.__init__(self, "%s: %s" % (code, message))
@@ -225,16 +236,6 @@ def answer_startup_dialogs(agent, kind, trusted):
     raise DialogError(screen)
 
 
-def pane_has_claude(pane):
-    try:
-        info = herdr("pane", "process-info", "--pane", pane).get("process_info", {})
-    except HerdrError as e:
-        if e.code == "herdr_unavailable":
-            raise
-        return False
-    return any("claude" in (p.get("name") or "").lower() for p in info.get("foreground_processes") or [])
-
-
 def terminal_of(pane):
     """herdr's id of the terminal in `pane`; unlike the pane id it is never reused."""
     try:
@@ -258,8 +259,6 @@ class HerdrRuntime(object):
     herdr pane id. Errors are HerdrError with herdr's own codes."""
 
     name = "herdr"
-    Error = HerdrError
-
     owns_orchestrator = True  # a PM may revive a dead orchestrator in its pane
 
     def inside(self):
@@ -332,9 +331,6 @@ class HerdrRuntime(object):
 
     def place_id(self, place):
         return terminal_of(place)
-
-    def has_claude(self, place):
-        return pane_has_claude(place)
 
     def processes(self, place):
         """Foreground processes in a place (name, argv, cwd); [] when unknown."""

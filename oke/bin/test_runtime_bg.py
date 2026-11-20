@@ -222,7 +222,7 @@ class TestIdentityInBg(BgBase):
         oke.revive = lambda name: self.fail("revived " + name)
         self.assertEqual(self.cli("tick", "--pane", "session:s-2"), 0, self.err)
         out = json.loads(self.out)
-        self.assertEqual((out["role"], out["revived"]), ("pm", {}))
+        self.assertEqual(out["role"], "pm")
 
 
 class TestBoardAndScreen(BgBase):
