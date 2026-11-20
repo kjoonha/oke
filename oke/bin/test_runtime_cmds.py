@@ -89,7 +89,19 @@ class TestRuntimeCommands(SpawnBase):
                    "pane list": [J({"panes": [{"pane_id": "w7:p1"}]})],
                    "worktree remove": [E("workspace_not_found", "workspace w7 not found")]})
         self.assertEqual(self.cli("worktree", "fix-a", "--repo", self.repo), 0, self.err)
+        # a worker revived after the unhold: its shell sits in the checkout, outside the workspace
+        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)), {
+            "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p8", "terminal": "term-8"}})
+        self.fake({"worktree remove": [E("workspace_not_found", "workspace w7 not found")],
+                   "pane get": [J({"pane": {"pane_id": "w1:p8", "terminal_id": "term-8"}})],
+                   "pane close": [J({"type": "ok"})]})
+        remove = oke.runtime_bg.git_worktree_remove
+        closed_first = []
+        oke.runtime_bg.git_worktree_remove = lambda p: closed_first.append(
+            ["pane", "close", "w1:p8"] in self.argv()) or remove(p)
+        self.addCleanup(setattr, oke.runtime_bg, "git_worktree_remove", remove)
         self.assertEqual(self.cli("worktree", "--remove", "w7"), 0, self.err)
+        self.assertEqual(closed_first, [True])  # Windows: git cannot delete a folder a shell is in
         self.assertFalse(os.path.exists(wt))
         self.assertEqual(oke.git_out(self.repo, "rev-parse", "-q", "--verify", "oke/fix-a")[0], 0)  # the branch stays, as herdr leaves it
         self.assertEqual(self.cli("worktree", "--remove", "w8"), 1)  # unknown id: herdr's error

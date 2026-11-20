@@ -567,11 +567,16 @@ def cmd_rt(args):
                 # herdr: closing a worktree's last pane (a hold, a cancel) closes its workspace
                 # too, and the id goes with it; the checkout stays: remove it by its path
                 state = load_state()
-                path = [j["worktree"]["path"] for j in state["jobs"].values()
-                        if (j.get("worktree") or {}).get("id") == args.remove]
-                if e.code != "workspace_not_found" or len(path) != 1:  # never a guess between jobs
+                found = [(n, j) for n, j in state["jobs"].items()
+                         if (j.get("worktree") or {}).get("id") == args.remove]
+                if e.code != "workspace_not_found" or len(found) != 1:  # never a guess between jobs
                     raise
-                runtime_bg.git_worktree_remove(path[0])
+                job, info = found[0]
+                if info.get("repo"):
+                    # revived children run outside the workspace, in the checkout: on Windows git
+                    # cannot delete a folder a shell sits in (half deleted, then "Permission denied")
+                    close_children(job, info["repo"])
+                runtime_bg.git_worktree_remove(info["worktree"]["path"])
             out = {"removed": args.remove}
         else:
             if not args.job or not args.repo:
