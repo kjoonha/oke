@@ -2553,6 +2553,8 @@ def job_locked(args):
             if problem:
                 return fail(problem)
         state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
+        if args.phase == "working":
+            info["worked"] = True  # a later re-plan does not undo the edits already made
         save_state(state)
         return 0
     if args.action == "rounds":
@@ -2594,7 +2596,8 @@ def job_locked(args):
         if merged == "rolled_back" and "already-in" in row["detail"].split():
             return fail("job %s blocks the merges of its repository (its failing code is in main): fix "
                         "it, or cancel and archive it, not hold it" % args.slug)
-        early = info.get("size") == "research" or info.get("phase") in ("intake", "planning", "awaiting_approval")
+        early = info.get("size") == "research" or (
+            info.get("phase") in ("intake", "planning", "awaiting_approval") and not info.get("worked"))
         if info.get("direct") and not early:
             return fail("job %s changes its folder in place (no git): cancel it, or let it finish, not hold it"
                         % args.slug)

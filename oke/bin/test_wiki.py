@@ -218,6 +218,15 @@ class TestWiki(SpawnBase):
         self.git(self.repo, "branch", "oke/fix-a")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
 
+    def test_a_re_plan_after_work_does_not_count_as_early(self):
+        self.advance("fix-a", "working")
+        self.write(os.path.join(self.repo, "a.txt"), "a\n")
+        self.git(self.repo, "add", "a.txt")  # the work already edited main
+        self.assertEqual(self.cli("job", "phase", "fix-a", "planning"), 0, self.err)  # the user wants changes
+        self.fake({})
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
+        self.assertIn("no branch oke/fix-a", self.err)
+
     def test_unhold_asks_a_deferred_question_again(self):
         self.advance("fix-a", "awaiting_approval")
         self.assertEqual(self.cli("job", "defer", "fix-a"), 0, self.err)
