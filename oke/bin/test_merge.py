@@ -487,6 +487,7 @@ class TestDirectCommit(MergeBase):
         # the change was already there: the review passed on a clean checkout
         self.git(self.repo, "reset", "-q")
         os.remove(os.path.join(self.repo, "d.txt"))
+        self.write("toy/__pycache__/x.pyc", "x")  # untracked: not the job's
         tree = self.git_out(self.repo, "rev-parse", "HEAD^{tree}").strip()
         path = os.path.join(self.jobs, "fix-a-rv", "assignment.md")
         with open(path, "w") as f:

@@ -196,15 +196,16 @@ class TestWiki(SpawnBase):
         self.assertTrue(texts[1].startswith("Job fix-a was cancelled"))
         self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
 
-    def test_a_job_without_a_branch_cannot_go_on_hold_once_a_worker_started(self):
+    def test_a_job_without_a_branch_cannot_go_on_hold_with_edits_in_main(self):
         self.advance("fix-a", "working")
         self.fake({})
-        # approved, but no worker ever started (the PM died first): nothing was written
+        # approved, nothing edited yet (an untracked file is not an edit of the job's)
+        self.write(os.path.join(self.repo, "notes.txt"), "x\n")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
         self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
-        # a worker without a branch: its edits sit uncommitted in the main checkout
-        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
-                              {"fix-a-w1": {"job": "fix-a", "role": "worker"}})
+        # no branch, no child record (the PM's own subagent): its edits sit in the main checkout
+        self.write(os.path.join(self.repo, "a.txt"), "a\n")
+        self.git(self.repo, "add", "a.txt")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
         self.assertIn("no branch oke/fix-a", self.err)
         self.git(self.repo, "branch", "oke/fix-a")

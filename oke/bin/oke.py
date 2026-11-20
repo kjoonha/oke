@@ -2152,7 +2152,7 @@ def commit_direct(job, info, main, review, reviewed):
     if not current or (base and current != base):
         return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
                     % (current or "a detached HEAD", base))
-    code, dirty = git_out(main, "status", "--porcelain")
+    code, dirty = git_out(main, "status", "--porcelain", "-uno")  # untracked files are never committed
     if code == 0 and not dirty and git_out(main, "rev-parse", "HEAD^{tree}")[1] == reviewed:
         # the review passed on main as it is (the change was already there): recorded like
         # merge_job's already-in, so verify and done work
@@ -2594,11 +2594,10 @@ def job_locked(args):
             return fail("job %s changes its folder in place (no git): cancel it, or let it finish, not hold it"
                         % args.slug)
         main = native_path(os.path.dirname(info.get("repo") or ""))
-        started = any(r.get("job") == args.slug for r in read_children(info.get("repo")).values())             if info.get("repo") else False
-        if not early and started and git_out(main, "rev-parse", "-q", "--verify",
-                                             "refs/heads/oke/" + args.slug)[0] != 0:
-            # a worker without a branch: its edits sit uncommitted in the main checkout, in every
-            # other job's way
+        if not early and info.get("repo") and git_out(main, "status", "--porcelain", "-uno")[1] \
+                and git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/" + args.slug)[0] != 0:
+            # no branch: its edits (a worker's or the PM's own) sit uncommitted in the main
+            # checkout, in every other job's way
             return fail("job %s works in the main checkout (no branch oke/%s): cancel it, or let it "
                         "finish, not hold it" % (args.slug, args.slug))
         pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}
