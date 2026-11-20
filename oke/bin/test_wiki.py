@@ -243,7 +243,14 @@ class TestWiki(SpawnBase):
         oke.save_state(state)
         self.fake({})
         self.assertEqual(self.cli("send", pm, "Job fix-a: assignment updated (seq 2)"), 0, self.err)
+        # the notice is queued before the slow agent close: a PM wait that sees no open job
+        # meanwhile still has mail, so it does not end with no_jobs and lose the notice
+        cancel = oke.cancel_children
+        seen = []
+        oke.cancel_children = lambda *a: seen.append([t for _, t in oke.inbox_messages(pm)]) or cancel(*a)
+        self.addCleanup(setattr, oke, "cancel_children", cancel)
         self.assertEqual(self.cli("job", "hold", "fix-a", "--reason", "later"), 0, self.err)
+        self.assertTrue(any("Job fix-a is on hold" in t for t in seen[0]))
         state = oke.load_state()
         self.assertEqual(state["jobs"]["fix-a"]["held"], "later")
         self.assertEqual(oke.open_jobs(state, key), ["fix-b"])
@@ -254,7 +261,7 @@ class TestWiki(SpawnBase):
         self.assertIn("on hold: fix-a", oke.pm_jobs_note(state, key))
         texts = [t.split(": ", 1)[1] for _, t in oke.inbox_messages(pm)]
         self.assertEqual(len(texts), 1)  # the old assignment notice went; the hold notice stays
-        self.assertTrue(texts[0].startswith("Job fix-a: the user put it on hold"))
+        self.assertTrue(texts[0].startswith("Job fix-a is on hold"))
         board_job = oke.board_tree(state, [])[0]["jobs"][0]
         self.assertEqual(board_job["held"], True)
         self.assertEqual(board_job["agents"][0]["status"], "off")  # closed by the hold, not dead

@@ -1925,14 +1925,8 @@ def cmd_job(args):
         if code:
             return code
         info = load_state()["jobs"][args.slug]
-        cancel_children(args.slug, info.get("repo"))  # closes its agents, drops its queued mail
-        pm = (load_state()["repos"].get(info.get("repo")) or {}).get("pm") or {}
-        if pm.get("agent"):
-            # after the drop, so it stays; a PM that is down reads it when it comes back
-            queue_mail(pm["agent"], "oke", "Job %s: the user put it on hold. Stop working on it, "
-                       "start none of its agents, leave its worktree, and write no report for it "
-                       "until a message says it is back." % args.slug)
-        return 0
+        # closes its agents, drops its queued mail but not the hold notice job_locked queued
+        return cancel_children(args.slug, info.get("repo"))
     if args.action == "verify":
         if bool(args.command) == bool(args.accept):
             return fail("give the 검증 명령, or --accept \"<why>\" when the user accepts the merge as it is")
@@ -1953,7 +1947,7 @@ def cmd_job(args):
     with locked():
         code = job_locked(args)
     if code == 0 and key and args.action == "unhold":
-        drop_job_mail(args.slug, key)  # the hold notice, if the PM has not read it
+        drop_job_mail(args.slug, key, HOLD_NOTICE.split(":")[0] % args.slug)  # if the PM has not read it
     if code == 0 and left:
         print("not_closed: %s (the runtime did not close them: tell the user to close them)" % ", ".join(left))
     return code
@@ -2575,6 +2569,11 @@ def job_locked(args):
                 or merge_state(args.slug)[0] in ("unverified", "verified")):
             return fail("job %s is %s: only a job before its merge can go on hold"
                         % (args.slug, info.get("phase")))
+        pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}
+        if pm.get("agent"):
+            # queued before held is saved: a PM wait that sees the job gone sees this mail
+            # and does not end with no_jobs. Not "Job X:", so the mail drop keeps it.
+            queue_mail(pm["agent"], "oke", HOLD_NOTICE % args.slug)
         info.update(held=args.reason or "the user", held_at=time.time())
         save_state(state)
         return 0
@@ -2676,11 +2675,15 @@ def close_children(job, key):
     return closed, left, refused
 
 
-def drop_job_mail(job, key):
+HOLD_NOTICE = ("Job %s is on hold: the user put it on hold. Stop working on it, start none of its "
+               "agents, leave its worktree, and write no report for it until a message says it is back.")
+
+
+def drop_job_mail(job, key, also=None):
     """Move the queued messages about `job` out of its PM's and children's inboxes, so a
     later agent never acts on a closed job (OMC deletes a finished team's mailboxes)."""
     names = ["pm-" + repo_name(key)] + [n for n, r in read_children(key).items() if r.get("job") == job]
-    mark = "Job %s:" % job
+    mark = ("Job %s:" % job,) + ((also,) if also else ())
     dropped = 0
     for agent in names:
         lock = "deliver-" + agent
