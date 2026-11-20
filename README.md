@@ -15,6 +15,10 @@
 </p>
 
 <p align="center">
+  <img src="docs/oke-org.svg" alt="Org chart: you talk to the orchestrator; it runs one PM per repository; each PM runs a worker and a reviewer. Assignments flow down, reports flow up.">
+</p>
+
+<p align="center">
   <img src="docs/oke-band.svg" alt="The OKe characters at work: orchestrator, PM, worker and reviewer in the disco, slime and mushroom themes">
 </p>
 
@@ -25,10 +29,6 @@
 </p>
 
 ## How it is organised
-
-<p align="center">
-  <img src="docs/oke-org.svg" alt="Org chart: you talk to the orchestrator; it runs one PM per repository; each PM runs a worker and a reviewer. Assignments flow down, reports flow up.">
-</p>
 
 - **Orchestrator**: the Claude Code session you talk to. It interviews you about a job, asks you to approve plans and merges, and keeps the queue.
 - **PM**: one per repository. It plans the job, starts the worker and the reviewer, and merges and verifies only what the review passed.
