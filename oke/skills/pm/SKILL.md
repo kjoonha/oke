@@ -250,7 +250,7 @@ Two jobs in different repositories can affect each other, and only the PM of a r
 
 **Talking it through.** If you need something from the other PM (keep the old field one release, a different name), ask in your answer; it answers with a new `peer ask` round. When you cannot agree, report `question` for your job with both positions; the other PM does the same for its job.
 
-**Merge order.** `$OKE job merge` refusing with `waiting for <job> to merge`: write the job's report as `waiting` (`on: <job>`), end your turn, and run the merge again when `oke` tells you "after-job <job> is merged and verified". `after <job> was cancelled`, `was archived without a verified merge` or `is no known job` (never edit an approved plan yourself), or the message "after-job <job> was cancelled": report `question` for the job; the user decides whether to drop the `after:` line.
+**Merge order.** `$OKE job merge` refusing with `waiting for <job> to merge`: write the job's report as `waiting` (`on: <job>`) — not `question`: the user already approved this order — end your turn, and run the merge again when `oke` tells you "after-job <job> is merged and verified". `after <job> was cancelled`, `was archived without a verified merge` or `is no known job` (never edit an approved plan yourself), or the message "after-job <job> was cancelled": report `question` for the job; the user decides whether to drop the `after:` line.
 
 ## Urgent findings
 
