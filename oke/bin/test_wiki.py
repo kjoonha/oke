@@ -208,6 +208,13 @@ class TestWiki(SpawnBase):
         self.git(self.repo, "add", "a.txt")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
         self.assertIn("no branch oke/fix-a", self.err)
+        # the plan uses a worktree (the PM died before making it): main's edits are the user's
+        plan = os.path.join(oke.oke_home(), "jobs", "fix-a", "plan.md")
+        self.write(plan, "job: fix-a\n---\n## 접근\nx\n## worktree\noke/fix-a\n## 단위 작업\nx\n")
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
+        self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
+        self.write(plan, "job: fix-a\n---\n## worktree\n없음\n## 단위 작업\noke/fix-a later\n")
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
         self.git(self.repo, "branch", "oke/fix-a")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
 

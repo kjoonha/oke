@@ -92,7 +92,7 @@ Read `$OKE_HOME/jobs/<job>/intake.md`, the repository, and `<wiki>/index.md` and
 job: <job>
 ---
 ## 접근
-## worktree        (use one or not; branch name oke/<job>)
+## worktree        (with one: its branch, oke/<job>; without: 없음)
 ## 단위 작업        (ordered list for the worker)
 ## 검증 명령        (required: the command and what passing looks like)
 ## 사용자에게 물을 것 (or 없음)
