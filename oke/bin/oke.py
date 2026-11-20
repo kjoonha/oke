@@ -1427,6 +1427,11 @@ def revive_locked(name):
     if role == "orchestrator":
         fields["agent"] = ORCH_NAME
     update_record(role, key, name, fields)
+    if role in ("worker", "reviewer") and not should_be_alive(load_state(), role, key, name, record):
+        # held or cancelled during the start: its close_children ran before this pane was recorded
+        close_children(record.get("job"), key)
+        log_event("revive_stopped %s: its job went on hold or ended" % name)
+        return "not_needed"
     log_event("revived %s pane %s" % (name, fields["pane"]))
     return "revived"
 

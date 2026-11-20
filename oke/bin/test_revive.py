@@ -7,6 +7,7 @@ import unittest
 
 from test_oke import AG, AGENT, E, J, OK, SpawnBase, help_ok
 import oke
+import runtime_herdr
 
 
 def PINFO(*names):
@@ -105,6 +106,22 @@ class TestRevive(ReviveBase):
         self.revive_scenario()
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
         self.assertEqual(self.argv_of("pane", "close"), [])
+
+    def test_a_hold_while_a_worker_revives_closes_it(self):
+        # the hold's close_children saw only the old dead pane
+        start = runtime_herdr.start_agent
+
+        def hold_then_start(*a, **k):
+            s = oke.load_state()
+            s["jobs"]["fix-a"]["held"] = "later"
+            oke.save_state(s)
+            return start(*a, **k)
+        runtime_herdr.start_agent = hold_then_start
+        self.addCleanup(setattr, runtime_herdr, "start_agent", start)
+        self.revive_scenario()
+        self.assertEqual(oke.revive("fix-a-w1"), "not_needed")
+        self.assertEqual(len(self.argv_of("pane", "close")), 2)  # the old pane, then the new one
+        self.assertIsNone(self.child()["pane"])
 
     def test_revive_records_the_new_terminal(self):
         self.revive_scenario()
