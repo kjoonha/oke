@@ -569,7 +569,7 @@ def cmd_rt(args):
                 state = load_state()
                 path = [j["worktree"]["path"] for j in state["jobs"].values()
                         if (j.get("worktree") or {}).get("id") == args.remove]
-                if e.code != "workspace_not_found" or not path:
+                if e.code != "workspace_not_found" or len(path) != 1:  # never a guess between jobs
                     raise
                 runtime_bg.git_worktree_remove(path[0])
             out = {"removed": args.remove}
@@ -583,6 +583,9 @@ def cmd_rt(args):
             with locked():
                 state = load_state()
                 if args.job in state["jobs"]:  # for --remove once its id is gone
+                    for j in state["jobs"].values():  # herdr reuses workspace ids after a restart
+                        if (j.get("worktree") or {}).get("id") == out["id"]:
+                            j.pop("worktree")
                     state["jobs"][args.job]["worktree"] = {"id": out["id"], "path": out["path"]}
                     save_state(state)
     print(json.dumps(out, ensure_ascii=False))

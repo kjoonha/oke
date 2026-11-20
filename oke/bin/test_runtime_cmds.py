@@ -94,6 +94,28 @@ class TestRuntimeCommands(SpawnBase):
         self.assertEqual(oke.git_out(self.repo, "rev-parse", "-q", "--verify", "oke/fix-a")[0], 0)  # the branch stays, as herdr leaves it
         self.assertEqual(self.cli("worktree", "--remove", "w8"), 1)  # unknown id: herdr's error
 
+    def test_a_reused_workspace_id_never_removes_another_jobs_worktree(self):
+        # herdr reuses workspace ids after a restart
+        self.job("fix-a", "working")
+        self.job("fix-b", "working")
+        wt = self.path("wt-fix-b")
+        self.git(self.repo, "worktree", "add", "-q", wt, "-b", "oke/fix-b")
+        state = oke.load_state()
+        state["jobs"]["fix-a"]["worktree"] = {"id": "w7", "path": self.path("wt-old")}
+        oke.save_state(state)
+        ws = {"workspace_id": "w7", "worktree": {"checkout_path": wt}}
+        self.fake({"worktree create": [J({"type": "worktree_created", "workspace": ws})],
+                   "pane list": [J({"panes": [{"pane_id": "w7:p1"}]})],
+                   "worktree remove": [E("workspace_not_found", "workspace w7 not found")]})
+        self.assertEqual(self.cli("worktree", "fix-b", "--repo", self.repo), 0, self.err)
+        self.assertNotIn("worktree", oke.load_state()["jobs"]["fix-a"])  # the stale one is dropped
+        # two jobs naming one id (an older state): refused, nothing removed
+        state = oke.load_state()
+        state["jobs"]["fix-a"]["worktree"] = {"id": "w7", "path": self.path("wt-old")}
+        oke.save_state(state)
+        self.assertEqual(self.cli("worktree", "--remove", "w7"), 1)
+        self.assertTrue(os.path.exists(wt))
+
     def test_herdr_refusal_is_exit_1(self):
         self.fake({"agent focus": [E("agent_not_found")]})
         self.assertEqual(self.cli("attach", "nobody"), 1)
