@@ -170,7 +170,8 @@ NO_WORKER = "has no worker Orca started that it can continue"
 # start_failed: terminal_create: The worker's conversation is open somewhere Orca cannot
 # reach; nothing was sent"): the same end, nothing can continue the dispatch
 START_FAILED = "start_failed"
-# dispatch states nothing continues; "failed" seen live: that follow-up, stage terminal_create
+# dispatch states nothing continues; "failed" seen live: that follow-up, stage terminal_create.
+# A worker that settled with `worker_done --outcome failed` is failed too, but settled and idle.
 ENDED = ("abandoned", "failed", "cancelled", "canceled", "stopped")
 
 
@@ -181,7 +182,7 @@ def status_of(show):
         return None
     # seen live after the Orca app was killed: "The assigned worker terminal is no longer
     # live after orchestration recovery". Nothing runs the dispatch any more.
-    if show.get("state") in ENDED or show.get("stage") == "terminal_missing":
+    if (show.get("state") in ENDED and show.get("stage") != "settled") or show.get("stage") == "terminal_missing":
         return None
     # A settled task waits for the next one: Orca mail starts it as a follow-up dispatch,
     # in the same kept terminal or, when Orca closed that one, in a new terminal on the

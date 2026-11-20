@@ -255,6 +255,9 @@ class TestOrcaRuntime(OrcaBase):
                   "lastError": "never started: The worker's conversation is open somewhere Orca cannot reach; "
                                "nothing was sent."}
         self.assertIsNone(runtime_orca.status_of(failed))
+        # `worker_done --outcome failed`: failed but settled, alive and idle (no second worker)
+        self.assertEqual(runtime_orca.status_of({"state": "failed", "stage": "settled", "activity": "idle",
+                                                 "liveness": "live", "terminalState": "retained"}), "idle")
         msg = ("error: start_failed: terminal_create: The worker's conversation is open somewhere Orca "
                "cannot reach; nothing was sent.")
         self.fake({"orchestration send": [{"stdout": "", "stderr": msg, "exit": 1}],
