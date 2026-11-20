@@ -500,6 +500,17 @@ class TestDirectCommit(MergeBase):
         self.logged("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
 
+    def test_an_unstaged_new_file_is_not_taken_for_already_in(self):
+        self.git(self.repo, "reset", "-q")  # d.txt stays, untracked: the review tree is HEAD's
+        tree = self.git_out(self.repo, "rev-parse", "HEAD^{tree}").strip()
+        path = os.path.join(self.jobs, "fix-a-rv", "assignment.md")
+        with open(path, "w") as f:
+            f.write("agent: fix-a-rv\nrole: reviewer\njob: fix-a\nseq: 1\ncommit: no\ntree: %s\n---\n" % tree)
+        self.order(self.report("fix-a-w1", 1), self.report("fix-a-rv", 1, "verdict: pass"))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("untracked files d.txt", self.err)
+        self.assertEqual(self.ledger()["merge"], "none")
+
     def test_nothing_to_commit_is_refused(self):
         self.git(self.repo, "reset", "-q")
         os.remove(os.path.join(self.repo, "d.txt"))

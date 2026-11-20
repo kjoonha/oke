@@ -2156,6 +2156,11 @@ def commit_direct(job, info, main, review, reviewed):
     if code == 0 and not dirty and git_out(main, "rev-parse", "HEAD^{tree}")[1] == reviewed:
         # the review passed on main as it is (the change was already there): recorded like
         # merge_job's already-in, so verify and done work
+        new = [l[3:] for l in git_out(main, "status", "--porcelain")[1].splitlines()
+               if l.startswith("?? ") and not BYPRODUCT.match(l)]
+        if new:  # the job's new files, unstaged, would never be committed
+            return fail("untracked files %s: if they are the job's, `git add` them, get a new tree "
+                        "review, then merge" % ", ".join(new))
         if left_merging(job):
             return 1
         pre = git_out(main, "rev-parse", "HEAD")[1]
