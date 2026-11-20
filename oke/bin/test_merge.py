@@ -110,6 +110,11 @@ class TestMergeGate(MergeBase):
         self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
         self.assertIn("main still holds fix-b's code", self.err)
         self.assertFalse(self.merged())
+        # a hold would keep the block with nobody on it; cancel and archive lift it
+        self.assertEqual(self.cli("job", "hold", "fix-b"), 1)
+        self.assertIn("blocks the merges", self.err)
+        self.assertEqual(self.cli("job", "archive", "fix-b"), 0, self.err)
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
 
     def test_work_reported_after_the_review_is_refused(self):
         # seen live: the worker rebased (seq 2) and the PM merged without a new review

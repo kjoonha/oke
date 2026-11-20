@@ -2574,6 +2574,16 @@ def job_locked(args):
                 or merge_state(args.slug)[0] in ("unverified", "verified")):
             return fail("job %s is %s: only a job before its merge can go on hold"
                         % (args.slug, info.get("phase")))
+        merged, row = merge_state(args.slug)
+        if merged == "rolled_back" and "already-in" in row["detail"].split():
+            return fail("job %s blocks the merges of its repository (its failing code is in main): fix "
+                        "it, or cancel and archive it, not hold it" % args.slug)
+        main = native_path(os.path.dirname(info.get("repo") or ""))
+        if (info.get("size") != "research" and info.get("phase") not in ("intake", "planning", "awaiting_approval")
+                and git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/" + args.slug)[0] != 0):
+            # no branch: its edits sit uncommitted in the main checkout, in every other job's way
+            return fail("job %s works in the main checkout (no branch oke/%s): cancel it, or let it "
+                        "finish, not hold it" % (args.slug, args.slug))
         pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}
         if pm.get("agent"):
             # queued before held is saved: a PM wait that sees the job gone sees this mail
@@ -2594,6 +2604,7 @@ def job_locked(args):
             replace_file(report, os.path.join(pm_job_dir(args.slug), "report-while-held.md"))
         info.pop("held", None)
         info.pop("held_at", None)
+        info.pop("deferred", None)  # what it waits on the user for is asked again
         save_state(state)
         pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}
         print(json.dumps({"job": args.slug, "pm": pm.get("agent"),

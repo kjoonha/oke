@@ -196,8 +196,26 @@ class TestWiki(SpawnBase):
         self.assertTrue(texts[1].startswith("Job fix-a was cancelled"))
         self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
 
+    def test_a_job_without_a_branch_cannot_go_on_hold_once_it_works(self):
+        # its edits sit uncommitted in the main checkout, in every other job's way
+        self.advance("fix-a", "working")
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
+        self.assertIn("no branch oke/fix-a", self.err)
+        self.git(self.repo, "branch", "oke/fix-a")
+        self.fake({})
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
+
+    def test_unhold_asks_a_deferred_question_again(self):
+        self.advance("fix-a", "awaiting_approval")
+        self.assertEqual(self.cli("job", "defer", "fix-a"), 0, self.err)
+        self.fake({})
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
+        self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
+        self.assertFalse(oke.pending_item("fix-a", oke.load_state()["jobs"]["fix-a"])["deferred"])
+
     def test_nothing_of_a_held_job_starts(self):
         self.advance("fix-a", "working")
+        self.git(self.repo, "branch", "oke/fix-a")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
         self.fake(spawn_ok())
         self.assertEqual(self.cli("spawn", self.assignment("fix-a-w1", "worker", "fix-a"),
@@ -215,6 +233,7 @@ class TestWiki(SpawnBase):
     def test_a_hold_while_a_worker_starts_closes_it(self):
         # the hold closed the job's agents before this one had a record
         self.advance("fix-a", "working")
+        self.git(self.repo, "branch", "oke/fix-a")
         start = runtime_herdr.start_agent
 
         def hold_then_start(*a, **k):

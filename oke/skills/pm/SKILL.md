@@ -70,7 +70,7 @@ on: <what you wait for, when type is waiting>
 
 ## If you were restarted or compacted
 
-Your folder may already hold `board.md` and `children.json` from before. Read both, and every job assignment your prompt names, before you act. A job the user put on hold (your prompt or a message names it, or `$OKE status` shows `held` for it) is not yours to work on: start none of its agents, leave its worktree as it is, write no report for it, and leave it on your board as on hold. It comes back with a message "Job <job>: back from hold".
+Your folder may already hold `board.md` and `children.json` from before. Read both, and every job assignment your prompt names, before you act. A job the user put on hold (your prompt or a message names it, or `$OKE status` shows `held` for it) is not yours to work on: start none of its agents, leave its worktree as it is, write no report for it, and leave it on your board as on hold. It comes back with a message "Job <job>: back from hold". If that message says the job waits on the user, do nothing for it until its next assignment comes, then act on that.
 
 For each child in `children.json` whose `job` is an open job, decide in this order:
 
