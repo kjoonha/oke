@@ -272,4 +272,5 @@ With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merg
 - After compaction, run `$OKE status` and the queue, and start a wait for each PM with open jobs (a held job is not open).
 - `$OKE attach <agent>` prints `"attached": false` and a `hint` when OKe cannot show the agent itself (background sessions, Orca workers): give the user that hint. `$OKE keys` fails there too: for a dialog, offer only that command.
 - Inside Orca, Orca also wakes you with its own messages from your PMs (`worker_done`, `escalation`). They only wake you: read the PM's report.md and handle it as the wait would, then start the wait again. Never answer them with `orca orchestration` commands. OKe needs Orca's Agent Orchestration setting on, and the OKe plugin installed in Claude Code (Orca starts the agents itself, without OKe's `--plugin-dir`).
+- OKe blocks git commands that lose or publish work (`push`, `reset --hard`, `clean`, forced checkouts, branch deletes) in your session too. When the user wants one, tell them to run it themselves.
 - Do not send text starting with `/` through `$OKE send` from Git Bash; it is rewritten into a Windows path.

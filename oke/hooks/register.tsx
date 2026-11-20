@@ -216,10 +216,11 @@ function unquoted(command: string): string {
 }
 
 /** The refusal for a Bash command a child must not run, else null. */
-export function gitDenied(command: string): string | null {
+export function gitDenied(command: string, role?: string): string | null {
   const m = GIT_DENIED.exec(unquoted(command))
   return m ? `OKe blocks \`git ${m[1]!.split(/\s/)[0]}\` here: it can lose work or publish it. `
-    + 'Merges go through `oke job merge`; if you really need it, report a question instead.' : null
+    + (role === 'orchestrator' ? 'Tell the user to run it themselves if they want it.'
+      : 'Merges go through `oke job merge`; if you really need it, report a question instead.') : null
 }
 
 // no `-c`: `-c core.pager=<cmd>` and the like run commands
@@ -688,7 +689,7 @@ export const register: Register = on => {
   // Each agent's own task list goes to its folder, where the board reads it.
   on('tool.call', async ($, e: any, next) => {
       if (e.tool === 'Bash' && (role === 'orchestrator' || role === 'pm' || role === 'worker' || role === 'reviewer')) {
-        const denied = gitDenied(String(e.command ?? ''))
+        const denied = gitDenied(String(e.command ?? ''), role)
         if (denied) return { deny: denied }
       }
       if (role === 'reviewer') {

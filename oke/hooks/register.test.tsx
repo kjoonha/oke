@@ -522,6 +522,7 @@ test('the orchestrator writes only the OKe home and starts no subagent', async (
     expect((await call(bad)).deny).toMatch(/^OKe orchestrators/)
   }
   expect((await call({ tool: 'Bash', command: 'git -C C:/repo reset --hard' })).deny).toMatch(/^OKe blocks `git reset/)
+  expect((await call({ tool: 'Bash', command: 'git push' })).deny).toMatch(/Tell the user to run it themselves if they want it\.$/)
   for (const ok of [{ tool: 'Write', file_path: 'C:\\oke\\jobs\\j\\pm\\assignment.md' },
     { tool: 'Read', file_path: 'C:/repo/a' },
     { tool: 'Bash', command: 'python oke.py pending' }]) {
