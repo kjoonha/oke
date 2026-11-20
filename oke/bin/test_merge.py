@@ -64,6 +64,13 @@ class TestMergeGate(MergeBase):
         self.assertIn("oke/fix-a", self.git_out(self.repo, "log", "-1", "--format=%s"))
         self.assertTrue(os.path.exists(os.path.join(self.repo, "a.txt")))
 
+    def test_a_branch_already_in_main_is_refused(self):
+        self.git(self.repo, "merge", "-q", "--ff-only", "oke/fix-a")
+        self.order(self.report("fix-a-w1", 1), self.review(1))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("nothing to merge", self.err)
+        self.assertEqual(oke.merge_state("fix-a")[0], "none")
+
     def test_work_reported_after_the_review_is_refused(self):
         # seen live: the worker rebased (seq 2) and the PM merged without a new review
         self.order(self.review(1), self.report("fix-a-w1", 2))
@@ -406,6 +413,9 @@ class TestDirectCommit(MergeBase):
         self.write("toy/notes.txt", "the user's own\n")  # not staged: not the job's
         self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
         self.assertEqual(json.loads(self.out)["tree"], self.tree)
+
+    def test_a_tree_git_cannot_read_is_an_error_not_a_traceback(self):
+        self.assertIsNone(oke.pending_tree(os.path.join(self.home, "no-such-repo")))
 
     def test_a_failed_check_gives_the_changes_back_uncommitted(self):
         self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)

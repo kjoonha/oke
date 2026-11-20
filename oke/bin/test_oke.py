@@ -81,7 +81,13 @@ class Base(unittest.TestCase):
         for step in self.PATH[start:self.PATH.index(phase) + 1]:
             if step == "done":
                 self.logged(name)
+                self.verified(name)
             self.assertEqual(self.cli("job", "phase", name, step), 0, self.err)
+
+    def verified(self, name):
+        """A merge OKe made and the PM verified, which `job phase done` asks for."""
+        oke.ledger_add(name, "oke", "abc1234", "merge", "ok")
+        oke.ledger_add(name, "pm", "abc1234", "verify", "pass")
 
     def logged(self, name):
         """The PM's wiki line for the job, which `job phase done` asks for."""

@@ -122,6 +122,12 @@ class TestBgRuntime(BgBase):
         wt = self.rt.worktree_create(self.repo, "oke/fix-a", "fix-a")
         self.assertEqual(wt["path"], os.path.join(self.repo, ".claude", "worktrees", "oke-fix-a"))
         self.assertTrue(os.path.isdir(wt["path"]))
+        # main stays clean, or `oke job merge` refuses; a second worktree adds no second line
+        self.rt.worktree_remove(self.rt.worktree_create(self.repo, "oke/fix-b", "fix-b")["id"])
+        status = subprocess.check_output(["git", "-C", self.repo, "status", "--porcelain"])
+        self.assertEqual(status.strip(), b"")
+        with open(os.path.join(self.repo, ".git", "info", "exclude")) as f:
+            self.assertEqual(f.read().count("/.claude/worktrees/"), 1)
         self.rt.worktree_remove(wt["id"])
         self.assertFalse(os.path.isdir(wt["path"]))
 

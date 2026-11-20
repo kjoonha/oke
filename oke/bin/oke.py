@@ -1874,7 +1874,10 @@ def cmd_compact_hook(args):
 
 def cmd_job(args):
     if args.action == "merge":
-        return merge_job(args.slug)  # git can take a while: not under the state lock
+        # git can take a while: not under the state lock, but one merge per repository at a time
+        repo = (load_state()["jobs"].get(args.slug) or {}).get("repo")
+        with locked("merge-" + repo_name(repo) if repo else "merge", timeout=120):
+            return merge_job(args.slug)
     if args.action == "tree":
         info = load_state()["jobs"].get(args.slug)
         if not info:
@@ -2032,6 +2035,9 @@ def merge_job(job):
     if not current or (base and current != base):
         return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
                     % (current or "a detached HEAD", base))
+    if git_out(main, "merge-base", "--is-ancestor", tip, "HEAD")[0] == 0:
+        # git would say "Already up to date" and OKe would record a merge that changed nothing
+        return fail("oke/%s adds nothing to %s: nothing to merge" % (job, current))
     if left_merging(job):
         return 1
     pre = git_out(main, "rev-parse", "HEAD")[1]
@@ -2071,7 +2077,10 @@ def pending_tree(main):
     staged plus every tracked change. The real index is untouched. The review of a job without a worktree names this tree."""
     idx = os.path.join(oke_home(), "tree-%d.index" % os.getpid())
     env = dict(os.environ, GIT_INDEX_FILE=idx)
-    real = os.path.join(main, git_out(main, "rev-parse", "--git-path", "index")[1])
+    code, real = git_out(main, "rev-parse", "--git-path", "index")
+    if code != 0:
+        return None
+    real = os.path.join(main, real)
     try:
         steps = [ADD, ["write-tree"]]
         if os.path.exists(real):
@@ -2472,9 +2481,9 @@ def job_locked(args):
         if allowed is not None and now not in allowed:
             return fail("job %s cannot go from %s to %s: allowed only from %s"
                         % (args.slug, now, args.phase, ", ".join(allowed)))
-        if args.phase == "done" and merge_state(args.slug)[0] in ("unverified", "rolled_back"):
-            # a job merged without a worktree has no ledger merge row: only OKe's merges are held
-            return fail("job %s: its merge is %s, run `oke job verify` (or merge again) first"
+        if args.phase == "done" and not no_merge and merge_state(args.slug)[0] != "verified":
+            # done tells the user the work is in: only after OKe's merge and its verify
+            return fail("job %s: its merge is %s: `oke job merge`, then `oke job verify`, before done"
                         % (args.slug, merge_state(args.slug)[0]))
         if args.phase == "done" and info.get("repo") and not wiki.logged(wiki_dir(info["repo"]), args.slug,
                                                                          info.get("created")):

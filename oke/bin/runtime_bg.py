@@ -246,6 +246,20 @@ class BgRuntime(object):
         out, err = p.communicate()
         if p.returncode != 0:
             raise HerdrError("worktree_failed", err.decode("utf-8", "replace").strip())
+        # main's `git status` must not list the worktree: `oke job merge` needs a clean checkout
+        exclude = subprocess.check_output(["git", "-C", repo, "rev-parse", "--git-path", "info/exclude"])
+        exclude = os.path.join(repo, exclude.decode("utf-8").strip())
+        line = "/.claude/worktrees/"
+        try:
+            with io.open(exclude, encoding="utf-8") as f:
+                known = line in f.read().split()
+        except (IOError, OSError):
+            known = False
+        if not known:
+            if not os.path.isdir(os.path.dirname(exclude)):
+                os.makedirs(os.path.dirname(exclude))
+            with io.open(exclude, "a", encoding="utf-8", newline="\n") as f:
+                f.write(u"\n%s\n" % line)
         return {"id": path, "path": path, "place": path}
 
     def worktree_remove(self, wid):

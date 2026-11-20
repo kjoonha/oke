@@ -61,9 +61,19 @@ class TestPhaseGates(SpawnBase):
         self.job("fix-a", "awaiting_merge")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 1)
 
+    def test_done_needs_a_verified_merge(self):
+        # a PM that skipped `oke job merge` must not tell the user the work is in
+        self.job("fix-a", "merging")
+        self.logged("fix-a")
+        self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 1)
+        self.assertIn("merge is none", self.err)
+        self.verified("fix-a")
+        self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
+
     def test_full_autonomy_still_passes_through_the_awaiting_phases(self):
         self.job("fix-a", "planning")
         self.logged("fix-a")
+        self.verified("fix-a")
         for step in ("awaiting_approval", "working", "awaiting_merge", "merging", "done"):
             self.assertEqual(self.cli("job", "phase", "fix-a", step), 0, self.err)
 
