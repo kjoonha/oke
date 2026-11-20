@@ -251,6 +251,40 @@ class TestReviewFixes2(PeerBase):
         self.assertEqual(self.texts("pm-a"), [])
 
 
+class TestReviewFixes3(PeerBase):
+    def test_a_question_mid_talk_keeps_the_talk_open(self):
+        from test_slice3 import REPORT
+        self.add_repo("web", "pm-c", "fix-c", "working")
+        self.alive.append("pm-c")
+        self.ask()
+        self.answer("impact: we disagree")
+        self.pm_job("fix-a", 1, REPORT("question", 1))
+        self.fake({"agent get": [AGENT("working")]})
+        self.assertEqual(oke.check_pm_once("pm-a", self.key), "report question fix-a")
+        self.assertEqual(list(oke.peer_waiting(oke.load_state(), "fix-a")), ["pm-c"])
+
+    def test_after_the_plan_report_a_late_answer_is_logged_and_mailed(self):
+        from test_slice3 import REPORT
+        self.ask()
+        self.pm_job("fix-a", 1, REPORT("done", 1))
+        self.fake({"agent get": [AGENT("working")]})
+        self.assertEqual(oke.check_pm_once("pm-a", self.key), "report done fix-a")
+        self.assertEqual(oke.peer_waiting(oke.load_state(), "fix-a"), {})
+        self.assertEqual(self.answer("impact: late"), 0, self.err)
+        self.assertIn("- answer (pm-b): impact: late", self.log())
+        self.assertIn("pm-b: Job fix-a: peer answer from pm-b (round 1): impact: late", self.texts("pm-a"))
+
+    def test_asker_gets_no_idle_no_report_while_the_user_decides(self):
+        self.pm_job("fix-a", 1)
+        oke.write_json_atomic(oke.peers_path("fix-a"), {"round": 1, "asker": "pm-a", "waiting": {
+            "pm-b": {"repo": self.key_b, "nudged": 1}}})
+        self.assertFalse(oke.peer_nudge("pm-b", "fix-a"))  # the user is asked now
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertIsNone(oke.check_pm_once("pm-a", self.key))
+        self.pm_job("fix-a", 2)  # the orchestrator's kind: answer: the PM owes a report again
+        self.assertEqual(oke.check_pm_once("pm-a", self.key), "?idle_no_report fix-a")
+
+
 class TestAfter(PeerBase):
     def setUp(self):
         PeerBase.setUp(self)

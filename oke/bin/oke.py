@@ -1014,7 +1014,8 @@ def check_pm_once(agent, key):
                 return None  # another wait returned it a moment ago
             current["jobs"][name]["seen"] = seen_mark(header)
             save_state(current)
-            end_peer_talk(name)  # the asker reported: nobody owes this round an answer any more
+            if header["type"] in ("done", "failed"):
+                end_peer_talk(name)  # the plan (or the job) is settled: nobody waits for answers now
         return "report %s %s" % (header["type"], name)
     look = look_at(agent, pm_dir(key))
     if look != "idle":
@@ -1024,7 +1025,7 @@ def check_pm_once(agent, key):
             continue  # the orchestrator is still handing it over: the message is not sent yet
         if is_silent(state["jobs"][name], seq):
             continue  # the user was told twice; `pending` keeps it in view
-        if peer_waiting(state, name):
+        if peers_hold(state, name):
             continue  # it waits for other PMs' answers (oke peer ask): not stopped short
         if not (header.get("seq") == seq and header.get("type") in REPORT_TYPES):
             report = os.path.join(pm_job_dir(name), "report.md")
@@ -3102,13 +3103,27 @@ def peer_waiting(state, job):
     the user was asked about already (nudged 2: its late answer still counts)."""
     waiting = read_peers(job).get("waiting") or {}
     return dict((pm, e) for pm, e in waiting.items()
-                if isinstance(e, dict) and e.get("nudged", 0) < 2 and open_jobs(state, e.get("repo")))
+                if isinstance(e, dict) and e.get("nudged", 0) < 2 and not e.get("closed")
+                and open_jobs(state, e.get("repo")))
+
+
+def peers_hold(state, job):
+    """The asking PM is waiting, not stopped short: an answer is still owed, or the user is
+    being asked about a missing one (ruled at the job's current seq, before its kind: answer)."""
+    if peer_waiting(state, job):
+        return True
+    seq = state["jobs"].get(job, {}).get("sent_seq")
+    return any(isinstance(e, dict) and not e.get("closed") and e.get("ruled_seq") == seq
+               and open_jobs(state, e.get("repo")) for e in (read_peers(job).get("waiting") or {}).values())
 
 
 def end_peer_talk(job):
+    """Nobody waits for these answers any more; a late one is still logged and mailed."""
     data = read_peers(job)
     if data.get("waiting"):
-        data["waiting"] = {}
+        for e in data["waiting"].values():
+            if isinstance(e, dict):
+                e["closed"] = True
         write_json_atomic(peers_path(job), data)
 
 
@@ -3129,6 +3144,8 @@ def peer_nudge(agent, job):
             return None
         first = not entry.get("nudged")
         entry["nudged"] = 1 if first else 2
+        if not first:
+            entry["ruled_seq"] = (load_state()["jobs"].get(job) or {}).get("sent_seq")
         write_json_atomic(peers_path(job), data)
         if first:
             queue_mail(agent, "oke", "Answer the peer ask of job %s (round %d): %s"
@@ -3154,7 +3171,8 @@ def cmd_peer(args):
     if args.action == "status":
         raw = read_peers(args.job).get("waiting") or {}
         waiting = peer_waiting(state, args.job)
-        ruled = set(pm for pm, e in raw.items() if isinstance(e, dict) and e.get("nudged", 0) >= 2)
+        ruled = set(pm for pm, e in raw.items()
+                    if isinstance(e, dict) and (e.get("nudged", 0) >= 2 or e.get("closed")))
         print(json.dumps({"round": read_peers(args.job).get("round", 0), "waiting": sorted(waiting),
                           "dropped": sorted(set(raw) - set(waiting) - ruled), "no_answer": sorted(ruled)}))
         return 0
