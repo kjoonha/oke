@@ -2578,10 +2578,16 @@ def job_locked(args):
         if merged == "rolled_back" and "already-in" in row["detail"].split():
             return fail("job %s blocks the merges of its repository (its failing code is in main): fix "
                         "it, or cancel and archive it, not hold it" % args.slug)
+        early = info.get("size") == "research" or info.get("phase") in ("intake", "planning", "awaiting_approval")
+        if info.get("direct") and not early:
+            return fail("job %s changes its folder in place (no git): cancel it, or let it finish, not hold it"
+                        % args.slug)
         main = native_path(os.path.dirname(info.get("repo") or ""))
-        if (info.get("size") != "research" and info.get("phase") not in ("intake", "planning", "awaiting_approval")
-                and git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/" + args.slug)[0] != 0):
-            # no branch: its edits sit uncommitted in the main checkout, in every other job's way
+        started = any(r.get("job") == args.slug for r in read_children(info.get("repo")).values())             if info.get("repo") else False
+        if not early and started and git_out(main, "rev-parse", "-q", "--verify",
+                                             "refs/heads/oke/" + args.slug)[0] != 0:
+            # a worker without a branch: its edits sit uncommitted in the main checkout, in every
+            # other job's way
             return fail("job %s works in the main checkout (no branch oke/%s): cancel it, or let it "
                         "finish, not hold it" % (args.slug, args.slug))
         pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}
@@ -2597,7 +2603,7 @@ def job_locked(args):
         if not info.get("held"):
             return fail("job %s is not on hold" % args.slug)
         seq, header, mtime = pm_job_report(args.slug)
-        if mtime and mtime > info.get("held_at", 0) and header.get("type") in FINAL_TYPES:
+        if mtime and mtime > info.get("held_at", 0) and header.get("type") in ("question", "blocked", "failed"):
             # written while held (a child the hold closed looked "gone" to the PM): stale,
             # so neither a PM wait nor `pending` asks the user about it after the unhold
             report = os.path.join(pm_job_dir(args.slug), "report.md")

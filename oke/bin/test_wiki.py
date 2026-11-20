@@ -196,13 +196,18 @@ class TestWiki(SpawnBase):
         self.assertTrue(texts[1].startswith("Job fix-a was cancelled"))
         self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
 
-    def test_a_job_without_a_branch_cannot_go_on_hold_once_it_works(self):
-        # its edits sit uncommitted in the main checkout, in every other job's way
+    def test_a_job_without_a_branch_cannot_go_on_hold_once_a_worker_started(self):
         self.advance("fix-a", "working")
+        self.fake({})
+        # approved, but no worker ever started (the PM died first): nothing was written
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
+        self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
+        # a worker without a branch: its edits sit uncommitted in the main checkout
+        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
+                              {"fix-a-w1": {"job": "fix-a", "role": "worker"}})
         self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
         self.assertIn("no branch oke/fix-a", self.err)
         self.git(self.repo, "branch", "oke/fix-a")
-        self.fake({})
         self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
 
     def test_unhold_asks_a_deferred_question_again(self):
@@ -270,6 +275,15 @@ class TestWiki(SpawnBase):
         self.assertIsNone(oke.pending_item("fix-a", oke.load_state()["jobs"]["fix-a"]))
         self.assertEqual(oke.pm_job_report("fix-a")[1], {})  # a PM wait has nothing to return
         self.assertTrue(os.path.exists(os.path.join(folder, "report-while-held.md")))
+        # a done report the PM finished before it read the hold notice stays
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
+        state = oke.load_state()
+        state["jobs"]["fix-a"]["held_at"] -= 5
+        oke.save_state(state)
+        with io.open(os.path.join(folder, "report.md"), "w", encoding="utf-8") as f:
+            f.write(u"type: done\nseq: 1\n---\nplan written\n")
+        self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
+        self.assertEqual(oke.pm_job_report("fix-a")[1].get("type"), "done")
 
     def test_a_held_job_is_left_alone_until_it_comes_back(self):
         key = oke.repo_key(self.repo)
