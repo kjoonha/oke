@@ -684,7 +684,7 @@ class TestSpawn(SpawnBase):
         # a lean child does not see the user's bypass acceptance: no warning dialog
         self.assertNotIn("bypassPermissions", w)
         self.assertEqual(w[w.index("--permission-mode") + 1], "dontAsk")
-        self.assertEqual(w[w.index("--allowedTools") + 1:], w[w.index("--tools") + 1].split(","))
+        self.assertEqual(w[w.index("--allowedTools") + 1:w.index("--disallowedTools")], w[w.index("--tools") + 1].split(","))
         full = oke.launch_args("worker", dict(c, lean_launch=False), self.home, "/p")
         self.assertIn("bypassPermissions", full)
 
@@ -719,11 +719,11 @@ class TestSpawn(SpawnBase):
     def test_conservative_agents_can_still_write_their_own_files(self):
         c = dict(oke.load_config(), autonomy="conservative", wiki_path="/w")
         w = oke.launch_args("worker", c, "/h", "/p")
-        allowed = w[w.index("--allowedTools") + 1:]
+        allowed = w[w.index("--allowedTools") + 1:w.index("--disallowedTools")]
         self.assertIn(oke.edit_rules("/h")[0], allowed)
         self.assertFalse([t for t in allowed if t.startswith("Bash")])
         pm = oke.launch_args("pm", c, "/h", "/p")
-        allowed = pm[pm.index("--allowedTools") + 1:]
+        allowed = pm[pm.index("--allowedTools") + 1:pm.index("--disallowedTools")]
         self.assertIn(oke.edit_rules("/w")[0], allowed)
         self.assertIn("Bash(herdr:*)", allowed)
         self.assertIn("Bash(git:*)", allowed)

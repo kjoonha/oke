@@ -49,6 +49,8 @@ declare module 'claude-code' {
       bandOpen: Shaped<boolean>
       /** The `job:seq` assignments this agent had answered at its last task boundary. */
       answered: Shaped<string[]>
+      /** This agent's role and folder, kept across a hot reload so the guards hold before the first tick. */
+      who: Shaped<{ role: string, folder: string | null } | null>
     }
   }
 }

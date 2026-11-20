@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { framesOf, orchestratorDenied, promptRole } from './register'
+import { framesOf, orchestratorDenied, promptRole, workerDenied } from './register'
 
 type Run = { argv: readonly string[] }
 
@@ -256,6 +256,34 @@ test('task tool calls are written to the agent folder', async ($, on) => {
   const last = writes[writes.length - 1]!
   expect(last.path.replace(/\\/g, '/')).toMatch(/\/oke\/jobs\/j\/w1\/todos\.json$/)
   expect(JSON.parse(last.text)).toEqual([{ id: '1', content: 'write sub', status: 'in_progress' }])
+})
+
+test('task calls of a subagent stay off the agent board', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  engine(on, [], [])
+  const writes: string[] = []
+  on('fs.write', (_: any, e: any) => {
+    writes.push(e.path)
+    return { value: undefined }
+  })
+  on('tool.call', (_: any, e: any) => ({ result: { task: { id: '1', subject: e.subject } } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'TaskCreate', subject: 'sub', description: 'd', agentId: 'a1' } as any)
+  expect(writes.filter(p => p.endsWith('todos.json'))).toEqual([])
+})
+
+test('a worker writes nothing in the jobs folder outside its own folder', () => {
+  const own = 'C:/oke/jobs/j/j-w1'
+  for (const bad of ['C:/oke/jobs/j/j-rv/report.md', 'c:\\oke\\jobs\\j\\plan.md', 'C:/oke/jobs/j/ledger.tsv',
+    'C:/oke/jobs/j/j-w1/../j-rv/report.md', 'C:/oke/jobs/k/k-rv/report.md']) {
+    expect(workerDenied('Write', { file_path: bad }, own)).toMatch(/^OKe workers/)
+  }
+  for (const ok of ['C:/oke/jobs/j/j-w1/report.md', 'C:/repo/src/a.py', 'C:/oke/wiki/x.md']) {
+    expect(workerDenied('Edit', { file_path: ok }, own)).toBeNull()
+  }
+  expect(workerDenied('Bash', { command: 'ls' }, own)).toBeNull()
+  expect(workerDenied('Write', { file_path: 'C:/oke/jobs/j/plan.md' }, null)).toBeNull()
 })
 
 const BAND = {

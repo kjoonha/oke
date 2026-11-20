@@ -70,6 +70,8 @@ def load_config():
         "agents": {"worker": "claude", "reviewer": "claude"},  # which CLI runs each role
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
         "max_review_rounds": 10,  # a job's reviews stop there and the PM asks the user; null: no limit
+        # effortLevel per role ("low" .. "max"); a role left out keeps the user's own setting
+        "effort": {},
         "theme": "disco",  # the band's characters: disco, slime or mushroom
     }
     try:
@@ -80,7 +82,10 @@ def load_config():
     if isinstance(user, dict):
         models = user.pop("models", None)
         agents = user.pop("agents", None)
+        effort = user.pop("effort", None)
         config.update(user)
+        if isinstance(effort, dict):
+            config["effort"] = effort
         if isinstance(models, dict):
             config["models"].update(models)
         if isinstance(agents, dict):
@@ -408,13 +413,35 @@ REVIEWER_TOOLS = ["Read", "Grep", "Glob", "Skill", "Bash(git diff:*)", "Bash(git
 # shortcut: relies on `*` matching anywhere in a Bash rule (not probed live, see
 # docs/probe-results.md); the PM's `git status` check after a review is the backstop.
 REVIEWER_DENIED = ["Bash(git *--output*)"]
+# The mod's GIT_DENIED as permission rules, which Claude Code enforces itself (the mod's
+# check reads the command text only). shortcut: prefix rules miss `git -C <dir> push` and
+# git run from a script; the mod's regex still catches the first.
+GIT_DENY_RULES = ["Bash(git push:*)", "Bash(git reset --hard:*)", "Bash(git reset --merge:*)",
+                  "Bash(git clean -f:*)", "Bash(git clean --force:*)", "Bash(git branch -D:*)",
+                  "Bash(git checkout -f:*)", "Bash(git checkout --force:*)", "Bash(git stash drop:*)",
+                  "Bash(git stash clear:*)", "Bash(git update-ref -d:*)", "Bash(git filter-branch:*)",
+                  "Bash(git filter-repo:*)", "Bash(git worktree remove --force:*)"]
+
+
+def worker_deny_rules(folder):
+    """Edit rules a worker may not have: the job's files the merge gate trusts (plan,
+    ledger, the reviewer's and the PM's folders). Its own folder stays writable.
+    shortcut: Bash can still write them (`echo > ...`); the mod's workerDenied and the
+    user's merge approval are the other layers."""
+    job_dir = os.path.dirname(folder)
+    if os.path.basename(os.path.dirname(job_dir)) != "jobs":
+        return []
+    rules = []
+    for tail in ("/*.md", "/*.tsv", "/*.json", "/*.log", "/pm/**", "/*-rv*/**"):
+        rules += edit_rules(job_dir, tail=tail)
+    return rules
 
 
 def plugin_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def edit_rules(path, windows=None):
+def edit_rules(path, windows=None, tail="/**"):
     """Permission rules that let a session write under `path` only (see docs/probe-results.md).
     A symlinked path also gets rules for its resolved form: which one Claude Code matches is unverified."""
     if windows is None:
@@ -425,9 +452,9 @@ def edit_rules(path, windows=None):
         p = native_path(one.replace("\\", "/"), windows).rstrip("/")
         if windows and re.match(r"^[a-zA-Z]:/", p):
             drive, rest = p[0], p[2:]
-            new = ["Edit(//%s%s/**)" % (drive.lower(), rest), "Edit(//%s:%s/**)" % (drive.upper(), rest)]
+            new = ["Edit(//%s%s%s)" % (drive.lower(), rest, tail), "Edit(//%s:%s%s)" % (drive.upper(), rest, tail)]
         else:
-            new = ["Edit(/%s/**)" % p]
+            new = ["Edit(/%s%s)" % (p, tail)]
         rules += [r for r in new if r not in rules]
     return rules
 
@@ -458,7 +485,7 @@ def header_list(header, field):
     return [x.strip() for x in str((header or {}).get(field) or "").split(",") if x.strip()]
 
 
-def write_lean_settings(folder, plugins=(), dirs=()):
+def write_lean_settings(folder, plugins=(), dirs=(), effort=None):
     """Settings for a lean child: only the user's herdr hooks (herdr learns the session
     id from them, revive needs it), env, and the plugins its assignment asks for.
     Returns the file path, or None if unwritable."""
@@ -477,6 +504,8 @@ def write_lean_settings(folder, plugins=(), dirs=()):
     for name in ("autoCompactWindow", "effortLevel", "modelSettings"):
         if name in user:
             settings[name] = user[name]
+    if effort:
+        settings["effortLevel"] = effort  # config.json `effort` for this role
     if plugins:
         settings["enabledPlugins"] = dict((p, True) for p in plugins)
     if dirs:
@@ -618,7 +647,9 @@ def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header
     # child's context. Without a settings file, start as before so the herdr hook stays.
     folder = folder or home
     dirs = [home, config["wiki_path"]]
-    settings = config.get("lean_launch", True) and write_lean_settings(folder, header_list(header, "plugins"), dirs)
+    effort = (config.get("effort") or {}).get(role)
+    settings = config.get("lean_launch", True) and write_lean_settings(
+        folder, header_list(header, "plugins"), dirs, effort if isinstance(effort, str) else None)
     if not settings:
         args += ["--add-dir", home, "--add-dir", config["wiki_path"]]
     if settings:
@@ -642,8 +673,6 @@ def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header
         # dontAsk denies everything not listed without stopping at a dialog.
         args += ["--permission-mode", "dontAsk", "--allowedTools"] + REVIEWER_TOOLS
         args += edit_rules(home) + edit_rules(config["wiki_path"])
-        # `git diff/log/show --output=<file>` writes a file: deny rules beat allow rules
-        args += ["--disallowedTools"] + REVIEWER_DENIED
     elif config.get("autonomy") == "conservative":
         # Ask for everything except the agent's own OKe files; without this every
         # report and board write would be a dialog.
@@ -660,6 +689,11 @@ def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header
         args += ["--permission-mode", "dontAsk", "--allowedTools"] + tools
     else:
         args += ["--permission-mode", "bypassPermissions"]
+    # deny rules beat allow rules and bypass mode; `git diff/log/show --output=<file>` writes a file
+    denied = GIT_DENY_RULES + (REVIEWER_DENIED if role == "reviewer" else [])
+    if role == "worker" and folder and folder != home:
+        denied = denied + worker_deny_rules(folder)
+    args += ["--disallowedTools"] + denied
     return args
 
 

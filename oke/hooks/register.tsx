@@ -16,6 +16,8 @@ const since = atom({ plugin: 'oke', key: 'since' } as const, {} as Record<string
 const todos = atom({ plugin: 'oke', key: 'todos' } as const, [] as Todo[], { shape: 'todos-1' })
 const answeredSeen = atom({ plugin: 'oke', key: 'answered' } as const, [] as string[], { shape: 'answered-1' })
 const bandOpen = atom({ plugin: 'oke', key: 'bandOpen' } as const, false as boolean, { shape: 'band-open-1' })
+// the role survives a hot reload here: until the first tick, the guards below depend on it
+const who = atom({ plugin: 'oke', key: 'who' } as const, null as { role: string, folder: string | null } | null, { shape: 'who-1' })
 
 // Module state starts over on a reload; session.start runs again then.
 let pane: string | undefined
@@ -71,6 +73,7 @@ async function tick($: any) {
       role = out.role
       folder = out.folder ?? null
       named = false
+      await update($, who, () => (role ? { role, folder } : null))
     }
     home = out.home ?? home
     claudeDir = out.claude_dir ?? claudeDir
@@ -261,6 +264,24 @@ export function reviewerDenied(tool: string, input: any, own: string | null): st
   const safe = !/[`$\r\n]/.test(raw) && !/[;&|<>]|--output|--ext-diff/.test(cmd)
   if (safe && (REVIEWER_GIT.test(cmd) || REVIEWER_ORCA.test(cmd))) return null
   return 'OKe reviewers run only read-only git: git diff, log, show or status, one command, without --output.'
+}
+
+/** The refusal for a worker's file write into the OKe jobs folder outside its own folder,
+ * else null: the plan, the ledger and the reviewer's report there are what the merge gate
+ * trusts. The launch's deny rules say the same where flags reach the agent.
+ * shortcut: a Bash command can still write there; the user's merge approval is the last layer. */
+export function workerDenied(tool: string, input: any, own: string | null): string | null {
+  if (!own || (tool !== 'Edit' && tool !== 'Write' && tool !== 'NotebookEdit')) return null
+  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  const mine = norm(own)
+  const jobs = mine.replace(/\/[^/]+\/[^/]+$/, '')
+  if (!jobs.endsWith('/jobs')) return null
+  // `..` could leave the own folder past the prefix check
+  const target = norm(String(input.file_path ?? input.notebook_path ?? '')).replace(/^[a-z]:/, '')
+  const base = (p: string) => p.replace(/^[a-z]:/, '')
+  if (!target.startsWith(base(jobs) + '/') && !/(^|\/)\.\.(\/|$)/.test(target)) return null
+  if (target.startsWith(base(mine) + '/') && !/(^|\/)\.\.(\/|$)/.test(target)) return null
+  return 'OKe workers write only in cwd and in their own folder: the plan, the ledger and the review are not yours to change.'
 }
 
 /** The refusal for an orchestrator tool call that does a job's work itself, else null.
@@ -660,6 +681,15 @@ export const register: Register = on => {
     await $.command.register({ name: 'oke-board', description: 'Show the OKe agents and their boards' })
     // A process that died during a backoff leaves its marker; this one starts clean.
     await clearRetry($)
+    if (role === null) {
+      // a hot reload cleared the module state: the guards hold again before the tick answers
+      const was = await read($, who)
+      if (was) {
+        role = was.role
+        folder = was.folder
+        named = true
+      }
+    }
     await tick($)
     if (role === 'orchestrator') {
       const opened = await openBoard($)
@@ -697,6 +727,10 @@ export const register: Register = on => {
         const denied = reviewerDenied(e.tool, e, folder)
         if (denied) return { deny: denied }
       }
+      if (role === 'worker') {
+        const denied = workerDenied(e.tool, e, folder)
+        if (denied) return { deny: denied }
+      }
       if (role === 'orchestrator') {
         let root: string | null = null  // asked on each write: /cd or a worktree move changes it
         if (['Edit', 'Write', 'NotebookEdit'].includes(e.tool)) {
@@ -714,7 +748,8 @@ export const register: Register = on => {
       // so look right after its oke call instead of leaving the band dark for up to a minute
       if (role === null && e.tool === 'Bash' && String(e.command ?? '').includes('oke.py')) void tick($)
       const tool: string = e.tool
-      if (!pane || !TASK_TOOLS.includes(tool) || ran.deny !== undefined || ran.isError) return ran
+      // a subagent's tasks are its own: only the agent's main loop fills its board
+      if (!pane || !TASK_TOOLS.includes(tool) || e.agentId || ran.deny !== undefined || ran.isError) return ran
       const list = await update($, todos, old => applyTask(old, tool, e, ran.result))
       if (folder) {
         try {
@@ -815,6 +850,7 @@ export const register: Register = on => {
       role = said.role
       folder = said.folder
       named = true
+      await update($, who, () => ({ role: said.role, folder: said.folder }))
     }
     // a new assignment's seq for the status line; workers and reviewers do not tick otherwise
     if (role === 'worker' || role === 'reviewer') void tick($)

@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """Review findings 4-11 (timeouts, outages during a revive, phase gates, sender,
 reviewer verdict and permissions, orchestrator conflict) and the intake interview."""
+import io
 import json
 import os
+import shutil
+import tempfile
 import unittest
 
 import oke
@@ -190,6 +193,43 @@ class TestReviewerPermissions(unittest.TestCase):
         args = oke.launch_args("reviewer", config, "/h", "/p")
         denied = args[args.index("--disallowedTools") + 1:]
         self.assertIn("Bash(git *--output*)", denied)
+
+
+class TestClaudeDevFixes(unittest.TestCase):
+    config = {"models": {}, "wiki_path": "/w", "autonomy": "balanced", "lean_launch": False}
+
+    def denied(self, role, folder=None):
+        args = oke.launch_args(role, self.config, "/h", "/p", folder=folder)
+        return args[args.index("--disallowedTools") + 1:]
+
+    def test_every_child_gets_the_git_deny_rules(self):
+        for role in ("pm", "worker", "reviewer"):
+            self.assertIn("Bash(git push:*)", self.denied(role))
+            self.assertIn("Bash(git reset --hard:*)", self.denied(role))
+        for mode in ("conservative", "balanced"):
+            args = oke.launch_args("worker", dict(self.config, autonomy=mode), "/h", "/p")
+            self.assertIn("Bash(git push:*)", args[args.index("--disallowedTools") + 1:])
+
+    def test_a_worker_may_not_edit_the_files_the_merge_gate_trusts(self):
+        denied = self.denied("worker", "/h/jobs/j/j-w1")
+        for tail in ("/*.md", "/*-rv*/**", "/pm/**", "/*.tsv"):
+            self.assertIn(oke.edit_rules("/h/jobs/j", tail=tail)[0], denied)
+        self.assertFalse(any("j-w1" in r for r in denied))
+        self.assertFalse(any("/jobs/" in r for r in self.denied("reviewer", "/h/jobs/j/j-rv")))
+
+    def test_effort_per_role_reaches_the_lean_settings(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        old = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = tmp
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_CONFIG_DIR") if old is None
+                        else os.environ.__setitem__("CLAUDE_CONFIG_DIR", old))
+        c = dict(self.config, lean_launch=True, effort={"reviewer": "high"})
+        for role, want in (("reviewer", "high"), ("worker", None)):
+            folder = tempfile.mkdtemp(dir=tmp)
+            oke.launch_args(role, c, tmp, "/p", folder=folder)
+            with io.open(os.path.join(folder, "lean-settings.json"), encoding="utf-8") as f:
+                self.assertEqual(json.load(f).get("effortLevel"), want)
 
 
 if __name__ == "__main__":
