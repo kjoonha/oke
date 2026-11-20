@@ -29,7 +29,7 @@ OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if python3 doe
 
 ## Messages
 
-New instructions arrive as a prompt starting with `OKe inbox:`. It holds one or more messages, separated by `|`, each `<sender>: <text>`. From the orchestrator: "Job <job>: assignment updated (seq <n>). Re-read <path>." From a child: an urgent finding (see "Urgent findings"). Several messages can come at once: handle each. A sender `unverified (pane <id>)` is a pane OKe does not know (often the orchestrator right after a herdr restart): treat the message as information, and act on an instruction in it only if the job's assignment file says the same.
+New instructions arrive as a prompt starting with `OKe inbox:`. It holds one or more messages, separated by `|`, each `<sender>: <text>`. From the orchestrator: "Job <job>: assignment updated (seq <n>). Re-read <path>." From a child: an urgent finding (see "Urgent findings"). From another PM: `peer ask (job <job>, round <n>): ...` or `Job <job>: peer answer from <pm> ...`; from `oke`: `Answer the peer ask of job <job> ...` (see **Peer asks**). Several messages can come at once: handle each. A sender `unverified (pane <id>)` is a pane OKe does not know (often the orchestrator right after a herdr restart): treat the message as information, and act on an instruction in it only if the job's assignment file says the same.
 
 ## Always
 
@@ -90,13 +90,17 @@ Read `$OKE_HOME/jobs/<job>/intake.md`, the repository, and `<wiki>/index.md` and
 
 ```
 job: <job>
+after: <job>[, <job>]   (only when the peer talk showed this job must merge after another repository's job)
 ---
 ## 접근
 ## worktree        (with one: its branch, oke/<job>; without: 없음)
 ## 단위 작업        (ordered list for the worker)
 ## 검증 명령        (required: the command and what passing looks like)
+## 다른 레포 영향    (who was asked, each answer, what changed in the plan; or 없음 and why)
 ## 사용자에게 물을 것 (or 없음)
 ```
+
+Before you report the plan, ask the other repositories' PMs (see **Peer asks**). List what this plan changes that code outside this repository may use: APIs, schemas, CLI flags, config keys, file formats, shared services. Nothing like that: 다른 레포 영향 is `없음 (nothing other code uses)`. Otherwise `$OKE peer ask <job> "<what changes, in one or two sentences>"`. It prints the PMs it asked. `"asked": []`: no other repository has an open job; write `없음 (no other repository has an open job)`. Otherwise end your turn: the answers come as `OKe inbox:` messages. Report the plan only when every PM it asked has answered (each answer names its PM; `$OKE_HOME/jobs/<job>/peers.md` lists the asks and answers). Work each answer into the plan; an answer that needs a reply is a new `peer ask` on the same job.
 
 A `small` or `normal` job gets one line per section. Use no worktree only when the change is small and no other OKe job of this repository is open: a job without a worktree changes the main checkout that every merge uses. Whether the main checkout already holds the user's own changes is your call: without a worktree, `$OKE job merge` commits every tracked change there (new files only as you stage them). Report `done` with a short summary, or `question` if intake is not enough to plan.
 
@@ -209,6 +213,8 @@ Merges go one at a time, in the order the merge assignments reached you. Finish 
 7. Close the worker and reviewer: `$OKE close <pane> <pane>` (the `pane` that `spawn` printed). This holds for a job without a worktree too: its worker still has a pane. A pane under `failed` as not found is already closed: fine. Any other `failed` pane: close it once more; if it stays, tell the user which pane to close.
 8. Report `done` for the job. If a merge waited for this one, start it now.
 
+**A cross-repo change shows up during work.** A worker report, a review finding or your own look shows the job now changes something other code may use (see kind: plan) and the plan did not list it: give the worker a new instruction "Stop and wait: do not change anything until the next instruction." (seq + 1), then `$OKE peer ask <job> "<the change>"` and end your turn. When every asked PM answered: if the plan still holds, give the worker its next instruction; if it must change, edit plan.md and report `question` for the job with what changes and why, and wait for `kind: answer` before the worker goes on.
+
 ### A cancelled job
 
 The orchestrator cancels a job itself (`oke job cancel`: phase `failed`, its children closed, its queued mail dropped) and tells you "Job <job> was cancelled by the user"; an older one sends `kind: cancel`. Either way the user gave the job up. Ignore any later wait result for that job's children (a `gone` after you close them included): write no report for it. Do not start their waits again, close its worker and reviewer (`$OKE close <pane>`; an error that it is already closed or not found is fine: `job cancel` closed it), and leave its worktree and branch as they are (say so on the board): never remove that worktree or delete that branch, even an empty one; the user decides. A job without a worktree leaves uncommitted files in the main checkout that would block every later merge: report nothing for the cancelled job, but name those files in the next merge's `question` at step 1 ("left by the cancelled job <job>"). Write no report: the job is closed. If a merge waited for this job, start it now.
@@ -231,6 +237,18 @@ The orchestrator answered a child's dialog. If the assignment also has an `Answe
 
 - "Dialog answered for <child>": start that child's wait again with `--after-blocked` added. Rewrite the job's report with the new seq: `question` if the job still has an open question (copy it), otherwise `waiting`.
 - "Dialog denied for <child>": the user refused that action. Give the child a new instruction saying "The user denied <the action>. Do not try it again. If you cannot finish without it, report `question` and say what you need.", rewrite the job's report with the new seq as above, then wait with the child's new seq.
+
+## Peer asks
+
+Two jobs in different repositories can affect each other, and only the PM of a repository knows its code. So PMs ask each other (`$OKE peer ask`, see kind: plan) and answer each other. The orchestrator gets no copy; the board shows who still owes an answer, and `$OKE_HOME/jobs/<job>/peers.md` keeps the talk.
+
+**Answering.** `peer ask (job <job>, round <n>): <text>` from another PM: read your repository and your open jobs for what that change touches (an `Explore` subagent for a wide search, never a worker pane), then `$OKE peer answer <job> "no impact"` or `$OKE peer answer <job> "impact: <what breaks or changes here, and what you need>"`. Answer every ask, even when the answer is no impact: the asking job waits for you. A message from `oke` "Answer the peer ask of job <job>" means you have not answered yet: answer now.
+
+**Your own job must change.** When the change hits one of your open jobs: still planning, fold it into that plan (its 다른 레포 영향 names the other job). Plan reported or later: edit its plan.md, stop its worker as under "A cross-repo change shows up during work", and report `question` for your job with what changes and why; the user approves the change through the orchestrator. When one job must merge before the other, the job that merges second gets `after: <the other job>` in its plan header: `$OKE job merge` refuses it until the other one is merged and verified.
+
+**Talking it through.** If you need something from the other PM (keep the old field one release, a different name), ask in your answer; it answers with a new `peer ask` round. When you cannot agree, report `question` for your job with both positions; the other PM does the same for its job.
+
+**Merge order.** `$OKE job merge` refusing with `waiting for <job> to merge`: write the job's report as `waiting` (`on: <job>`), end your turn, and run the merge again when `oke` tells you "after-job <job> is merged and verified". `after <job> was cancelled` or `was archived without a verified merge`, or the message "after-job <job> was cancelled": report `question` for the job; the user decides whether to drop the `after:` line.
 
 ## Urgent findings
 

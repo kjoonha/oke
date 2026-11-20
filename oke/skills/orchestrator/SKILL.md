@@ -171,6 +171,7 @@ When it finishes, read the first line of its output. If the user speaks before i
 | `bad_report <job> ...` | `$OKE send <pm> --job <job> "Job <job>: rewrite <pm_job_dir>/report.md in the required format."` and wait again |
 | `idle_no_report again <job>`, `bad_report again <job> ...` | The nudge did not help. Do not nudge again: the wait now leaves that job alone and `pending` lists it as `silent`. Wait again (for the other jobs), then run the queue |
 | `no_jobs` | The PM has no open job left. Do not start its wait again |
+| `peer_no_answer <job> <pm>` | `<pm>` was asked by job `<job>`'s PM about cross-repo impact (`oke peer ask`), was reminded once, and still went idle without answering. Ask the user one question: proceed as no impact / keep waiting / cancel `<job>`. Give `<job>`'s PM `kind: answer` with the choice ("<pm> did not answer: plan as if there is no impact" for the first). Then start this PM's wait again |
 | `gone` | The PM died. OKe does not restart an agent by itself. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / cancel (see "Giving up") / hold (`$OKE job hold <job>` for each of them, see "On hold"; with no open job left, do not start that PM's wait again) |
 | `superseded` | A newer wait replaced this one. Do nothing: do not run the queue and do not start a wait |
 | `{"deliver": {"to": ..., "text": ...}}` | The PM runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again. Not a result to show the user |
@@ -232,7 +233,9 @@ The user sets a job aside without giving it up, often after a crash ("leave it f
 | User says merge | Assign `kind: merge` | `merging` |
 | PM reports merged (`report_done`, phase `merging`) | Update the shared wiki from the report's 배운 것 (공용) (see "Shared wiki"), `$OKE job phase <job> done`, `$OKE job archive <job>` (a `not_closed:` line: tell the user which panes to close), tell the user what changed | |
 
-Plan approval question: put a short summary of the plan in the option `preview`, mention the plan file path, and offer: approve / request changes / discuss in the PM pane (then `$OKE attach <pm>` and defer).
+Plan approval question: put a short summary of the plan in the option `preview`, mention the plan file path, and offer: approve / request changes / discuss in the PM pane (then `$OKE attach <pm>` and defer). When its `## 다른 레포 영향` section is not 없음, put that section in the preview too, and an `after:` header line ("merges only after <job>").
+
+PMs ask each other about cross-repo impact themselves (`oke peer ask` and `oke peer answer`); you get no copy and the board shows who still owes an answer. When the user asks what the PMs discussed, read `$OKE_HOME/jobs/<job>/peers.md` (an archived job: under `$OKE_HOME/archive/`).
 
 The plan's size (`size:` at the top of its 접근, also on the board) changes this question. `small`: one line of plan, and the offer is approve and merge / approve, ask me before the merge / request changes. "Ask me before the merge" makes it `normal`: run `$OKE job size <job> normal` before you assign `kind: execute`. A size you think is wrong (too small for what the plan touches): say so in the question. A plan or instruction written before the rename says `lane:` with the old names (trivial = `small`, small = `normal`, normal = `large`): the `size` that `$OKE status` shows for the job is the one that counts. When a small job's PM asks because the job grew, the user's answer approves the merge or not: treat a yes as a `merge` item answered merge.
 
