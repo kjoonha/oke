@@ -261,7 +261,7 @@ class TestOrcaRuntime(OrcaBase):
         msg = ("error: start_failed: terminal_create: The worker's conversation is open somewhere Orca "
                "cannot reach; nothing was sent.")
         self.fake({"orchestration send": [{"stdout": "", "stderr": msg, "exit": 1}],
-                   "orchestration worker-show": [OK(settled), OK(settled), OK(settled),
+                   "orchestration worker-show": [OK(settled), OK(settled),
                                                  OK({"dispatch": {"followUpOf": "ctx_55cf9f4912f7"}}), OK(failed)],
                    "orchestration worker-list": [OK({"workers": []}),
                                                  OK({"workers": [{"dispatchId": "ctx_f04d0236a217"}]})],
@@ -272,6 +272,9 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(c.exception.code, "agent_not_found")
         self.assertNotIn("pm-repo-4612b2", runtime_orca.load_registry())  # gone: a revive starts a fresh one
         self.assertEqual([c for c in self.calls() if c[:2] == ["orchestration", "send"]].__len__(), 1)
+        # both released: the old settled one keeps the retained terminal
+        released = [c[c.index("--dispatch") + 1] for c in self.calls() if c[:2] == ["orchestration", "worker-release"]]
+        self.assertEqual(sorted(released), ["ctx_55cf9f4912f7", "ctx_f04d0236a217"])
 
     def test_a_fenced_send_without_a_run_still_fails(self):
         self.register()

@@ -407,11 +407,12 @@ class OrcaRuntime(object):
             # dispatch, though worker-show still reads it settled (seen live). The agent is
             # gone: forget it, so the wait reports `gone` and a revive may start it again.
             ours = (old, entry["dispatch"])  # the failed follow-up too, when show moved to it
-            try:
-                run_orca(["orchestration", "worker-release", "--dispatch", entry["dispatch"]])
-            except HerdrError as e2:
-                if e2.code in FATAL:
-                    raise
+            for dispatch in sorted(set(ours)):  # the old one holds the retained terminal
+                try:
+                    run_orca(["orchestration", "worker-release", "--dispatch", dispatch])
+                except HerdrError as e2:
+                    if e2.code in FATAL:
+                        raise
             # only this dispatch's row: a revive may have registered a new one meanwhile
             update_registry(lambda r: r.pop(name) if (r.get(name) or {}).get("dispatch") in ours else None)
             raise HerdrError("agent_not_found", "%s is gone: Orca cannot continue its dispatch" % name)
