@@ -2063,12 +2063,17 @@ def merge_job(job):
     if not current or (base and current != base):
         return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
                     % (current or "a detached HEAD", base))
-    if git_out(main, "merge-base", "--is-ancestor", tip, "HEAD")[0] == 0:
-        # git would say "Already up to date" and OKe would record a merge that changed nothing
-        return fail("oke/%s adds nothing to %s: nothing to merge" % (job, current))
     if left_merging(job):
         return 1
     pre = git_out(main, "rev-parse", "HEAD")[1]
+    if git_out(main, "merge-base", "--is-ancestor", tip, "HEAD")[0] == 0:
+        # already in main (the change was there, or a merge whose record was lost): git would
+        # only say "Already up to date". Recorded as merged at HEAD, so verify and done work.
+        ledger_add(job, os.path.basename(os.path.dirname(review[1])), tip, "review", "pass",
+                   review[1].replace("\\", "/"))
+        ledger_add(job, "oke", pre, "merge", "ok", "pre=%s already-in" % pre)
+        print(json.dumps({"result": "merged", "job": job, "commit": pre, "already_in": True}))
+        return 0
     result = subprocess.run(["git", "-C", main, "merge", "--no-ff", "--no-edit",
                              "-m", "Merge branch 'oke/%s'" % job, tip],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -2314,6 +2319,9 @@ def verify_locked(job, command, accept, info, lock):
                     % (code, log))
     ledger_add(job, "oke", row["commit"], "verify", "fail", "exit %d: %s" % (code, command))
     words = row["detail"].split()
+    if "already-in" in words:
+        return fail("the 검증 명령 failed (log %s) on main, which already held oke/%s before OKe's merge: "
+                    "nothing was merged, so nothing is undone. Ask the user." % (log, job))
     pre = words[0][len("pre="):] if words and words[0].startswith("pre=") else None
     # a direct commit (no worktree) goes back to uncommitted changes for the worker to fix
     mode = "--mixed" if "direct" in words else "--keep"
