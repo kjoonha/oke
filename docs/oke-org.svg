@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="380" viewBox="0 0 760 380" role="img" aria-label="OKe org chart: you talk to the orchestrator; it runs one PM per repository; each PM runs a worker and a reviewer. Tasks flow down, reports flow up.">
+<style>
+text{font:13px ui-monospace,SFMono-Regular,Consolas,monospace;fill:#f1eefb}
+.cap{font-size:11px;fill:#8a85a3}
+.role{font-weight:700}
+.box{stroke-width:2;fill:#1d1928}
+.link{fill:none;stroke:#3a3450;stroke-width:2}
+.flow{fill:none;stroke-width:2;stroke-dasharray:3 9;animation:down 1.2s linear infinite}
+@keyframes down{to{stroke-dashoffset:-12}}
+.pulse{animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:.35}50%{opacity:1}}
+.d2{animation-delay:.6s}.d3{animation-delay:1.2s}.d4{animation-delay:1.8s}
+@media (prefers-reduced-motion:reduce){.flow,.pulse{animation:none}.pulse{opacity:1}}
+</style>
+<rect width="760" height="380" rx="14" fill="#14111d"/>
+
+<!-- links (static track + moving dashes = assignments going down) -->
+<g>
+  <path id="u-o" class="link" d="M380 58 V92"/>
+  <path id="o-a" class="link" d="M380 132 C380 160 200 150 200 182"/>
+  <path id="o-b" class="link" d="M380 132 C380 160 560 150 560 182"/>
+  <path id="a-w" class="link" d="M200 222 C200 250 120 246 120 282"/>
+  <path id="a-r" class="link" d="M200 222 C200 250 280 246 280 282"/>
+  <path id="b-w" class="link" d="M560 222 C560 250 480 246 480 282"/>
+  <path id="b-r" class="link" d="M560 222 C560 250 640 246 640 282"/>
+</g>
+<g>
+  <path class="flow" stroke="#b79cff" d="M380 58 V92"/>
+  <path class="flow" stroke="#b79cff" d="M380 132 C380 160 200 150 200 182"/>
+  <path class="flow" stroke="#b79cff" d="M380 132 C380 160 560 150 560 182"/>
+  <path class="flow" stroke="#7fb2ff" d="M200 222 C200 250 120 246 120 282"/>
+  <path class="flow" stroke="#7fb2ff" d="M200 222 C200 250 280 246 280 282"/>
+  <path class="flow" stroke="#7fb2ff" d="M560 222 C560 250 480 246 480 282"/>
+  <path class="flow" stroke="#7fb2ff" d="M560 222 C560 250 640 246 640 282"/>
+</g>
+
+<!-- reports travelling up -->
+<g>
+  <circle r="4" fill="#ffb86b"><animateMotion dur="2.4s" repeatCount="indefinite" keyPoints="1;0" keyTimes="0;1" calcMode="linear"><mpath href="#a-r"/></animateMotion></circle>
+  <circle r="4" fill="#7ee0a1"><animateMotion dur="2.4s" begin="0.8s" repeatCount="indefinite" keyPoints="1;0" keyTimes="0;1" calcMode="linear"><mpath href="#b-w"/></animateMotion></circle>
+  <circle r="4" fill="#7fb2ff"><animateMotion dur="2.4s" begin="1.6s" repeatCount="indefinite" keyPoints="1;0" keyTimes="0;1" calcMode="linear"><mpath href="#o-a"/></animateMotion></circle>
+  <circle r="4" fill="#b79cff"><animateMotion dur="1.6s" begin="0.4s" repeatCount="indefinite" keyPoints="1;0" keyTimes="0;1" calcMode="linear"><mpath href="#u-o"/></animateMotion></circle>
+</g>
+
+<!-- you -->
+<rect x="330" y="20" width="100" height="38" rx="19" class="box" stroke="#f1eefb"/>
+<text x="380" y="44" text-anchor="middle" class="role">you</text>
+
+<!-- orchestrator -->
+<rect x="290" y="92" width="180" height="40" rx="8" class="box" stroke="#b79cff"/>
+<circle cx="308" cy="112" r="5" fill="#b79cff" class="pulse"/>
+<text x="388" y="117" text-anchor="middle" class="role">orchestrator</text>
+<text x="484" y="104" class="cap">the one you talk to</text>
+<text x="484" y="119" class="cap">asks you to approve plans and merges</text>
+
+<!-- PMs -->
+<rect x="130" y="182" width="140" height="40" rx="8" class="box" stroke="#7fb2ff"/>
+<circle cx="148" cy="202" r="5" fill="#7fb2ff" class="pulse d2"/>
+<text x="207" y="200" text-anchor="middle" class="role">PM</text>
+<text x="207" y="215" text-anchor="middle" class="cap">repo-a</text>
+<rect x="490" y="182" width="140" height="40" rx="8" class="box" stroke="#7fb2ff"/>
+<circle cx="508" cy="202" r="5" fill="#7fb2ff" class="pulse d3"/>
+<text x="567" y="200" text-anchor="middle" class="role">PM</text>
+<text x="567" y="215" text-anchor="middle" class="cap">repo-b</text>
+<text x="380" y="207" text-anchor="middle" class="cap">one PM per repository</text>
+
+<!-- workers / reviewers -->
+<rect x="66" y="282" width="108" height="40" rx="8" class="box" stroke="#7ee0a1"/>
+<circle cx="82" cy="302" r="4" fill="#7ee0a1" class="pulse"/>
+<text x="124" y="307" text-anchor="middle" class="role">worker</text>
+<rect x="226" y="282" width="108" height="40" rx="8" class="box" stroke="#ffb86b"/>
+<circle cx="242" cy="302" r="4" fill="#ffb86b" class="pulse d2"/>
+<text x="286" y="307" text-anchor="middle" class="role">reviewer</text>
+<rect x="426" y="282" width="108" height="40" rx="8" class="box" stroke="#7ee0a1"/>
+<circle cx="442" cy="302" r="4" fill="#7ee0a1" class="pulse d3"/>
+<text x="484" y="307" text-anchor="middle" class="role">worker</text>
+<rect x="586" y="282" width="108" height="40" rx="8" class="box" stroke="#ffb86b"/>
+<circle cx="602" cy="302" r="4" fill="#ffb86b" class="pulse d4"/>
+<text x="646" y="307" text-anchor="middle" class="role">reviewer</text>
+
+<text x="380" y="350" text-anchor="middle" class="cap">each in its own pane and git worktree · dashes: assignments down · dots: reports up</text>
+</svg>

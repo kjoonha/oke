@@ -1,40 +1,88 @@
 <h1 align="center">OKe</h1>
 
 <p align="center">
-  <img src="docs/oke-band.svg" alt="OKe 캐릭터들이 일하는 모습: disco, slime, mushroom theme 의 orchestrator, PM, worker, reviewer">
+  <b>English</b> | <a href="README.ko.md">한국어</a>
 </p>
 
 <p align="center">
-  Claude Code 플러그인. 사용자는 orchestrator 한 명과만 대화한다.<br>
-  orchestrator 가 저장소마다 PM 을 두고, PM 이 worker 와 reviewer 를 herdr pane 에 띄워 일을 시킨다.<br>
-  질문과 승인은 orchestrator 창의 팝업으로 올라온다.
+  <a href="https://github.com/kjoonha/oke/actions/workflows/ci.yml"><img src="https://github.com/kjoonha/oke/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fkjoonha%2Foke%2Fmain%2Foke%2F.claude-plugin%2Fplugin.json&query=%24.version&label=version&color=7a4fd1" alt="version">
+  <a href="https://github.com/kjoonha/oke/stargazers"><img src="https://img.shields.io/github/stars/kjoonha/oke?style=flat&logo=github" alt="GitHub stars"></a>
+  <a href="https://github.com/kjoonha/oke/commits/main"><img src="https://img.shields.io/github/last-commit/kjoonha/oke" alt="last commit"></a>
+  <img src="https://img.shields.io/badge/Claude%20Code-plugin-d97757" alt="Claude Code plugin">
+  <img src="https://img.shields.io/badge/python-3.6%2B%20stdlib%20only-3776ab?logo=python&logoColor=white" alt="Python 3.6+, stdlib only">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows-555" alt="Linux | Windows">
 </p>
 
-## 필요한 것
+<p align="center">
+  <img src="docs/oke-band.svg" alt="The OKe characters at work: orchestrator, PM, worker and reviewer in the disco, slime and mushroom themes">
+</p>
 
-- Claude Code 2.1.322 이상 (mod 를 지원하는 버전)
-- herdr 0.9.5 이상 (`herdr agent start / prompt / wait` 가 있어야 한다)
-- Python 3.6 이상 (표준 라이브러리만 쓴다), git
-- 선택: codex 또는 opencode (worker / reviewer 로 쓸 때)
+<p align="center">
+  A Claude Code plugin. You talk to one orchestrator.<br>
+  It gives each repository a PM, and each PM runs a worker and a reviewer in their own panes.<br>
+  Questions and approvals come back to you as popups in the orchestrator's window.
+</p>
 
-## 설치 (인터넷 되는 곳)
+## How it is organised
+
+<p align="center">
+  <img src="docs/oke-org.svg" alt="Org chart: you talk to the orchestrator; it runs one PM per repository; each PM runs a worker and a reviewer. Assignments flow down, reports flow up.">
+</p>
+
+- **Orchestrator**: the Claude Code session you talk to. It interviews you about a job, asks you to approve plans and merges, and keeps the queue.
+- **PM**: one per repository. It plans the job, starts the worker and the reviewer, and merges and verifies only what the review passed.
+- **Worker / reviewer**: each runs in its own pane and git worktree. They write reports. Only the PM merges, through `oke job merge`, and only what the review passed. A hook blocks git commands that publish or destroy work (`push`, `reset --hard`, forced `clean`, `checkout` and branch deletes) in every OKe session.
+
+Agents talk through files under `$OKE_HOME` (default `~/.oke`), so a crash loses no state. After a terminal, Claude Code or the whole app dies, `/oke:start` finds the open jobs and asks, per job, whether to **resume**, **hold** (set it aside, keep its worktree and branch) or **archive** it.
+
+## The board
+
+`/oke-board` opens a live board beside the orchestrator: one line per PM, one card per job with its phase, and its worker and reviewer.
+
+```
+╭─────────────────────────────────────────────────────────────╮
+│ ▍shop5                                                      │
+│                                                             │
+│  · PM done 0m  ▸                                            │
+│                                                             │
+│ ╭─────────────────────────────────────────────────────────╮ │
+│ │ textkit · large  ⏸ on hold                              │ │
+│ │ plan › approve ›  work  › review › merge › verify       │ │
+│ │                                                         │ │
+│ │ – w1 off 0m  ▸                                          │ │
+│ ╰─────────────────────────────────────────────────────────╯ │
+╰─────────────────────────────────────────────────────────────╯
+```
+
+## Requirements
+
+- Claude Code 2.1.322 or later (a version with mod support)
+- Python 3.6 or later (standard library only) and git
+- One place to run the agents:
+  - herdr 0.9.5 or later (agents run in herdr panes), or
+  - Orca (agents run as Orca orchestration workers; tested with 1.4.261), or
+  - neither: agents run as background `claude --bg` sessions.
+- Optional: codex or opencode, to use as the worker or reviewer
+
+## Install (online)
 
 ```
 claude plugin marketplace add kjoonha/oke
 claude plugin install oke@oke
 ```
 
-업데이트: `claude plugin marketplace update oke` 뒤 `claude plugin update oke@oke`.
+Update: `claude plugin marketplace update oke`, then `claude plugin update oke@oke`.
 
-## 설치 (인터넷 없는 곳, ftp 반입)
+## Install (offline, e.g. an air-gapped cluster)
 
-인터넷 되는 곳에서 묶음 하나를 만든다. 설치물은 이 폴더뿐이다 (패키지, daemon, DB 없음). `core.autocrlf=false` 는 Windows 에서 만들어도 줄 끝을 LF 로 둔다.
+On a machine with internet, make one bundle. This folder is the whole install (no packages, no daemon, no database). `core.autocrlf=false` keeps LF line endings even when you build it on Windows.
 
 ```
 git -c core.autocrlf=false archive --format=tar.gz -o oke.tar.gz HEAD .claude-plugin oke
 ```
 
-반입한 곳에서 (Linux, tcsh 도 같다):
+On the target machine (Linux; tcsh works too):
 
 ```
 mkdir -p ~/.claude/plugins/marketplaces/oke && tar xzf oke.tar.gz -C ~/.claude/plugins/marketplaces/oke
@@ -42,15 +90,21 @@ claude plugin marketplace add ~/.claude/plugins/marketplaces/oke
 claude plugin install oke@oke
 ```
 
-GitHub 으로 받은 marketplace 와 같은 자리다. 플러그인은 이 폴더에서 읽히므로 지우지 않는다 (`claude plugin marketplace remove oke` 가 함께 지운다). 새 버전은 같은 폴더에 다시 풀고 `claude plugin marketplace update oke` 를 부른다.
+This is the same place a marketplace from GitHub lives. The plugin is read from this folder, so do not delete it (`claude plugin marketplace remove oke` removes it with the marketplace). For a new version, unpack it into the same folder again and run `claude plugin marketplace update oke`.
 
-## 쓰기
+## Use
 
-herdr pane 에서 Claude Code 를 켜고 `/oke:start`. 그 세션이 orchestrator 가 된다. 하고 싶은 일을 말하면 된다. 세션이 끊겼으면 `/oke:resume`.
+Start Claude Code in a herdr pane, an Orca terminal or a plain terminal, and run `/oke:start`. That session becomes the orchestrator. Tell it what you want done. If the session was cut off, run `/oke:resume`.
 
-## 설정: `~/.oke/config.json`
+Things you can say along the way:
 
-없어도 된다. 있으면 아래 값만 덮어쓴다.
+- `hold <job>`: set a job aside. Its agents are closed; its worktree and branch stay.
+- `continue <job>`: bring a held job back; the PM restarts what it needs.
+- `cancel <job>`: drop it.
+
+## Settings: `~/.oke/config.json`
+
+Optional. Only the values you set override the defaults.
 
 ```json
 {
@@ -65,15 +119,20 @@ herdr pane 에서 Claude Code 를 켜고 `/oke:start`. 그 세션이 orchestrato
 }
 ```
 
-- `theme`: 대화창 위 띠에 나오는 캐릭터. 역할마다 모양이나 색이 다르다.
-  - `disco` (기본): 헤드폰 낀 블롭. orchestrator 보라, PM 파랑, worker 초록, reviewer 주황.
-  - `slime`: 통통 뛰는 슬라임. orchestrator 초록, PM 파랑, worker 분홍, reviewer 노랑.
-  - `mushroom`: 통통 뛰는 버섯. orchestrator 보라, PM 파랑, worker 주황, reviewer 초록.
+- `theme`: the characters in the band above the prompt. Each role has its own shape or colour.
+  - `disco` (default): blobs in headphones. Orchestrator purple, PM blue, worker green, reviewer orange.
+  - `slime`: bouncing slimes. Orchestrator green, PM blue, worker pink, reviewer yellow.
+  - `mushroom`: bouncing mushrooms. Orchestrator purple, PM blue, worker orange, reviewer green.
+- `autonomy`: `conservative` (the worker asks before every command), `balanced` (default) or `full`.
+- `agents`: the CLI that runs the worker and the reviewer: `claude`, `codex` or `opencode`. The orchestrator and PMs are always claude. Limits are listed under "안 되는 것" in `docs/superpowers/specs/2026-11-13-oke-slice4-design.md`.
+- `lean_launch`: start PMs, workers and reviewers without your plugins, hooks and MCP servers (`--setting-sources project,local --strict-mcp-config`). Only the herdr hooks and `env` from your `settings.json` are copied into `~/.oke/lean-settings.json`. This cuts the starting context from about 76k to 40k tokens. Each role also gets only its core tools (`--tools`, about 15k tokens at start). For each job, the PM turns on extra tools with the assignment header's `tools:`, `mcp:` and `plugins:` lines (`oke.py extras` lists them). Set it to `false` if the agents need all your personal settings.
+- `interview_threshold`, `interview_max_rounds`: the interview the orchestrator runs when it takes a job. It scores the goal, constraints and success criteria from 0 to 1 and asks one question at a time about the vaguest part, until the ambiguity (`1 - 0.4 goal - 0.3 constraints - 0.3 criteria`) is at or below the threshold. It also stops when you pick "plan now" or it reaches the round limit.
 
-- `autonomy`: `conservative` (worker 가 명령마다 승인을 묻는다), `balanced` (기본), `full`.
-- `agents`: worker / reviewer 를 띄울 CLI. `claude`, `codex`, `opencode`. orchestrator 와 PM 은 늘 claude 다. 제약은 `docs/superpowers/specs/2026-11-13-oke-slice4-design.md` 의 "안 되는 것".
-- `lean_launch`: PM / worker / reviewer 를 사용자 plugin, hook, MCP 서버 없이 띄운다 (`--setting-sources project,local --strict-mcp-config`). 사용자 `settings.json` 에서 herdr hook 과 `env` 만 `~/.oke/lean-settings.json` 으로 옮긴다. 시작 context 가 약 76k 에서 40k token 으로 준다. 도구도 역할별 핵심 도구만 켠다 (`--tools`, 시작 context 약 15k token). PM 이 job 마다 assignment header 의 `tools:`, `mcp:`, `plugins:` 로 필요한 것만 더 켠다 (`oke.py extras` 가 목록을 보여준다). 자식에게 개인 설정 전부가 필요하면 `false`.
+After installing, follow the checks in `docs/work-checklist.md`.
 
-- `interview_threshold`, `interview_max_rounds`: job 을 받을 때 orchestrator 가 하는 인터뷰. 목표, 제약, 성공 기준을 0~1 로 매겨 모호도(`1 - 0.4 목표 - 0.3 제약 - 0.3 기준`)가 이 값 이하가 될 때까지, 가장 흐린 부분만 한 번에 하나씩 묻는다. 사용자가 "이만 계획" 을 고르거나 최대 횟수에 닿으면 끝난다.
+## Development
 
-설치 뒤 확인 순서는 `docs/work-checklist.md`.
+```
+cd oke/bin && python -m unittest discover -p "test_*.py"   # CLI and runtime tests
+claude plugin test oke                                     # mod (band, board, git guard) tests
+```
