@@ -561,10 +561,12 @@ def cmd_rt(args):
         out = {"place": rt.place_for_repo(repo, os.path.basename(repo.rstrip("/\\")))}
     elif args.rt == "worktree":
         if args.remove:
-            # herdr reuses workspace ids after a restart: never one a job still works in
+            # herdr reuses workspace ids after a restart: never another job's (--job), or
+            # without --job (an older PM) one a job still works in
             owner = [n for n, j in load_state()["jobs"].items()
                      if (j.get("worktree") or {}).get("id") == args.remove
-                     and j.get("phase") not in DONE_PHASES + ("merging",)]
+                     and (n != args.remove_job if args.remove_job
+                          else j.get("phase") not in DONE_PHASES + ("merging",))]
             if owner:
                 return fail("worktree %s is job %s's now, and that job still works in it: not removed"
                             % (args.remove, owner[0]))
@@ -3259,6 +3261,7 @@ def build_parser():
             p.add_argument("job", nargs="?")
             p.add_argument("--repo")
             p.add_argument("--remove", metavar="ID")
+            p.add_argument("--job", dest="remove_job", help="with --remove: the job the worktree is for")
 
     board = sub.add_parser("board", help="the board as text or HTML, for hosts without the mod pane")
     board.add_argument("--html", action="store_true")

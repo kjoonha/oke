@@ -131,6 +131,18 @@ class TestRuntimeCommands(SpawnBase):
         self.assertIn("fix-b", self.err)
         self.assertEqual(self.argv(), [])  # herdr was never asked
 
+    def test_with_job_a_workspace_id_of_another_merging_job_is_never_removed(self):
+        self.job("fix-b", "merging")  # approved while the PM still finishes fix-a
+        state = oke.load_state()
+        state["jobs"]["fix-b"]["worktree"] = {"id": "w3", "path": self.path("wt-fix-b")}
+        oke.save_state(state)
+        self.fake({"worktree remove": [J({})]})
+        self.assertEqual(self.cli("worktree", "--remove", "w3", "--job", "fix-a"), 1)
+        self.assertIn("fix-b", self.err)
+        self.assertEqual(self.argv(), [])  # herdr was never asked
+        self.assertEqual(self.cli("worktree", "--remove", "w3", "--job", "fix-b"), 0, self.err)
+        self.assertEqual(self.argv()[-1][-2:], ["--workspace", "w3"])
+
     def test_a_reused_workspace_id_never_removes_another_jobs_worktree(self):
         # herdr reuses workspace ids after a restart
         self.job("fix-a", "working")
