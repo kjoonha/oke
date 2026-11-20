@@ -2320,8 +2320,13 @@ def verify_locked(job, command, accept, info, lock):
     ledger_add(job, "oke", row["commit"], "verify", "fail", "exit %d: %s" % (code, command))
     words = row["detail"].split()
     if "already-in" in words:
-        return fail("the 검증 명령 failed (log %s) on main, which already held oke/%s before OKe's merge: "
-                    "nothing was merged, so nothing is undone. Ask the user." % (log, job))
+        # main held the branch before OKe's merge: nothing to undo, but the job goes back
+        # to the worker like any failed merge (rolled_back lets it merge again)
+        ledger_add(job, "oke", row["commit"], "rollback", "ok", "already-in: nothing undone")
+        print(json.dumps({"result": "verify_failed", "job": job, "exit": code, "log": log,
+                          "rolled_back_to": row["commit"], "already_in": True, "uncommitted": False,
+                          "tail": tail}))
+        return 3
     pre = words[0][len("pre="):] if words and words[0].startswith("pre=") else None
     # a direct commit (no worktree) goes back to uncommitted changes for the worker to fix
     mode = "--mixed" if "direct" in words else "--keep"

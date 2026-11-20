@@ -73,14 +73,30 @@ class TestMergeGate(MergeBase):
         self.assertEqual(json.loads(self.out), {"result": "merged", "job": "fix-a", "commit": head,
                                                 "already_in": True})
         self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), head)  # no merge commit
-        # a failing check undoes nothing: OKe merged nothing
-        self.assertEqual(self.cli("job", "verify", "fix-a", "exit 1"), 1)
-        self.assertIn("nothing is undone", self.err)
-        self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), head)
-        self.assertEqual(oke.merge_state("fix-a")[0], "unverified")
         self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 0, self.err)
         self.logged("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
+
+    def test_a_failed_check_of_a_branch_already_in_main_goes_back_to_the_worker(self):
+        self.git(self.repo, "merge", "-q", "--ff-only", "oke/fix-a")
+        head = self.git_out(self.repo, "rev-parse", "HEAD").strip()
+        self.order(self.report("fix-a-w1", 1), self.review(1))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+        # nothing to undo (OKe merged nothing), but the job is rolled back like any failed merge
+        self.assertEqual(self.cli("job", "verify", "fix-a", "exit 1"), 3)
+        self.assertEqual(json.loads(self.out)["already_in"], True)
+        self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), head)
+        self.assertEqual(oke.merge_state("fix-a")[0], "rolled_back")
+        # the worker fixes it on the branch, a new review passes: it merges for real
+        self.git(self.repo, "checkout", "-q", "oke/fix-a")
+        self.write("toy/fix.txt", "fix\n")
+        self.git(self.repo, "add", "-A")
+        self.git(self.repo, "commit", "-q", "-m", "fix")
+        self.git(self.repo, "checkout", "-q", "-")
+        self.order(self.report("fix-a-w1", 2), self.review(2))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+        self.assertNotIn("already_in", json.loads(self.out))
+        self.assertEqual(oke.merge_state("fix-a")[0], "unverified")
 
     def test_work_reported_after_the_review_is_refused(self):
         # seen live: the worker rebased (seq 2) and the PM merged without a new review
