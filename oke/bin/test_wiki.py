@@ -233,6 +233,25 @@ class TestWiki(SpawnBase):
         with io.open(oke.children_path(oke.repo_key(self.repo)), encoding="utf-8") as f:
             self.assertIsNone(json.load(f)["fix-a-w1"]["pane"])
 
+    def test_a_question_the_pm_wrote_while_held_does_not_come_back_with_the_job(self):
+        # the hold closed the worker; the PM's wait said gone before the notice reached it
+        self.fake({})
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
+        folder = oke.pm_job_dir("fix-a")
+        os.makedirs(folder, exist_ok=True)
+        with io.open(os.path.join(folder, "assignment.md"), "w", encoding="utf-8") as f:
+            f.write(u"agent: pm-r\nrole: pm\nseq: 1\n---\n")
+        state = oke.load_state()
+        state["jobs"]["fix-a"]["sent_seq"] = 1
+        state["jobs"]["fix-a"]["held_at"] -= 5
+        oke.save_state(state)
+        with io.open(os.path.join(folder, "report.md"), "w", encoding="utf-8") as f:
+            f.write(u"type: question\nseq: 1\n---\nfix-a-w1 died: revive or give up?\n")
+        self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
+        self.assertIsNone(oke.pending_item("fix-a", oke.load_state()["jobs"]["fix-a"]))
+        self.assertEqual(oke.pm_job_report("fix-a")[1], {})  # a PM wait has nothing to return
+        self.assertTrue(os.path.exists(os.path.join(folder, "report-while-held.md")))
+
     def test_a_held_job_is_left_alone_until_it_comes_back(self):
         key = oke.repo_key(self.repo)
         self.assertEqual(self.cli("job", "new", "fix-b", "--repo", self.repo), 0, self.err)

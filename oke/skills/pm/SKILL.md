@@ -162,7 +162,7 @@ When a child's wait finishes, act on its first line:
 | `report blocked` | Children do not use this type. Treat it as `report question` |
 | `idle_no_report` | Once: `$OKE send <child> "continue"` (its turn stopped short: it picks up where it was), then wait again. Second time: report `failed` for that job |
 | `bad_report` | Once: `$OKE send <child> "Rewrite your report.md in the format your skill gives."`, then wait again. Second time: report `failed` for that job |
-| `gone` | The child died; OKe does not restart it by itself. Report `question` for that job: name the child and ask whether to revive it or give the job up. On `kind: answer` "revive": `$OKE revive <child> --reset`, then wait again |
+| `gone` | If `$OKE status` shows the job held, ignore it: the hold closed the child. Otherwise the child died; OKe does not restart it by itself. Report `question` for that job: name the child and ask whether to revive it or give the job up. On `kind: answer` "revive": `$OKE revive <child> --reset`, then wait again |
 | `superseded` | A newer wait on that child replaced this one. Do nothing |
 | `cancelled` | The user gave that job up. Do nothing for it: no report, no new wait |
 | `{"deliver": {"to": ..., "text": ...}}` | The child runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again |

@@ -2586,6 +2586,12 @@ def job_locked(args):
         info = state["jobs"][args.slug]
         if not info.get("held"):
             return fail("job %s is not on hold" % args.slug)
+        seq, header, mtime = pm_job_report(args.slug)
+        if mtime and mtime > info.get("held_at", 0) and header.get("type") in FINAL_TYPES:
+            # written while held (a child the hold closed looked "gone" to the PM): stale,
+            # so neither a PM wait nor `pending` asks the user about it after the unhold
+            report = os.path.join(pm_job_dir(args.slug), "report.md")
+            replace_file(report, os.path.join(pm_job_dir(args.slug), "report-while-held.md"))
         info.pop("held", None)
         info.pop("held_at", None)
         save_state(state)
