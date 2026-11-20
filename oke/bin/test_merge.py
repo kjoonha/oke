@@ -483,6 +483,22 @@ class TestDirectCommit(MergeBase):
         self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
         self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD^{tree}").strip(), self.tree)
 
+    def test_a_review_of_main_as_it_is_is_recorded_already_in_and_can_finish(self):
+        # the change was already there: the review passed on a clean checkout
+        self.git(self.repo, "reset", "-q")
+        os.remove(os.path.join(self.repo, "d.txt"))
+        tree = self.git_out(self.repo, "rev-parse", "HEAD^{tree}").strip()
+        path = os.path.join(self.jobs, "fix-a-rv", "assignment.md")
+        with open(path, "w") as f:
+            f.write("agent: fix-a-rv\nrole: reviewer\njob: fix-a\nseq: 1\ncommit: no\ntree: %s\n---\n" % tree)
+        self.order(self.report("fix-a-w1", 1), self.report("fix-a-rv", 1, "verdict: pass"))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["already_in"], True)
+        self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), self.pre)  # no commit
+        self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 0, self.err)
+        self.logged("fix-a")
+        self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
+
     def test_nothing_to_commit_is_refused(self):
         self.git(self.repo, "reset", "-q")
         os.remove(os.path.join(self.repo, "d.txt"))

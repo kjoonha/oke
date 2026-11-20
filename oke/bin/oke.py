@@ -2153,6 +2153,17 @@ def commit_direct(job, info, main, review, reviewed):
         return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
                     % (current or "a detached HEAD", base))
     code, dirty = git_out(main, "status", "--porcelain")
+    if code == 0 and not dirty and git_out(main, "rev-parse", "HEAD^{tree}")[1] == reviewed:
+        # the review passed on main as it is (the change was already there): recorded like
+        # merge_job's already-in, so verify and done work
+        if left_merging(job):
+            return 1
+        pre = git_out(main, "rev-parse", "HEAD")[1]
+        ledger_add(job, os.path.basename(os.path.dirname(review)), pre, "review", "pass",
+                   review.replace("\\", "/"))
+        ledger_add(job, "oke", pre, "merge", "ok", "pre=%s direct already-in" % pre)
+        print(json.dumps({"result": "merged", "job": job, "commit": pre, "direct": True, "already_in": True}))
+        return 0
     if code != 0 or not dirty:
         return fail("job %s has no branch oke/%s and no changes in %s to commit" % (job, job, main))
     tree = pending_tree(main)
