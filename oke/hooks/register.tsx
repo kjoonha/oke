@@ -182,6 +182,7 @@ const PENDING: Record<string, string> = {
   plan: 'approve the plan',
   merge: 'approve the merge',
   question: 'PM asks',
+  peer: 'a PM did not answer',
   blocked: 'PM is blocked',
   failed: 'PM reports a failure',
   silent: 'PM is silent',

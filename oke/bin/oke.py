@@ -3107,14 +3107,19 @@ def peer_waiting(state, job):
                 and open_jobs(state, e.get("repo")))
 
 
+def peer_ruling(state, job):
+    """The asked PMs the user must rule on for `job`: they never answered, and the job's PM
+    has had no new assignment since (ruled at its current seq). `pending` lists them."""
+    seq = state["jobs"].get(job, {}).get("sent_seq")
+    return sorted(pm for pm, e in (read_peers(job).get("waiting") or {}).items()
+                  if isinstance(e, dict) and not e.get("closed") and e.get("ruled_seq") == seq
+                  and open_jobs(state, e.get("repo")))
+
+
 def peers_hold(state, job):
     """The asking PM is waiting, not stopped short: an answer is still owed, or the user is
-    being asked about a missing one (ruled at the job's current seq, before its kind: answer)."""
-    if peer_waiting(state, job):
-        return True
-    seq = state["jobs"].get(job, {}).get("sent_seq")
-    return any(isinstance(e, dict) and not e.get("closed") and e.get("ruled_seq") == seq
-               and open_jobs(state, e.get("repo")) for e in (read_peers(job).get("waiting") or {}).values())
+    being asked about a missing one."""
+    return bool(peer_waiting(state, job) or peer_ruling(state, job))
 
 
 def end_peer_talk(job):
@@ -3254,7 +3259,8 @@ def deliver(agent):
 
 # ---------------------------------------------------------------- pending
 
-PENDING_RANKS = {"legacy": 0, "unsent": 0, "report_done": 0, "silent": 1, "question": 1, "blocked": 1, "failed": 1, "plan": 2, "merge": 3}
+PENDING_RANKS = {"legacy": 0, "unsent": 0, "report_done": 0, "silent": 1, "question": 1, "blocked": 1, "failed": 1,
+                 "peer": 1, "plan": 2, "merge": 3}
 ASKING_PHASES = ("planning", "working", "reviewing", "merging")
 
 
@@ -3286,6 +3292,8 @@ def pending_item(name, job):
         kind, since, mark = rtype, mtime, seq
     elif rtype not in REPORT_TYPES and is_silent(job, seq):
         kind, since, mark = "silent", mtime, seq
+    elif os.path.exists(peers_path(name)) and peer_ruling(load_state(), name):
+        kind, since, mark = "peer", os.path.getmtime(peers_path(name)), job.get("sent_seq")
     elif rtype == "done" and phase in ASKING_PHASES:
         kind, since, mark = "report_done", mtime, seq
     elif phase == "awaiting_approval":

@@ -171,7 +171,7 @@ When it finishes, read the first line of its output. If the user speaks before i
 | `bad_report <job> ...` | `$OKE send <pm> --job <job> "Job <job>: rewrite <pm_job_dir>/report.md in the required format."` and wait again |
 | `idle_no_report again <job>`, `bad_report again <job> ...` | The nudge did not help. Do not nudge again: the wait now leaves that job alone and `pending` lists it as `silent`. Wait again (for the other jobs), then run the queue |
 | `no_jobs` | The PM has no open job left. Do not start its wait again |
-| `peer_no_answer <job> <pm>` | `<pm>` was asked by job `<job>`'s PM about cross-repo impact (`oke peer ask`), was reminded once, and still went idle without answering. Ask the user one question: proceed as no impact / keep waiting / cancel `<job>`. Give `<job>`'s PM `kind: answer` with the choice ("<pm> did not answer: plan as if there is no impact" for the first). Then start this PM's wait again |
+| `peer_no_answer <job> <pm>` | `<pm>` was asked by job `<job>`'s PM about cross-repo impact (`oke peer ask`), was reminded once, and still went idle without answering. It is also the `peer` item of `$OKE pending`: handle it there. Then start this PM's wait again |
 | `gone` | The PM died. OKe does not restart an agent by itself. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / cancel (see "Giving up") / hold (`$OKE job hold <job>` for each of them, see "On hold"; with no open job left, do not start that PM's wait again) |
 | `superseded` | A newer wait replaced this one. Do nothing: do not run the queue and do not start a wait |
 | `{"deliver": {"to": ..., "text": ...}}` | The PM runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again. Not a result to show the user |
@@ -180,7 +180,7 @@ When it finishes, read the first line of its output. If the user speaks before i
 
 ## Queue
 
-`$OKE pending` lists what waits for you and the user, in the order to handle it: first finished reports you act on yourself (`report_done`), then blocked items (`question`, `blocked`, `failed`), then plan approvals (`plan`), then merge approvals (`merge`); within a kind, the oldest first. It is computed from the files, so it survives compaction.
+`$OKE pending` lists what waits for you and the user, in the order to handle it: first finished reports you act on yourself (`report_done`), then blocked items (`question`, `blocked`, `failed`, `peer`), then plan approvals (`plan`), then merge approvals (`merge`); within a kind, the oldest first. It is computed from the files, so it survives compaction.
 
 Run the queue after every wait result except `superseded`, after the start procedure, and after each answer:
 
@@ -194,6 +194,7 @@ Run the queue after every wait result except `superseded`, after the start proce
    - `unsent`: you wrote that job's assignment but never sent the message (you were compacted in between). Read the assignment's `kind` and do steps 3 to 6 of "Give the job to the PM" now: set the phase that kind belongs to (see "Flow"), make sure the PM runs, send, wait. For `kind: cancel` (an older OKe wrote it), cancel the job as in "Giving up" instead. For `kind: dialog`, the key may not have gone to the child yet: read the child's screen (`$OKE read <child>`). Send the key only if it still shows the same dialog as the PM's report; a different dialog is a new one the user has not seen, so send nothing and let the PM report it. No question.
    - `silent`: the PM did not report on that job even after a nudge. Ask: go to the PM pane (`$OKE attach <pm>`, then `$OKE job defer <job>`) / send the same step again (steps 2 to 6 of "Give the job to the PM" with the same 이번 지시: the new seq gives the PM a fresh start) / give up (see "Giving up").
    - `failed`: show the summary (an "API error" summary means automatic retries ran out). Ask: retry (give the PM the same step again) / give up (see "Giving up") / later.
+   - `peer`: a PM asked about cross-repo impact never answered (`$OKE peer status <job>` lists it under `no_answer`). Ask: proceed as if there is no impact / go to that PM's pane (`$OKE attach <pm>`, then `$OKE job defer <job>`) / give up the job (see "Giving up"). For "proceed": give `<job>`'s PM `kind: answer` "<pm> did not answer: plan as if there is no impact" (steps 2 to 6 of "Give the job to the PM").
    - `plan`: the plan approval question (see "Flow").
    - `merge`: the merge question (see "Flow").
 4. When the user picks later, "look myself" or "discuss in the PM pane": `$OKE job defer <job>`. ("Hold" is always `job hold`, see "On hold"; a queue question offers "later" instead.) Do not ask a deferred item again unless the user brings it up. It stops being deferred by itself when its job moves on.

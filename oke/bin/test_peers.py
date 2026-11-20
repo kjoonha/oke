@@ -285,6 +285,18 @@ class TestReviewFixes3(PeerBase):
         self.assertEqual(oke.check_pm_once("pm-a", self.key), "?idle_no_report fix-a")
 
 
+class TestReviewFixes4(PeerBase):
+    def test_a_missing_answer_the_user_must_rule_on_stays_in_pending(self):
+        self.pm_job("fix-a", 1)
+        oke.write_json_atomic(oke.peers_path("fix-a"), {"round": 1, "asker": "pm-a", "waiting": {
+            "pm-b": {"repo": self.key_b, "nudged": 1}}})
+        oke.peer_nudge("pm-b", "fix-a")
+        item = oke.pending_item("fix-a", oke.load_state()["jobs"]["fix-a"])
+        self.assertEqual(item["kind"], "peer")
+        self.pm_job("fix-a", 2)  # the orchestrator gave the PM the user's choice
+        self.assertIsNone(oke.pending_item("fix-a", oke.load_state()["jobs"]["fix-a"]))
+
+
 class TestAfter(PeerBase):
     def setUp(self):
         PeerBase.setUp(self)
