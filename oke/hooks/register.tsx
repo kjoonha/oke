@@ -198,7 +198,8 @@ const ASKS_USER = ['plan', 'merge', 'question', 'blocked', 'failed']
  * `--git-dir <dir>` may come first, and a wrapper word (`time`, `command`, ...) or a path. */
 const GIT_DENIED = new RegExp(
   // only where git starts a command: not inside a commit message or a grep pattern
-  String.raw`(?:^|[;&|(\n\x60]|\$\(|\b(?:then|do|else|time|command|env|exec|nohup|xargs)\b)\s*(?:\w+=\S*\s+)*`
+  // a wrapper word or VAR=x counts only right where a command starts
+  String.raw`(?:^|[;&|(\n\x60]|\$\()\s*(?:(?:then|do|else|time|command|env|exec|nohup|xargs)\s+|\w+=\S*\s+)*`
   + String.raw`(?:\S*[\\/])?git(?:\.exe)?`
   + String.raw`(?:\s+(?:-C\s+\S+|-c\s+\S+|--(?:git-dir|work-tree|namespace)\s+\S+|--[\w-]+(?:=\S+)?))*\s+`
   + String.raw`(push\b|reset\s[^;&|\n]*--(?:hard|merge)\b|clean\s[^;&|\n]*(?:-\w*f|--force)`

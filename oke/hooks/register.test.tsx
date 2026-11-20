@@ -458,11 +458,13 @@ test('a PM, worker or reviewer cannot run git commands that lose or publish work
   }
   for (const ok of ['git -C r diff main...HEAD', 'git -C r commit -m "push the button"', 'git rebase main',
     'git -C r reset HEAD file.py', 'git checkout -- calc.py', 'git commit -m "why we avoid git push"',
-    'grep -rn "git reset --hard" .', "git commit -F - <<'EOF'\nnever git push here\nEOF"]) {
+    'grep -rn "git reset --hard" .', "git commit -F - <<'EOF'\nnever git push here\nEOF",
+    'git commit -m "docs: then git push the tag"', 'grep -n "do git reset --hard" notes.md',
+    'echo then git push the tag', 'git log --grep time git push']) {
     const out: any = await $.tool.call({ tool: 'Bash', command: ok } as any)
     expect(out.deny).toBeUndefined()
   }
-  expect(ran.length).toBe(8)
+  expect(ran.length).toBe(12)
 })
 
 test('inside Orca the terminal handle is the place', async ($, on) => {
