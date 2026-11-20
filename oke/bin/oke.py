@@ -2616,10 +2616,11 @@ def job_locked(args):
             section = None
         # a plan with a worktree names its branch: main's changes are the user's, not this job's
         uses_worktree = bool(section) and ("oke/" + args.slug) in section.group(1)
-        if not early and not uses_worktree and info.get("repo") and main_changes(main)[1] \
+        if not early and not uses_worktree and info.get("repo") \
                 and git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/" + args.slug)[0] != 0:
             # no branch: its edits (a worker's or the PM's own) sit uncommitted in the main
-            # checkout, in every other job's way
+            # checkout, in every other job's way. Not judged by main's state: a PM subagent the
+            # hold cannot close may still write there after it
             return fail("job %s works in the main checkout (no branch oke/%s): cancel it, or let it "
                         "finish, not hold it" % (args.slug, args.slug))
         pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}

@@ -196,22 +196,21 @@ class TestWiki(SpawnBase):
         self.assertTrue(texts[1].startswith("Job fix-a was cancelled"))
         self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
 
-    def test_a_job_without_a_branch_cannot_go_on_hold_with_edits_in_main(self):
-        self.advance("fix-a", "working")
+    def test_a_job_without_a_branch_cannot_go_on_hold_once_it_worked(self):
+        self.advance("fix-a", "awaiting_approval")
         self.fake({})
-        # approved, nothing edited yet (a Python cache is no edit)
-        self.write(os.path.join(self.repo, "__pycache__", "x.pyc"), "x")
+        # never worked: holdable, even with the user's own edits in main
+        self.write(os.path.join(self.repo, "a.txt"), "a")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
         held_at = oke.load_state()["jobs"]["fix-a"]["held_at"]
         # held again (to retry the closes): no second notice, the same held_at
         self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
         self.assertEqual(oke.load_state()["jobs"]["fix-a"]["held_at"], held_at)
         self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
-        # no branch, no child record (the PM's own subagent): its edits sit in the main checkout,
-        # a new file too
-        self.write(os.path.join(self.repo, "a.txt"), "a\n")
-        self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
-        self.git(self.repo, "add", "a.txt")
+        os.remove(os.path.join(self.repo, "a.txt"))
+        # worked without a branch (a PM subagent the hold cannot close may still write to
+        # main): refused whatever main holds now
+        self.advance("fix-a", "working")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
         self.assertIn("no branch oke/fix-a", self.err)
         # the plan uses a worktree (the PM died before making it): main's edits are the user's
