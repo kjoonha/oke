@@ -1014,6 +1014,7 @@ def check_pm_once(agent, key):
                 return None  # another wait returned it a moment ago
             current["jobs"][name]["seen"] = seen_mark(header)
             save_state(current)
+            end_peer_talk(name)  # the asker reported: nobody owes this round an answer any more
         return "report %s %s" % (header["type"], name)
     look = look_at(agent, pm_dir(key))
     if look != "idle":
@@ -2422,7 +2423,7 @@ def verify_locked(job, command, accept, info, lock):
     if accept:
         # the user's call, e.g. after the main branch moved on: recorded as such
         ledger_add(job, "user", row["commit"], "verify", "pass", "accepted: " + accept)
-        tell_after_waiters(load_state(), job, AFTER_VERIFIED, ("awaiting_merge", "merging"))
+        tell_after_waiters(load_state(), job, AFTER_VERIFIED, ("merging",))
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "accepted": True}))
         return 0
     main = native_path(os.path.dirname(info["repo"]))
@@ -2437,7 +2438,7 @@ def verify_locked(job, command, accept, info, lock):
     log = log.replace("\\", "/")
     if code == 0:
         ledger_add(job, "oke", row["commit"], "verify", "pass", command)
-        tell_after_waiters(load_state(), job, AFTER_VERIFIED, ("awaiting_merge", "merging"))
+        tell_after_waiters(load_state(), job, AFTER_VERIFIED, ("merging",))
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "log": log}))
         return 0
     if code in (126, 127):  # the shell could not run the command: not a verdict on the merge
@@ -3096,18 +3097,25 @@ def read_peers(job):
 
 
 def peer_waiting(state, job):
-    """The PMs that still owe `job` an answer. A PM whose repository has no open job left
-    (done, archived, cancelled or held) is left out: nothing revives or watches it."""
+    """The PMs that still owe `job` an answer. Left out: a PM whose repository has no open
+    job left (done, archived, cancelled or held: nothing revives or watches it), and one
+    the user was asked about already (nudged 2: its late answer still counts)."""
     waiting = read_peers(job).get("waiting") or {}
     return dict((pm, e) for pm, e in waiting.items()
-                if isinstance(e, dict) and open_jobs(state, e.get("repo")))
+                if isinstance(e, dict) and e.get("nudged", 0) < 2 and open_jobs(state, e.get("repo")))
+
+
+def end_peer_talk(job):
+    data = read_peers(job)
+    if data.get("waiting"):
+        data["waiting"] = {}
+        write_json_atomic(peers_path(job), data)
 
 
 def owed_answers(state, agent):
     """[(job, round)] of every open job that waits on an answer from `agent`."""
-    # nudged 2: the user was asked about it already; a late answer still counts
     return [(job, read_peers(job).get("round", 1)) for job in sorted(open_jobs(state))
-            if (peer_waiting(state, job).get(agent) or {"nudged": 2}).get("nudged", 0) < 2]
+            if agent in peer_waiting(state, job)]
 
 
 def peer_nudge(agent, job):
@@ -3144,10 +3152,11 @@ def cmd_peer(args):
     if info is None:
         return fail("unknown job: %s" % args.job)
     if args.action == "status":
-        raw = read_peers(args.job)
+        raw = read_peers(args.job).get("waiting") or {}
         waiting = peer_waiting(state, args.job)
-        print(json.dumps({"round": raw.get("round", 0), "waiting": sorted(waiting),
-                          "dropped": sorted(set(raw.get("waiting") or {}) - set(waiting))}))
+        ruled = set(pm for pm, e in raw.items() if isinstance(e, dict) and e.get("nudged", 0) >= 2)
+        print(json.dumps({"round": read_peers(args.job).get("round", 0), "waiting": sorted(waiting),
+                          "dropped": sorted(set(raw) - set(waiting) - ruled), "no_answer": sorted(ruled)}))
         return 0
     if info.get("phase") in DONE_PHASES:
         return fail("job %s is closed (%s): nothing to ask or answer" % (args.job, info.get("phase")))
@@ -3175,7 +3184,7 @@ def cmd_peer(args):
                            % (args.job, n, text, ANSWER_HINT % args.job))
             print(json.dumps({"round": n, "asked": sorted(waiting)}))
             return 0
-        if name not in peer_waiting(state, args.job):
+        if not isinstance((read_peers(args.job).get("waiting") or {}).get(name), dict):
             return fail("%s was not asked about job %s (or answered already)" % (name, args.job))
         data = read_peers(args.job)
         data["waiting"].pop(name, None)

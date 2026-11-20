@@ -203,7 +203,7 @@ class TestReviewFixes(PeerBase):
         oke.save_state(s)
         self.as_agent("pm-a")
         self.assertEqual(self.cli("peer", "status", "fix-a"), 0, self.err)
-        self.assertEqual(json.loads(self.out), {"round": 1, "waiting": [], "dropped": ["pm-b"]})
+        self.assertEqual(json.loads(self.out), {"round": 1, "waiting": [], "dropped": ["pm-b"], "no_answer": []})
 
     def test_ask_and_answer_refuse_a_closed_job(self):
         self.ask()
@@ -213,6 +213,42 @@ class TestReviewFixes(PeerBase):
         self.assertEqual(self.answer(), 1)
         self.assertEqual(self.texts("pm-a"), [])
         self.assertEqual(self.ask(), 1)
+
+
+class TestReviewFixes2(PeerBase):
+    def test_a_pm_the_user_ruled_on_leaves_waiting_but_may_still_answer(self):
+        self.ask()
+        data = oke.read_peers("fix-a")
+        data["waiting"]["pm-b"]["nudged"] = 2
+        oke.write_json_atomic(oke.peers_path("fix-a"), data)
+        self.assertEqual(oke.peer_waiting(oke.load_state(), "fix-a"), {})
+        self.as_agent("pm-a")
+        self.cli("peer", "status", "fix-a")
+        self.assertEqual(json.loads(self.out), {"round": 1, "waiting": [], "dropped": [], "no_answer": ["pm-b"]})
+        self.assertEqual(self.answer(), 0, self.err)
+
+    def test_the_askers_final_report_ends_the_talk(self):
+        from test_slice3 import REPORT
+        self.ask()
+        s = oke.load_state()
+        s["jobs"]["fix-b"]["held"] = True  # pm-b drops out, pm-a reports without it
+        oke.save_state(s)
+        self.pm_job("fix-a", 1, REPORT("done", 1))
+        self.fake({"agent get": [AGENT("working")]})
+        self.assertEqual(oke.check_pm_once("pm-a", self.key), "report done fix-a")
+        s = oke.load_state()
+        s["jobs"]["fix-b"]["held"] = False  # back: must not owe the finished talk
+        oke.save_state(s)
+        self.assertEqual(oke.owed_answers(oke.load_state(), "pm-b"), [])
+
+    def test_verify_pass_does_not_tell_a_job_awaiting_merge_approval(self):
+        self.advance("fix-a", "awaiting_merge")
+        self.put(os.path.join(self.home, "jobs", "fix-a", "plan.md"), "job: fix-a\nafter: fix-b\n---\n")
+        self.advance("fix-b", "merging")
+        oke.ledger_add("fix-b", "oke", "abc1234", "merge", "pass")
+        self.fake({"agent list": [J({"agents": []})]})
+        self.assertEqual(self.cli("job", "verify", "fix-b", "--accept", "user checked"), 0, self.err)
+        self.assertEqual(self.texts("pm-a"), [])
 
 
 class TestAfter(PeerBase):
