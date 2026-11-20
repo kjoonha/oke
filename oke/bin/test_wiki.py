@@ -3,8 +3,9 @@ import io
 import json
 import os
 
-from test_oke import J, SpawnBase, help_ok  # noqa: F401
+from test_oke import J, SpawnBase, help_ok, spawn_ok  # noqa: F401
 import oke
+import runtime_herdr
 import wiki
 
 
@@ -195,6 +196,43 @@ class TestWiki(SpawnBase):
         self.assertTrue(texts[1].startswith("Job fix-a was cancelled"))
         self.assertFalse(oke.should_be_alive(oke.load_state(), "pm", key, "pm-x", {}))
 
+    def test_nothing_of_a_held_job_starts(self):
+        self.advance("fix-a", "working")
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
+        self.fake(spawn_ok())
+        self.assertEqual(self.cli("spawn", self.assignment("fix-a-w1", "worker", "fix-a"),
+                                  "--split-from", "w1:p1"), 1)
+        self.assertIn("on hold", self.err)
+        # a fresh PM hears of the hold it never got as a message
+        self.assertEqual(self.cli("spawn", self.assignment("pm-r", "pm"), "--pane", "w1:p9"), 0, self.err)
+        self.assertIn("on hold: fix-a", self.argv_of("agent", "prompt")[0][3])
+        state = oke.load_state()
+        state["jobs"]["fix-a"].pop("held")
+        state["jobs"]["fix-a"]["phase"] = "merging"
+        oke.save_state(state)
+        self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
+
+    def test_a_hold_while_a_worker_starts_closes_it(self):
+        # the hold closed the job's agents before this one had a record
+        self.advance("fix-a", "working")
+        start = runtime_herdr.start_agent
+
+        def hold_then_start(*a, **k):
+            self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
+            return start(*a, **k)
+        runtime_herdr.start_agent = hold_then_start
+        self.addCleanup(setattr, runtime_herdr, "start_agent", start)
+        scenario = spawn_ok()
+        scenario.update({"pane get": [J({"pane": {"pane_id": "w1:p9", "terminal_id": "t9"}})],
+                         "pane close": [J({"type": "ok"})]})
+        self.fake(scenario)
+        self.assertEqual(self.cli("spawn", self.assignment("fix-a-w1", "worker", "fix-a"),
+                                  "--split-from", "w1:p1"), 1)
+        self.assertIn("went on hold", self.err)
+        self.assertEqual(self.argv_of("pane", "close")[0][2], "w1:p9")
+        with io.open(oke.children_path(oke.repo_key(self.repo)), encoding="utf-8") as f:
+            self.assertIsNone(json.load(f)["fix-a-w1"]["pane"])
+
     def test_a_held_job_is_left_alone_until_it_comes_back(self):
         key = oke.repo_key(self.repo)
         self.assertEqual(self.cli("job", "new", "fix-b", "--repo", self.repo), 0, self.err)
@@ -217,7 +255,9 @@ class TestWiki(SpawnBase):
         texts = [t.split(": ", 1)[1] for _, t in oke.inbox_messages(pm)]
         self.assertEqual(len(texts), 1)  # the old assignment notice went; the hold notice stays
         self.assertTrue(texts[0].startswith("Job fix-a: the user put it on hold"))
-        self.assertEqual(oke.board_tree(state, [])[0]["jobs"][0]["held"], True)
+        board_job = oke.board_tree(state, [])[0]["jobs"][0]
+        self.assertEqual(board_job["held"], True)
+        self.assertEqual(board_job["agents"][0]["status"], "off")  # closed by the hold, not dead
         # nothing asks for it, and a PM that missed the notice cannot move it on
         self.assertIsNone(oke.pending_item("fix-a", state["jobs"]["fix-a"]))
         self.assertEqual(self.cli("job", "phase", "fix-a", "planning"), 1)
@@ -282,13 +322,14 @@ class TestWiki(SpawnBase):
             "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p1", "terminal": "t1"},
             "fix-b-w1": {"job": "fix-b", "role": "worker", "pane": "w1:p3", "terminal": "t3"}})
         closed = []
+        folder = os.path.join(self.home, "jobs", "fix-a")
 
         class Stub(object):
             def place_id(self, pane):
                 return {"w1:p1": "t1", "w1:p3": "t3"}[pane]
 
             def close(self, pane):
-                closed.append(pane)
+                closed.append((pane, os.path.isdir(folder)))
         state = oke.load_state()
         state["jobs"]["fix-a"]["phase"] = "done"
         oke.save_state(state)
@@ -298,11 +339,13 @@ class TestWiki(SpawnBase):
             self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
         finally:
             oke.runtime = real
-        self.assertEqual(closed, ["w1:p1"])  # only this job's child
-        self.assertIsNone(oke.read_children(key)["fix-a-w1"]["pane"])
+        # only this job's child, before its folder moves (or its next write brings it back)
+        self.assertEqual(closed, [("w1:p1", True)])
+        # its record goes too: a later job of the same name must not inherit it
+        self.assertEqual(list(oke.read_children(key)), ["fix-b-w1"])
         self.assertNotIn("fix-a", oke.load_state()["jobs"])
 
-    def test_archive_keeps_what_an_outage_left_and_still_succeeds(self):
+    def test_archive_reports_what_an_outage_left_and_still_succeeds(self):
         key = oke.repo_key(self.repo)
         oke.write_json_atomic(oke.children_path(key), {
             "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p1", "terminal": "t1"}})
@@ -320,7 +363,7 @@ class TestWiki(SpawnBase):
         finally:
             oke.runtime = real
         self.assertIn("not_closed: fix-a-w1", self.out)
-        self.assertEqual(oke.read_children(key)["fix-a-w1"]["pane"], "w1:p1")
+        self.assertEqual(oke.read_children(key), {})
         self.assertNotIn("fix-a", oke.load_state()["jobs"])
 
     def test_archive_reports_a_pane_that_refuses_to_close(self):
@@ -341,7 +384,7 @@ class TestWiki(SpawnBase):
         finally:
             oke.runtime = real
         self.assertIn("not_closed: fix-a-w1", self.out)
-        self.assertEqual(oke.read_children(key)["fix-a-w1"]["pane"], "w1:p1")
+        self.assertEqual(oke.read_children(key), {})
 
     def test_a_pane_gone_meanwhile_clears_its_record(self):
         key = oke.repo_key(self.repo)

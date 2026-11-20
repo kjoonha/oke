@@ -179,6 +179,25 @@ test('the board puts what waits on the user first and folds finished jobs', asyn
   tickRole = 'worker'
 })
 
+test('a held job shows its closed agents as off, like an idle PM, not as dead', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  tickBoard = [{ repo: 'toy-6b0484', key: 'k', pm: { agent: 'pm-toy', role: 'pm', status: 'off', board: '', todos: [] },
+    jobs: [{ job: 'calc-sub', phase: 'working', merge: 'none', pending: null, held: true, agents: [{
+      agent: 'calc-sub-w1', role: 'worker', status: 'off', pane: null, report: null, board: '', revives: 0, todos: [] }] }] }]
+  engine(on, [], [])
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /on hold/ })).toBeTruthy()
+  expect((await ui.find({ key: 'open-calc-sub-w1' }))?.text).toMatch(/– w1 off/)
+  expect(await ui.find({ type: 'Text', text: /✗|dead/ })).toBeFalsy()
+  await ui.unmount()
+  tickBoard = BOARD
+  tickRole = 'worker'
+})
+
 test('the board marks done, current and open todos apart', async ($, on) => {
   mock.clock(on)
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })

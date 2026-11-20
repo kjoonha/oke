@@ -765,15 +765,24 @@ def cmd_spawn(args):
               "seq": header["seq"], "role": role, "job": header.get("job")}
 
     def save_record():
+        """Save the record; False when its job went on hold or was cancelled meanwhile:
+        that close_children may have run before this record existed."""
         with locked():
+            current = load_state()
             if role == "pm":
-                current = load_state()
                 current["repos"].setdefault(key, {})["pm"] = record
                 save_state(current)
-            else:
-                children = read_children(key)
-                children[agent] = record
-                write_json_atomic(children_path(key), children)
+                return True
+            children = read_children(key)
+            children[agent] = record
+            write_json_atomic(children_path(key), children)
+            now = current["jobs"].get(record["job"]) or {}
+            return not now.get("held") and now.get("phase") in ("working", "reviewing", "merging")
+
+    def stopped():
+        close_children(record["job"], key)
+        return fail("job %s went on hold or was cancelled while %s started: closed it"
+                    % (record["job"], agent))
 
     def trusted_folder():
         """The trust dialog is answered only for a repository OKe already works on,
@@ -803,7 +812,8 @@ def cmd_spawn(args):
         # The record stays (the user may answer the dialog); a revive closes the old
         # pane only when it knows this terminal.
         record["terminal"] = runtime().place_id(pane)
-        save_record()
+        if not save_record():
+            return stopped()
         return fail("agent %s is stopped at a dialog in pane %s:\n%s" % (agent, pane, e))
     except HerdrError as e:
         if e.code == "herdr_unavailable":
@@ -812,7 +822,8 @@ def cmd_spawn(args):
     record["pane"] = info.get("pane_id", pane)
     record["session"] = session_of(info)
     record["terminal"] = runtime().place_id(record["pane"])  # lets a revive close this pane safely
-    save_record()
+    if not save_record():
+        return stopped()
     print(json.dumps({"agent": agent, "pane": record["pane"], "session": record["session"]}))
     return 0
 
@@ -1502,6 +1513,9 @@ def board_tree(state, agents, only_key=None):
             nodes = [board_node(rec.get("role") or "worker", name, key, rec, agents)
                      for name, rec in sorted(children.items()) if rec.get("job") == job]
             info = state["jobs"][job]
+            for n in nodes:
+                if info.get("held") and n["status"] == "dead":
+                    n["status"] = "off"  # the hold closed it, like the PM's "off": not hurt
             waiting = pending_item(job, info)
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
                          "size": info.get("size"), "direct": bool(info.get("direct")),
@@ -1911,23 +1925,25 @@ def cmd_job(args):
         if bool(args.command) == bool(args.accept):
             return fail("give the 검증 명령, or --accept \"<why>\" when the user accepts the merge as it is")
         return verify_job(args.slug, args.command, args.accept)  # can take hours
-    key = None
-    if args.action == "archive":
+    key = left = None
+    if args.action in ("archive", "unhold"):
         key = (load_state()["jobs"].get(args.slug) or {}).get("repo")
-    with locked():
-        code = job_locked(args)
-    if code == 0 and key:
+    if args.action == "archive" and key:
         # a PM can forget to close a finished job's worker (seen live): archive does it,
-        # outside the state lock. Best effort: the archive already happened, so its exit
-        # code and printed lines never depend on this (flushed first, in case it hangs).
-        sys.stdout.flush()
+        # before the folder moves (its next write would bring the folder back) and outside
+        # the state lock, like the mail drop. Best effort: the archive happens anyway.
         try:
             _, left, refused = close_children(args.slug, key)
             left = left + refused
         except Exception:  # noqa: BLE001 - cleanup only
             left = None
-        if left:
-            print("not_closed: %s (the runtime did not close them: tell the user to close them)" % ", ".join(left))
+        drop_job_mail(args.slug, key)
+    with locked():
+        code = job_locked(args)
+    if code == 0 and key and args.action == "unhold":
+        drop_job_mail(args.slug, key)  # the hold notice, if the PM has not read it
+    if code == 0 and left:
+        print("not_closed: %s (the runtime did not close them: tell the user to close them)" % ", ".join(left))
     return code
 
 
@@ -2542,8 +2558,6 @@ def job_locked(args):
         info.pop("held", None)
         info.pop("held_at", None)
         save_state(state)
-        if info.get("repo"):
-            drop_job_mail(args.slug, info["repo"])  # the hold notice, if the PM has not read it
         pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}
         print(json.dumps({"job": args.slug, "pm": pm.get("agent"),
                           "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/")}))
@@ -2565,8 +2579,6 @@ def job_locked(args):
         return 0
     if args.action == "archive":
         src = os.path.join(home, "jobs", args.slug)
-        if state["jobs"][args.slug].get("repo"):
-            drop_job_mail(args.slug, state["jobs"][args.slug]["repo"])
         dst = os.path.join(home, "archive", "%s-%s" % (args.slug, time.strftime("%Y%m%d-%H%M%S")))
         key = state["jobs"][args.slug].get("repo")
         hint = record_wiki_use(src, key) if key and os.path.isdir(src) else None
@@ -2576,6 +2588,11 @@ def job_locked(args):
             shutil.move(src, dst)
         del state["jobs"][args.slug]
         save_state(state)
+        if key:  # a later job of the same name must not inherit its agents
+            children = read_children(key)
+            kept = dict((n, r) for n, r in children.items() if r.get("job") != args.slug)
+            if kept != children:
+                write_json_atomic(children_path(key), kept)
         print(dst)
         if hint:
             print(hint)
