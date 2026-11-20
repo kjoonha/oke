@@ -1539,8 +1539,10 @@ def board_tree(state, agents, only_key=None):
                      for name, rec in sorted(children.items()) if rec.get("job") == job]
             info = state["jobs"][job]
             for n in nodes:
-                if info.get("held") and n["status"] == "dead":
-                    n["status"] = "off"  # the hold closed it, like the PM's "off": not hurt
+                # the hold closed it, like the PM's "off": not hurt. Its cleared pane says so
+                # after the unhold too, until the PM revives it
+                if n["status"] == "dead" and (info.get("held") or not n["pane"]):
+                    n["status"] = "off"
             waiting = pending_item(job, info)
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
                          "size": info.get("size"), "direct": bool(info.get("direct")),

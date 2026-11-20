@@ -339,6 +339,13 @@ class TestWiki(SpawnBase):
         board_job = oke.board_tree(state, [])[0]["jobs"][0]
         self.assertEqual(board_job["held"], True)
         self.assertEqual(board_job["agents"][0]["status"], "off")  # closed by the hold, not dead
+        rec = oke.read_children(key)["fix-a-w1"]
+        state["jobs"]["fix-a"].pop("held")  # back: off until the PM revives it
+        self.assertEqual(oke.board_tree(state, [])[0]["jobs"][0]["agents"][0]["status"], "off")
+        oke.update_record("worker", key, "fix-a-w1", {"pane": "w1:p5"})  # a pane it died in: dead
+        self.assertEqual(oke.board_tree(state, [])[0]["jobs"][0]["agents"][0]["status"], "dead")
+        oke.update_record("worker", key, "fix-a-w1", {"pane": rec.get("pane")})
+        state["jobs"]["fix-a"]["held"] = "later"
         # nothing asks for it, and a PM that missed the notice cannot move it on
         self.assertIsNone(oke.pending_item("fix-a", state["jobs"]["fix-a"]))
         self.assertEqual(self.cli("job", "phase", "fix-a", "planning"), 1)
