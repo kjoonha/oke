@@ -561,6 +561,13 @@ def cmd_rt(args):
         out = {"place": rt.place_for_repo(repo, os.path.basename(repo.rstrip("/\\")))}
     elif args.rt == "worktree":
         if args.remove:
+            # herdr reuses workspace ids after a restart: never one a job still works in
+            owner = [n for n, j in load_state()["jobs"].items()
+                     if (j.get("worktree") or {}).get("id") == args.remove
+                     and j.get("phase") not in DONE_PHASES + ("merging",)]
+            if owner:
+                return fail("worktree %s is job %s's now, and that job still works in it: not removed"
+                            % (args.remove, owner[0]))
             try:
                 rt.worktree_remove(args.remove)
             except HerdrError as e:
@@ -572,11 +579,13 @@ def cmd_rt(args):
                 if e.code != "workspace_not_found" or len(found) != 1:  # never a guess between jobs
                     raise
                 job, info = found[0]
-                if info.get("repo"):
-                    # revived children run outside the workspace, in the checkout: on Windows git
-                    # cannot delete a folder a shell sits in (half deleted, then "Permission denied")
-                    close_children(job, info["repo"])
-                runtime_bg.git_worktree_remove(info["worktree"]["path"])
+                if not info.get("repo"):
+                    raise
+                # revived children run outside the workspace, in the checkout: on Windows git
+                # cannot delete a folder a shell sits in (half deleted, then "Permission denied")
+                close_children(job, info["repo"])
+                runtime_bg.git_worktree_remove(native_path(info["worktree"]["path"]),
+                                               native_path(os.path.dirname(info["repo"])))
             out = {"removed": args.remove}
         else:
             if not args.job or not args.repo:

@@ -1,6 +1,7 @@
 """The runtime commands the skills call instead of herdr (runtime layer, step 2)."""
 import json
 import os
+import shutil
 import unittest
 
 import oke
@@ -81,7 +82,7 @@ class TestRuntimeCommands(SpawnBase):
 
     def test_worktree_remove_after_its_workspace_closed(self):
         # a hold closed the worker's pane, the worktree's last: herdr forgot the workspace
-        self.job("fix-a", "working")
+        self.job("fix-a", "merging")
         wt = self.path("wt-fix-a")
         self.git(self.repo, "worktree", "add", "-q", wt, "-b", "oke/fix-a")
         ws = {"workspace_id": "w7", "worktree": {"checkout_path": wt}}
@@ -97,14 +98,38 @@ class TestRuntimeCommands(SpawnBase):
                    "pane close": [J({"type": "ok"})]})
         remove = oke.runtime_bg.git_worktree_remove
         closed_first = []
-        oke.runtime_bg.git_worktree_remove = lambda p: closed_first.append(
-            ["pane", "close", "w1:p8"] in self.argv()) or remove(p)
+        oke.runtime_bg.git_worktree_remove = lambda *a: closed_first.append(
+            ["pane", "close", "w1:p8"] in self.argv()) or remove(*a)
         self.addCleanup(setattr, oke.runtime_bg, "git_worktree_remove", remove)
         self.assertEqual(self.cli("worktree", "--remove", "w7"), 0, self.err)
         self.assertEqual(closed_first, [True])  # Windows: git cannot delete a folder a shell is in
         self.assertFalse(os.path.exists(wt))
         self.assertEqual(oke.git_out(self.repo, "rev-parse", "-q", "--verify", "oke/fix-a")[0], 0)  # the branch stays, as herdr leaves it
         self.assertEqual(self.cli("worktree", "--remove", "w8"), 1)  # unknown id: herdr's error
+
+    def test_worktree_remove_of_a_folder_already_deleted(self):
+        # the user deleted it, or a Windows delete stopped half way: git's list is pruned
+        self.job("fix-a", "merging")
+        wt = self.path("wt-fix-a")
+        self.git(self.repo, "worktree", "add", "-q", wt, "-b", "oke/fix-a")
+        state = oke.load_state()
+        state["jobs"]["fix-a"]["worktree"] = {"id": "w7", "path": wt}
+        oke.save_state(state)
+        shutil.rmtree(wt)
+        self.fake({"worktree remove": [E("workspace_not_found", "workspace w7 not found")]})
+        self.assertEqual(self.cli("worktree", "--remove", "w7"), 0, self.err)
+        self.assertNotIn("wt-fix-a", oke.git_out(self.repo, "worktree", "list")[1])
+
+    def test_a_workspace_id_another_job_works_in_is_never_removed(self):
+        # herdr reused w7 for fix-b after a restart; fix-a's PM still names it
+        self.job("fix-b", "working")
+        state = oke.load_state()
+        state["jobs"]["fix-b"]["worktree"] = {"id": "w7", "path": self.path("wt-fix-b")}
+        oke.save_state(state)
+        self.fake({"worktree remove": [J({})]})
+        self.assertEqual(self.cli("worktree", "--remove", "w7"), 1)
+        self.assertIn("fix-b", self.err)
+        self.assertEqual(self.argv(), [])  # herdr was never asked
 
     def test_a_reused_workspace_id_never_removes_another_jobs_worktree(self):
         # herdr reuses workspace ids after a restart

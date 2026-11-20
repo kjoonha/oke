@@ -261,14 +261,16 @@ class BgRuntime(object):
         git_worktree_remove(wid)
 
 
-def git_worktree_remove(wid):
-    """Remove the git worktree at path `wid`; its branch stays (as herdr does)."""
+def git_worktree_remove(wid, main=None):
+    """Remove the git worktree at path `wid`; its branch stays (as herdr does). `main`: the
+    main checkout, when known; a folder already gone is then pruned from git's list."""
+    if main is None:
+        common = subprocess.check_output(["git", "-C", wid, "rev-parse", "--git-common-dir"])
+        main = os.path.dirname(os.path.join(wid, common.decode("utf-8").strip()))  # may be relative to wid
     # Run from the main checkout: on Windows git cannot delete the folder it runs in.
-    common = subprocess.check_output(["git", "-C", wid, "rev-parse", "--git-common-dir"])
-    common = os.path.join(wid, common.decode("utf-8").strip())  # may be relative to wid
     # Without --force, git refuses a worktree with changes, like herdr does.
-    p = subprocess.Popen(["git", "-C", os.path.dirname(common), "worktree", "remove", wid],
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    argv = ["worktree", "remove", wid] if os.path.isdir(wid) else ["worktree", "prune"]
+    p = subprocess.Popen(["git", "-C", main] + argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, err = p.communicate()
     if p.returncode != 0:
         raise HerdrError("worktree_failed", err.decode("utf-8", "replace").strip())
