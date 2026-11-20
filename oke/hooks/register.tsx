@@ -193,11 +193,14 @@ const PENDING: Record<string, string> = {
 /** Pending kinds that wait on the person (the rest the orchestrator handles itself). */
 const ASKS_USER = ['plan', 'merge', 'question', 'blocked', 'failed']
 
-/** Git commands no PM, worker or reviewer runs: OKe merges through `oke job merge`, and
- * these lose work or reach other people. `git -C <dir>` and `-c k=v` may come first. */
+/** Git commands no OKe agent runs, the orchestrator included: OKe merges through `oke job
+ * merge`, and these lose work or reach other people. `git -C <dir>`, `-c k=v` and
+ * `--git-dir <dir>` may come first, and a wrapper word (`time`, `command`, ...) or a path. */
 const GIT_DENIED = new RegExp(
   // only where git starts a command: not inside a commit message or a grep pattern
-  String.raw`(?:^|[;&|(\n]|\$\()\s*git(?:\s+(?:-C\s+\S+|-c\s+\S+|--[\w-]+(?:=\S+)?))*\s+`
+  String.raw`(?:^|[;&|(\n\x60]|\$\(|\b(?:then|do|else|time|command|env|exec|nohup|xargs)\b)\s*(?:\w+=\S*\s+)*`
+  + String.raw`(?:\S*[\\/])?git(?:\.exe)?`
+  + String.raw`(?:\s+(?:-C\s+\S+|-c\s+\S+|--(?:git-dir|work-tree|namespace)\s+\S+|--[\w-]+(?:=\S+)?))*\s+`
   + String.raw`(push\b|reset\s[^;&|\n]*--(?:hard|merge)\b|clean\s[^;&|\n]*(?:-\w*f|--force)`
   + String.raw`|branch\s[^;&|\n]*(?:-D\b|--delete\s+--force|--force\s+--delete|-d\s+-f\b)`
   + String.raw`|checkout\s[^;&|\n]*(?:-f\b|--force)|stash\s+(?:drop|clear)\b|update-ref\s[^;&|\n]*-d\b`
@@ -683,7 +686,7 @@ export const register: Register = on => {
 
   // Each agent's own task list goes to its folder, where the board reads it.
   on('tool.call', async ($, e: any, next) => {
-      if (e.tool === 'Bash' && (role === 'pm' || role === 'worker' || role === 'reviewer')) {
+      if (e.tool === 'Bash' && (role === 'orchestrator' || role === 'pm' || role === 'worker' || role === 'reviewer')) {
         const denied = gitDenied(String(e.command ?? ''))
         if (denied) return { deny: denied }
       }

@@ -430,7 +430,10 @@ test('a PM, worker or reviewer cannot run git commands that lose or publish work
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   for (const bad of ['git push origin main', 'git -C "C:/a b/r" push --force', 'cd r && git reset --hard HEAD~1',
     'git -c core.x=1 clean -fd', 'git branch -D oke/j', 'git stash drop', 'git -c "a=b c" push',
-    'git clean --force', 'git checkout -f main', 'x=$(git push)']) {
+    'git clean --force', 'git checkout -f main', 'x=$(git push)',
+    'for b in a c; do git push origin $b; done', 'if x; then git push; fi', '`git push`',
+    'git --git-dir .git push', 'command git push', '/usr/bin/git push', 'time git reset --hard',
+    'env A=1 git push', 'C:/Git/cmd/git.exe push']) {
     const out: any = await $.tool.call({ tool: 'Bash', command: bad } as any)
     expect(out.deny).toMatch(/^OKe blocks `git /)
   }
@@ -497,6 +500,7 @@ test('the orchestrator writes only the OKe home and starts no subagent', async (
     { tool: 'Write', file_path: 'C:/Users/u/.claude/projects/other/memory/MEMORY.md' }]) {
     expect((await call(bad)).deny).toMatch(/^OKe orchestrators/)
   }
+  expect((await call({ tool: 'Bash', command: 'git -C C:/repo reset --hard' })).deny).toMatch(/^OKe blocks `git reset/)
   for (const ok of [{ tool: 'Write', file_path: 'C:\\oke\\jobs\\j\\pm\\assignment.md' },
     { tool: 'Read', file_path: 'C:/repo/a' },
     { tool: 'Bash', command: 'python oke.py pending' }]) {
