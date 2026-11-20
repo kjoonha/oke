@@ -38,7 +38,7 @@ The same steps run during work (decision 6): the PM gives the worker a "stop and
 - The caller must be the PM of `<job>`'s repository (whoami). Refuse otherwise.
 - Targets: for every other repository key with an open job (`open_jobs(state, key)` non-empty) and a recorded PM agent: that PM.
 - Queues `"<pm>: peer ask (job <job>, round <n>): <text>. Answer with: oke peer answer <job> ..."` to each target. The sender is the asking PM.
-- Writes `$OKE_HOME/jobs/<job>/peers.json`: `{"round": n, "waiting": {"<pm>": {"repo": key, "delivered": false, "nudged": 0}}}`. A new ask on the same job starts round n+1 and replaces the waiting list.
+- Writes `$OKE_HOME/jobs/<job>/peers.json`: `{"round": n, "waiting": {"<pm>": {"repo": key, "nudged": 0}}}`. A new ask on the same job starts round n+1 and replaces the waiting list.
 - Appends to `$OKE_HOME/jobs/<job>/peers.md`: `## round <n> (<time>)`, then `- ask (<pm>): <text>`.
 - Prints `{"round": n, "asked": [...]}`. With no target: `{"round": n, "asked": []}` and no waiting list.
 - Under `locked()`, like every state change.
@@ -58,14 +58,12 @@ The same steps run during work (decision 6): the PM gives the worker a "stop and
 
 ### Waiting list upkeep
 
-- A target PM whose job set becomes empty (done, archived, cancelled) is dropped from every waiting list. `job archive` and `job cancel` call one helper for this.
-- Hold does not drop it: a held job is still open.
+- The waiting list is read through one helper that drops every PM whose repository has no open job left (done, archived, cancelled or held: `open_jobs` leaves held jobs out, and nothing revives or watches a PM that has only held jobs). No hook in archive, cancel or hold is needed.
 - When a job is cancelled, every job whose plan says `after: <it>` gets a queued notice to its PM: `"Job <x>: after-job <it> was cancelled. Report question to the user."`
 
 ### `oke wait` (change, PM waits)
 
-- Delivery marks `delivered: true` for each waiting entry whose question left that PM's inbox.
-- A target PM that is idle, has an empty inbox, and has `delivered: true` with no answer counts as not answering. First time: queue a reminder `"Answer the peer ask of job <job> (round <n>): oke peer answer <job> ..."` and set `nudged: 1`. Second time: the wait of the asking PM returns `peer_no_answer <job> <pm>`.
+- The check runs in the wait of the asked PM, which already looks at that PM. An asked PM that is idle (confirmed like any idle verdict) with an empty inbox, and still on a waiting list, has not answered: its question was delivered, because an idle PM with mail gets the mail first. First time: the wait queues a reminder `"Answer the peer ask of job <job> (round <n>): oke peer answer <job> ..."`, sets `nudged: 1` and keeps waiting. Second time: it returns `peer_no_answer <job> <pm>`.
 - While a job's waiting list is not empty, an idle asking PM without a report for that job is waiting, not stopped short: no `idle_no_report` for that job.
 - The orchestrator handles `peer_no_answer` like a `question`. It asks the user: "proceed as no impact", "wait", or "cancel the job". It sends the choice to the asking PM as `kind: answer`.
 
@@ -106,7 +104,7 @@ Orchestrator (`skills/orchestrator/SKILL.md`):
 ## Tests
 
 Unit tests (`oke/bin/test_*.py`, with the fake runtime):
-- `peer ask` picks every other repository with an open job, alive or dead PM, and skips repositories without one and its own repository.
+- `peer ask` picks every other repository with an open job, alive or dead PM, and skips its own repository and repositories with no open job or only held jobs.
 - `peer ask` from a non-PM refuses. `peer answer` from a PM not on the list refuses.
 - The waiting list empties as answers arrive. A new round replaces it.
 - A target's last job archived or cancelled drops it from the list.
