@@ -272,15 +272,21 @@ export function reviewerDenied(tool: string, input: any, own: string | null): st
  * shortcut: a Bash command can still write there; the user's merge approval is the last layer. */
 export function workerDenied(tool: string, input: any, own: string | null): string | null {
   if (!own || (tool !== 'Edit' && tool !== 'Write' && tool !== 'NotebookEdit')) return null
-  const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  // drive letter, case, backslashes and `.`/`..` segments resolved: `..` could leave the own folder
+  const norm = (p: string) => {
+    const out: string[] = []
+    for (const part of p.replace(/\\/g, '/').toLowerCase().replace(/^[a-z]:/, '').split('/')) {
+      if (part === '..') out.pop()
+      else if (part !== '.' && part !== '') out.push(part)
+    }
+    return '/' + out.join('/')
+  }
   const mine = norm(own)
   const jobs = mine.replace(/\/[^/]+\/[^/]+$/, '')
   if (!jobs.endsWith('/jobs')) return null
-  // `..` could leave the own folder past the prefix check
-  const target = norm(String(input.file_path ?? input.notebook_path ?? '')).replace(/^[a-z]:/, '')
-  const base = (p: string) => p.replace(/^[a-z]:/, '')
-  if (!target.startsWith(base(jobs) + '/') && !/(^|\/)\.\.(\/|$)/.test(target)) return null
-  if (target.startsWith(base(mine) + '/') && !/(^|\/)\.\.(\/|$)/.test(target)) return null
+  const target = norm(String(input.file_path ?? input.notebook_path ?? ''))
+  if (!target.startsWith(jobs + '/')) return null
+  if (target.startsWith(mine + '/')) return null
   return 'OKe workers write only in cwd and in their own folder: the plan, the ledger and the review are not yours to change.'
 }
 

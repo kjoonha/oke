@@ -486,7 +486,7 @@ def header_list(header, field):
     return [x.strip() for x in str((header or {}).get(field) or "").split(",") if x.strip()]
 
 
-def write_lean_settings(folder, plugins=(), dirs=(), effort=None):
+def write_lean_settings(folder, plugins=(), dirs=()):
     """Settings for a lean child: only the user's herdr hooks (herdr learns the session
     id from them, revive needs it), env, and the plugins its assignment asks for.
     Returns the file path, or None if unwritable."""
@@ -505,8 +505,6 @@ def write_lean_settings(folder, plugins=(), dirs=(), effort=None):
     for name in ("autoCompactWindow", "effortLevel", "modelSettings"):
         if name in user:
             settings[name] = user[name]
-    if effort:
-        settings["effortLevel"] = effort  # config.json `effort` for this role
     if plugins:
         settings["enabledPlugins"] = dict((p, True) for p in plugins)
     if dirs:
@@ -639,6 +637,9 @@ def cmd_rt(args):
     return 0
 
 
+EFFORTS = ("low", "medium", "high", "xhigh", "max")  # `claude --effort`
+
+
 def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header=None):
     """`header` is the agent's assignment header: its `tools:`, `mcp:` and `plugins:`
     (comma separated) are what the PM switched on for this job."""
@@ -649,8 +650,9 @@ def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header
     folder = folder or home
     dirs = [home, config["wiki_path"]]
     effort = (config.get("effort") or {}).get(role)
-    settings = config.get("lean_launch", True) and write_lean_settings(
-        folder, header_list(header, "plugins"), dirs, effort if isinstance(effort, str) else None)
+    if effort in EFFORTS:
+        args += ["--effort", effort]  # config.json `effort`; a role left out keeps the user's setting
+    settings = config.get("lean_launch", True) and write_lean_settings(folder, header_list(header, "plugins"), dirs)
     if not settings:
         args += ["--add-dir", home, "--add-dir", config["wiki_path"]]
     if settings:

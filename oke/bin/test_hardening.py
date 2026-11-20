@@ -221,19 +221,13 @@ class TestClaudeDevFixes(unittest.TestCase):
         self.assertIn(oke.edit_rules("/h/jobs/fix-rv", tail="/fix-rv-rv*/**")[0], denied)
         self.assertFalse(any("/*-rv*" in r for r in denied))
 
-    def test_effort_per_role_reaches_the_lean_settings(self):
-        tmp = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmp, True)
-        old = os.environ.get("CLAUDE_CONFIG_DIR")
-        os.environ["CLAUDE_CONFIG_DIR"] = tmp
-        self.addCleanup(lambda: os.environ.pop("CLAUDE_CONFIG_DIR") if old is None
-                        else os.environ.__setitem__("CLAUDE_CONFIG_DIR", old))
-        c = dict(self.config, lean_launch=True, effort={"reviewer": "high"})
-        for role, want in (("reviewer", "high"), ("worker", None)):
-            folder = tempfile.mkdtemp(dir=tmp)
-            oke.launch_args(role, c, tmp, "/p", folder=folder)
-            with io.open(os.path.join(folder, "lean-settings.json"), encoding="utf-8") as f:
-                self.assertEqual(json.load(f).get("effortLevel"), want)
+    def test_effort_per_role_is_the_effort_flag(self):
+        # the flag takes max too (effortLevel in settings does not), and works without lean
+        c = dict(self.config, effort={"reviewer": "max"})
+        r = oke.launch_args("reviewer", c, "/h", "/p")
+        self.assertEqual(r[r.index("--effort") + 1], "max")
+        self.assertNotIn("--effort", oke.launch_args("worker", c, "/h", "/p"))
+        self.assertNotIn("--effort", oke.launch_args("reviewer", dict(c, effort={"reviewer": "huge"}), "/h", "/p"))
 
 
 if __name__ == "__main__":

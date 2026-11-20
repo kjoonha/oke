@@ -279,7 +279,7 @@ test('a worker writes nothing in the jobs folder outside its own folder', () => 
     'C:/oke/jobs/j/j-w1/../j-rv/report.md', 'C:/oke/jobs/k/k-rv/report.md']) {
     expect(workerDenied('Write', { file_path: bad }, own)).toMatch(/^OKe workers/)
   }
-  for (const ok of ['C:/oke/jobs/j/j-w1/report.md', 'C:/repo/src/a.py', 'C:/oke/wiki/x.md']) {
+  for (const ok of ['C:/oke/jobs/j/j-w1/report.md', 'C:/repo/src/a.py', 'C:/oke/wiki/x.md', 'C:/repo/src/../lib/x.py']) {
     expect(workerDenied('Edit', { file_path: ok }, own)).toBeNull()
   }
   expect(workerDenied('Bash', { command: 'ls' }, own)).toBeNull()
