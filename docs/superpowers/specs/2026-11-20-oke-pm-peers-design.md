@@ -18,7 +18,7 @@ Prior art (checked 2026-11-20): Overstory and Gas Town route cross-repo matters 
 4. Merge order: when the talk shows that job B must merge after job A, B's plan header gets `after: A`. `oke job merge B` refuses until A is merged and verified.
 5. The user sees the talk on the board, in the job's step line. The orchestrator gets no copy of the messages. It learns the outcome from the plan at approval time, from reports when the user must decide, and from `peers.md` when the user asks.
 6. When work shows an impact the plan did not have, the PM stops the worker and asks again, with the same steps. A changed plan goes to the user again.
-7. An asked PM that goes idle without answering is reminded once. The second time, the asking PM's wait returns `peer_no_answer` and the user decides.
+7. An asked PM that goes idle without answering is reminded once. The second time, the asked PM's wait returns `peer_no_answer` (once per ask) and the user decides.
 
 ## Flow
 

@@ -153,7 +153,7 @@ class TestPeerWaits(PeerBase):
         self.fake({"agent get": [AGENT("idle")], "agent prompt": [J({"type": "agent_prompted"})]})
         result = oke.wait_loop("pm-b", None, None, poll=0, max_polls=20, jobs_key=self.key_b)
         self.assertEqual(result, "peer_no_answer fix-a pm-b")
-        self.assertEqual(oke.read_peers("fix-a")["waiting"]["pm-b"]["nudged"], 1)
+        self.assertEqual(oke.read_peers("fix-a")["waiting"]["pm-b"]["nudged"], 2)  # the user was asked
         prompts = [c for c in self.calls() if c[:2] == ["agent", "prompt"]]
         self.assertEqual(len(prompts), 1)
         self.assertIn("oke: Answer the peer ask of job fix-a (round 1): oke peer answer fix-a", prompts[0][3])
@@ -174,6 +174,45 @@ class TestPeerWaits(PeerBase):
         self.fake({"agent get": [AGENT("idle")]})
         self.assertEqual(oke.check_pm_once("pm-b", self.key_b), "?peer_idle fix-c")
         self.assertEqual(list(oke.peer_waiting(oke.load_state(), "fix-c")), ["pm-b"])
+
+
+class TestReviewFixes(PeerBase):
+    def owe(self, job="fix-a", nudged=0):
+        oke.write_json_atomic(oke.peers_path(job), {"round": 1, "asker": "pm-a", "waiting": {
+            "pm-b": {"repo": self.key_b, "nudged": nudged}}})
+
+    def test_peer_no_answer_comes_once_and_the_next_owed_job_gets_its_turn(self):
+        self.job("fix-c", "planning")
+        self.owe("fix-a", nudged=1)
+        self.owe("fix-c")
+        self.fake({"agent get": [AGENT("idle")], "agent prompt": [J({"type": "agent_prompted"})]})
+        self.assertEqual(oke.wait_loop("pm-b", None, None, poll=0, max_polls=20, jobs_key=self.key_b),
+                         "peer_no_answer fix-a pm-b")
+        self.assertEqual(oke.wait_loop("pm-b", None, None, poll=0, max_polls=20, jobs_key=self.key_b),
+                         "peer_no_answer fix-c pm-b")
+        self.assertIsNone(oke.wait_loop("pm-b", None, None, poll=0, max_polls=8, jobs_key=self.key_b))
+        self.assertEqual(self.answer(), 0, self.err)  # a late answer still counts
+
+    def test_a_vanished_entry_keeps_the_wait_going(self):
+        self.assertIsNone(oke.peer_nudge("pm-b", "fix-a"))
+
+    def test_peer_status_shows_who_dropped_out(self):
+        self.ask()
+        s = oke.load_state()
+        s["jobs"]["fix-b"]["held"] = True
+        oke.save_state(s)
+        self.as_agent("pm-a")
+        self.assertEqual(self.cli("peer", "status", "fix-a"), 0, self.err)
+        self.assertEqual(json.loads(self.out), {"round": 1, "waiting": [], "dropped": ["pm-b"]})
+
+    def test_ask_and_answer_refuse_a_closed_job(self):
+        self.ask()
+        s = oke.load_state()
+        s["jobs"]["fix-a"].update(phase="failed", cancelled=True)
+        oke.save_state(s)
+        self.assertEqual(self.answer(), 1)
+        self.assertEqual(self.texts("pm-a"), [])
+        self.assertEqual(self.ask(), 1)
 
 
 class TestAfter(PeerBase):
@@ -221,6 +260,22 @@ class TestAfter(PeerBase):
         self.assertEqual(self.cli("job", "cancel", "fix-b"), 0, self.err)
         self.assertIn("oke: Job fix-a: after-job fix-b was cancelled. Report question to the user.",
                       self.texts("pm-a"))
+
+    def test_after_itself_is_ignored_and_an_unknown_name_says_so(self):
+        self.put(os.path.join(self.home, "jobs", "fix-a", "plan.md"), "job: fix-a\nafter: fix-a, nope\n---\n")
+        err = self.merge()
+        self.assertIn("after nope is no known job: fix the plan", err)
+        self.assertNotIn("waiting for fix-a", err)
+
+    def test_verify_pass_does_not_tell_a_job_still_working(self):
+        s = oke.load_state()
+        s["jobs"]["fix-a"]["phase"] = "working"
+        oke.save_state(s)
+        self.advance("fix-b", "merging")
+        oke.ledger_add("fix-b", "oke", "abc1234", "merge", "pass")
+        self.fake({"agent list": [J({"agents": []})]})
+        self.assertEqual(self.cli("job", "verify", "fix-b", "--accept", "user checked"), 0, self.err)
+        self.assertEqual(self.texts("pm-a"), [])
 
     def test_verify_pass_tells_the_pm_of_a_job_waiting_on_it(self):
         self.advance("fix-b", "merging")
