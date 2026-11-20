@@ -278,9 +278,9 @@ class OrcaRuntime(object):
                              "--full"]).get("workers") or []
             for row in rows:  # one in the same terminal owns it now
                 resource = row.get("resource") or {}
-                if resource.get("terminalHandle") == here and resource.get("releaseState") != "released":
-                    owner = resource.get("ownerDispatchId")
-                    return {"dispatch": owner, "terminal": here} if owner and owner != entry["dispatch"] else None
+                owner = resource.get("ownerDispatchId")
+                if resource.get("terminalHandle") == here and resource.get("releaseState") != "released"                         and owner and owner != entry["dispatch"]:
+                    return {"dispatch": owner, "terminal": here}
             # Orca closed the terminal: a newer dispatch (rows come newest first) names
             # this one as the dispatch it follows up. Each row is asked once: `seen` is
             # the newest row already asked, so a long rest costs one list per look.

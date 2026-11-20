@@ -849,6 +849,16 @@ class TestWait(Base):
         self.assertEqual(self.cli("wait", "a", "--report", r, "--seq", "7"), 0)
         self.assertEqual(self.out.strip(), "report failed")
 
+    def test_bg_and_orca_waits_look_every_10_s(self):
+        # each bg or Orca look runs a node program; herdr's is cheap
+        polls = []
+        self.addCleanup(setattr, oke, "wait_loop", oke.wait_loop)
+        oke.wait_loop = lambda *a, **k: polls.append(k["poll"])
+        for runtime, extra in (("herdr", []), ("bg", []), ("orca", []), ("bg", ["--poll", "3"])):
+            os.environ["OKE_RUNTIME"] = runtime
+            self.assertEqual(self.cli("wait", "a", "--report", "r.md", "--seq", "1", *extra), 0, self.err)
+        self.assertEqual(polls, [2, 10, 10, 3])
+
 
 def help_ok():
     return dict((c + " --help", [OK]) for c in runtime_herdr.REQUIRED_COMMANDS)

@@ -153,6 +153,24 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(self.rt.canonical("term_7"), "term_7")
         self.assertEqual(self.rt.entry_of("term_1")[0], "pm-toy")  # close and cancel find it
 
+    def test_a_follow_up_is_found_while_orca_still_keeps_the_old_terminal(self):
+        # seen live (O2): after an Orca restart the old terminal stays "retained" under the
+        # settled dispatch, mail reopened the PM in a new terminal, and OKe kept reading the
+        # old dispatch as idle while the PM worked: "PM silent" during its merge check
+        self.register("pm-toy", "ctx_1", "term_1")
+        settled = {"stage": "settled", "liveness": "unverifiable", "terminalState": "retained", "runId": "run_1"}
+        rows = {"workers": [
+            {"dispatchId": "ctx_2", "resource": {"terminalHandle": "term_2", "ownerDispatchId": "ctx_2"}},
+            {"dispatchId": "ctx_1", "resource": {"terminalHandle": "term_1", "ownerDispatchId": "ctx_1"}}]}
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(settled)],
+                   "orchestration worker-show --dispatch ctx_2 --full": [OK({"dispatch": {"followUpOf": "ctx_1"},
+                                                                            "worker": {"agentTerminalHandle": "term_2"}})],
+                   "orchestration worker-show --dispatch ctx_2": [OK(WORKING)],
+                   "orchestration worker-list": [OK(rows)],
+                   "orchestration worker-keep-open": [OK({})]})
+        self.assertEqual(self.rt.agent("pm-toy")["agent_status"], "working")
+        self.assertEqual(runtime_orca.load_registry()["pm-toy"]["dispatch"], "ctx_2")
+
     def test_a_resting_worker_asks_each_newer_dispatch_once(self):
         self.register("pm-toy", "ctx_1", "term_1")
         settled = {"stage": "settled", "liveness": "exited", "terminalState": "released", "runId": "run_1"}

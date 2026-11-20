@@ -1078,7 +1078,11 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
         gone = gone + 1 if result == "gone" else 0
         if result == "gone" and gone < GONE_CONFIRMATIONS:
             result = None
-        if result == "gone" and jobs_key is not None and not open_jobs(load_state(), jobs_key):
+        try:
+            no_jobs = result == "gone" and jobs_key is not None and not open_jobs(load_state(), jobs_key)
+        except (OSError, StateError):
+            no_jobs = False  # read again on the next poll, as above
+        if no_jobs:
             # A dead PM without open jobs: nobody revives it, and the next PM of this
             # repository must not get its mail (a cancel notice).
             done = os.path.join(inbox_dir(agent), "read")
@@ -1134,6 +1138,8 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
 
 
 def cmd_wait(args):
+    if args.poll is None:  # a bg or Orca look runs a node program: not every 2 s
+        args.poll = 2 if runtime().name == "herdr" else 10
     if args.jobs:
         state = load_state()
         keys = [k for k, r in state["repos"].items() if (r.get("pm") or {}).get("agent") == args.agent]
@@ -3063,7 +3069,7 @@ def build_parser():
     wait.add_argument("--report")
     wait.add_argument("--seq", type=int)
     wait.add_argument("--jobs", action="store_true")
-    wait.add_argument("--poll", type=float, default=2)
+    wait.add_argument("--poll", type=float, default=None)
     wait.add_argument("--after-blocked", action="store_true")
     wait.set_defaults(func=cmd_wait)
 
