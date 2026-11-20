@@ -2009,9 +2009,14 @@ def merge_job(job):
                     % (job, already, job))
     # every job of this repository, a failed or cancelled one too: its merge is still in main
     for other in [n for n, j in state["jobs"].items() if j.get("repo") == info["repo"]]:
-        if other != job and merge_state(other)[0] == "unverified":
+        other_state, row = merge_state(other)
+        if other != job and other_state == "unverified":
             return fail("the merge of %s is not verified yet: run `oke job verify %s` first"
                         % (other, other))
+        if other != job and other_state == "rolled_back" and "already-in" in row["detail"].split():
+            # its failing code is still in main (nothing could be undone): a check here would fail on it
+            return fail("main still holds %s's code, whose check failed: no other merge until %s merges "
+                        "again or the user decides" % (other, other))
     job_dir = os.path.join(oke_home(), "jobs", job)
     worker = latest_report(job_dir, r"-w\d+$")
     review = latest_report(job_dir, r"-rv\d*$")

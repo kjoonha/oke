@@ -98,6 +98,19 @@ class TestMergeGate(MergeBase):
         self.assertNotIn("already_in", json.loads(self.out))
         self.assertEqual(oke.merge_state("fix-a")[0], "unverified")
 
+    def test_no_other_merge_while_a_failed_already_in_merge_sits_in_main(self):
+        os.makedirs(os.path.join(self.home, "jobs", "fix-b"))
+        oke.ledger_add("fix-b", "oke", "abc1234", "merge", "ok", "pre=abc1234 already-in")
+        oke.ledger_add("fix-b", "oke", "abc1234", "verify", "fail", "exit 1: make test")
+        oke.ledger_add("fix-b", "oke", "abc1234", "rollback", "ok", "already-in: nothing undone")
+        state = oke.load_state()
+        state["jobs"]["fix-b"] = dict(state["jobs"]["fix-a"], phase="working")
+        oke.save_state(state)
+        self.order(self.report("fix-a-w1", 1), self.review(1))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("main still holds fix-b's code", self.err)
+        self.assertFalse(self.merged())
+
     def test_work_reported_after_the_review_is_refused(self):
         # seen live: the worker rebased (seq 2) and the PM merged without a new review
         self.order(self.review(1), self.report("fix-a-w1", 2))
