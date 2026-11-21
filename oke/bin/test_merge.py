@@ -28,6 +28,12 @@ class MergeBase(SpawnBase):
         with io.open(os.path.join(self.jobs, "plan.md"), "w", encoding="utf-8") as f:
             f.write(u"job: fix-a\n---\n## 수용 기준\n%s\n## 검증 명령\n`%s` passes\n" % (criteria, command))
 
+    def verify(self, command, *extra):
+        """`job verify` with `command` as the plan's 검증 명령. The plan changes after the
+        check, so the identical-tree skip does not apply and the command runs."""
+        self.set_plan(command)
+        return self.cli("job", "verify", "fix-a", *extra)
+
     def checked(self, target, result="pass"):
         """The row `oke check` writes for a run on `target` under the current plan."""
         oke.ledger_add("fix-a", "oke", target, "check", result,
@@ -91,7 +97,7 @@ class TestMergeGate(MergeBase):
         self.assertEqual(json.loads(self.out), {"result": "merged", "job": "fix-a", "commit": head,
                                                 "already_in": True})
         self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), head)  # no merge commit
-        self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 0, self.err)
+        self.assertEqual(self.verify("true"), 0, self.err)
         self.logged("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
 
@@ -101,7 +107,7 @@ class TestMergeGate(MergeBase):
         self.order(self.report("fix-a-w1", 1), self.review(1))
         self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
         # nothing to undo (OKe merged nothing), but the job is rolled back like any failed merge
-        self.assertEqual(self.cli("job", "verify", "fix-a", "exit 1"), 3)
+        self.assertEqual(self.verify("exit 1"), 3)
         self.assertEqual(json.loads(self.out)["already_in"], True)
         self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), head)
         self.assertEqual(oke.merge_state("fix-a")[0], "rolled_back")
@@ -359,18 +365,18 @@ class TestLedgerAndVerify(MergeBase):
 
     def test_a_passing_check_verifies_the_merge(self):
         merged = self.merge()
-        self.assertEqual(self.cli("job", "verify", "fix-a", "test -f a.txt && echo checked"), 0, self.err)
+        self.assertEqual(self.verify("test -f a.txt && echo checked"), 0, self.err)
         self.assertEqual(json.loads(self.out)["result"], "verified")
         self.assertEqual(self.ledger()["merge"], "verified")
         self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), merged)
-        self.assertEqual(self.cli("job", "verify", "fix-a", "exit 1"), 0)  # verified stays verified
+        self.assertEqual(self.verify("exit 1"), 0)  # verified stays verified
         self.assertTrue(json.loads(self.out)["already"])
 
     def test_a_failing_check_rolls_the_merge_back(self):
         pre = self.git_out(self.repo, "rev-parse", "HEAD").strip()
         self.merge()
         # untracked byproducts of the check stay; the merge is undone
-        self.assertEqual(self.cli("job", "verify", "fix-a", "echo log > out.log; echo boom; exit 4"), 3)
+        self.assertEqual(self.verify("echo log > out.log; echo boom; exit 4"), 3)
         out = json.loads(self.out)
         self.assertEqual((out["result"], out["exit"], out["rolled_back_to"]), ("verify_failed", 4, pre))
         self.assertIn("boom", out["tail"])
@@ -386,7 +392,7 @@ class TestLedgerAndVerify(MergeBase):
         self.merge()
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 1)
         self.assertIn("unverified", self.err)
-        self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 0, self.err)
+        self.assertEqual(self.verify("true"), 0, self.err)
         self.logged("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
 
@@ -402,12 +408,12 @@ class TestLedgerAndVerify(MergeBase):
         self.assertIn("not verified", self.err)
 
     def test_verify_without_a_merge_or_after_the_main_moved(self):
-        self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 1)
+        self.assertEqual(self.verify("true"), 1)
         self.merge()
         self.write("toy/z.txt", "user\n")
         self.git(self.repo, "add", "-A")
         self.git(self.repo, "commit", "-q", "-m", "user commit")
-        self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 1)
+        self.assertEqual(self.verify("true"), 1)
         self.assertIn("moved past", self.err)
 
     def test_a_worker_records_its_check(self):
@@ -430,28 +436,68 @@ class TestLedgerAndVerify(MergeBase):
         self.merge()
         # during the check somebody commits on main (a job without a worktree, the user)
         cmd = "echo z > z.txt && git add z.txt && git -c user.name=t -c user.email=t@t commit -qm other; exit 1"
-        self.assertEqual(self.cli("job", "verify", "fix-a", cmd), 1)
+        self.assertEqual(self.verify(cmd), 1)
         self.assertIn("NOT undone", self.err)
         self.assertIn("other", self.git_out(self.repo, "log", "-1", "--format=%s"))
         self.assertEqual(self.ledger()["merge"], "unverified")
 
     def test_local_edits_in_merged_files_are_kept(self):
         self.merge()
-        self.assertEqual(self.cli("job", "verify", "fix-a", "echo users edit > a.txt; exit 1"), 1)
+        self.assertEqual(self.verify("echo users edit > a.txt; exit 1"), 1)
         self.assertIn("NOT undone", self.err)
         with open(os.path.join(self.repo, "a.txt")) as f:
             self.assertEqual(f.read().strip(), "users edit")
 
     def test_a_command_that_cannot_run_is_no_verdict(self):
         self.merge()
-        self.assertEqual(self.cli("job", "verify", "fix-a", "no-such-command-oke-xyz"), 1)
+        self.assertEqual(self.verify("no-such-command-oke-xyz"), 1)
         self.assertIn("could not run", self.err)
         led = self.ledger()
         self.assertEqual(led["merge"], "unverified")
         self.assertNotIn("verify", [r["check"] for r in led["rows"]])
 
+    def test_identical_tree_skips_the_run(self):
+        self.set_plan("exit 1")  # would fail if it ran
+        self.merge()
+        self.assertEqual(self.cli("job", "verify", "fix-a"), 0, self.err)
+        self.assertTrue(json.loads(self.out)["skipped"])
+        self.assertIn("same tree as", self.ledger()["rows"][-1]["detail"])
+        self.assertEqual(self.ledger()["merge"], "verified")
+
+    def moved_main(self, command, baseline):
+        self.write("toy/b.txt", "b\n")
+        self.git(self.repo, "add", "b.txt")
+        self.git(self.repo, "commit", "-q", "-m", "b")
+        self.set_plan(command)
+        oke.write_json_atomic(os.path.join(self.jobs, "baseline.json"),
+                              {"version": 1, "criteria_rev": oke.criteria_rev("fix-a"), "commit": "x",
+                               "exit": 1, "unrunnable": False, "signatures": baseline})
+        return self.git_out(self.repo, "rev-parse", "HEAD").strip()
+
+    def test_moved_main_runs_and_old_failures_pass(self):
+        self.moved_main('echo "FAILED old"; exit 1', ["FAILED old"])
+        merged = self.merge()
+        self.assertEqual(self.cli("job", "verify", "fix-a"), 0, self.err)
+        self.assertNotIn("skipped", json.loads(self.out))
+        self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), merged)
+
+    def test_moved_main_new_failure_rolls_back(self):
+        pre = self.moved_main('echo "FAILED old"; echo "FAILED new"; exit 1', ["FAILED old"])
+        self.merge()
+        self.assertEqual(self.cli("job", "verify", "fix-a"), 3)
+        out = json.loads(self.out)
+        self.assertEqual((out["new"], out["rolled_back_to"]), (["FAILED new"], pre))
+        self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), pre)
+
+    def test_argument_must_match_plan_command(self):
+        self.merge()
+        self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 1)
+        self.assertIn("plan.md", self.err)
+        self.assertEqual(self.ledger()["merge"], "unverified")
+
     def test_the_user_may_accept_a_merge(self):
         self.merge()
+        os.remove(os.path.join(self.jobs, "plan.md"))
         self.assertEqual(self.cli("job", "verify", "fix-a"), 1)  # neither a command nor --accept
         self.assertEqual(self.cli("job", "verify", "fix-a", "--accept", "main moved, checked by hand"), 0)
         self.assertEqual(self.ledger()["merge"], "verified")
@@ -461,7 +507,7 @@ class TestLedgerAndVerify(MergeBase):
         self.merge()
         with open(oke.ledger_path("fix-a"), "a") as f:
             f.write("2026-01-01T00:00:00\tw\tabc")  # a writer died here
-        self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 0, self.err)
+        self.assertEqual(self.verify("true"), 0, self.err)
         self.assertEqual(self.ledger()["merge"], "verified")
 
     def test_a_failed_job_with_an_unverified_merge_still_holds_the_next(self):
@@ -501,7 +547,7 @@ class TestDirectCommit(MergeBase):
         self.assertEqual(self.git_out(self.repo, "status", "--porcelain").strip(), "")
         self.assertEqual(self.ledger()["merge"], "unverified")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 1)
-        self.assertEqual(self.cli("job", "verify", "fix-a", "test -f d.txt"), 0, self.err)
+        self.assertEqual(self.verify("test -f d.txt"), 0, self.err)
         self.logged("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
 
@@ -529,7 +575,7 @@ class TestDirectCommit(MergeBase):
 
     def test_a_failed_check_gives_the_changes_back_uncommitted(self):
         self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
-        self.assertEqual(self.cli("job", "verify", "fix-a", "exit 1"), 3)
+        self.assertEqual(self.verify("exit 1"), 3)
         self.assertTrue(json.loads(self.out)["uncommitted"])
         self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), self.pre)
         self.assertEqual(self.git_out(self.repo, "status", "--porcelain").strip(), "?? d.txt")
@@ -563,7 +609,7 @@ class TestDirectCommit(MergeBase):
         self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
         self.assertEqual(json.loads(self.out)["already_in"], True)
         self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), self.pre)  # no commit
-        self.assertEqual(self.cli("job", "verify", "fix-a", "true"), 0, self.err)
+        self.assertEqual(self.verify("true"), 0, self.err)
         self.logged("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
 

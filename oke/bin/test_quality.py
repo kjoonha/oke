@@ -145,6 +145,13 @@ class TestBaselineCheck(SpawnBase):
         self.assertEqual((out["added"], out["removed"]), (1, 1))
         self.assertEqual(len(os.listdir(os.path.join(self.home, "jobs", "q", "baseline.history"))), 1)
 
+    def test_unrunnable_command_is_never_a_pass(self):
+        self.plan("no-such-command-oke-xyz")
+        self.assertEqual(self.cli("baseline", "q"), 2)
+        self.assertIn("could not run", self.err)
+        self.assertEqual(self.cli("check", "q"), 2)  # unrunnable at baseline too: still no pass
+        self.assertEqual(self.rows(), [])
+
     def test_ledger_add_cannot_forge_check(self):
         self.assertEqual(self.cli("ledger", "add", "q", "--by", "w", "--commit", "abc", "--check", "check",
                                   "--result", "pass"), 1)

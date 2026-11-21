@@ -2104,8 +2104,8 @@ def cmd_job(args):
         # closes its agents, drops its queued mail but not the hold notice job_locked queued
         return cancel_children(args.slug, info.get("repo"))
     if args.action == "verify":
-        if bool(args.command) == bool(args.accept):
-            return fail("give the 검증 명령, or --accept \"<why>\" when the user accepts the merge as it is")
+        if args.command and args.accept:
+            return fail("give the 검증 명령 or --accept \"<why>\", not both")
         return verify_job(args.slug, args.command, args.accept)  # can take hours
     key = left = None
     if args.action in ("archive", "unhold"):
@@ -2705,6 +2705,10 @@ def cmd_baseline(args):
         write_json_atomic(path, base)
     finally:
         unlock(lock)
+    if now["unrunnable"]:
+        fail(u"the 검증 명령 could not run (exit %d, see %s): fix the command in plan.md, then "
+             u"`oke baseline %s` again" % (now["exit"], log.replace("\\", "/"), args.job))
+        return 2
     before = set((old or {}).get("signatures") or [])
     print(json.dumps({"result": "recorded", "exit": now["exit"], "signatures": len(now["signatures"]),
                       "added": len(set(now["signatures"]) - before),
@@ -2738,7 +2742,7 @@ def cmd_check(args):
         now = run_signatures(command, cwd, log, lock)
         new, resolved = diff_baseline(base, now)
         log = log.replace("\\", "/")
-        if now["unrunnable"] and not base.get("unrunnable"):
+        if now["unrunnable"]:
             fail(u"the 검증 명령 could not run (exit %d, see %s)" % (now["exit"], log))
             return 2
         result = "fail" if new else "pass"
@@ -2750,6 +2754,29 @@ def cmd_check(args):
                       "resolved": len(resolved), "baseline_failures": len(base.get("signatures") or []),
                       "log": log}, ensure_ascii=False))
     return 1 if new else 0
+
+
+def same_tree_check(job, main, merged, rev):
+    """The target of a passing `oke check` under `rev` whose tree is the merged commit's, or None."""
+    code, tree = git_out(main, "rev-parse", merged + "^{tree}")
+    if code != 0:
+        return None
+    last = {}
+    for r in ledger_rows(job):
+        if r["check"] == "check":
+            last[r["commit"]] = r  # a later run on the same target supersedes an earlier one
+    for target, r in last.items():
+        if r["result"] != "pass" or r["detail"].split()[:1] != [rev]:
+            continue
+        if target.startswith("tree:"):
+            checked = target[len("tree:"):]
+        else:
+            ok, checked = git_out(main, "rev-parse", target + "^{tree}")
+            if ok != 0:
+                continue
+        if checked == tree:
+            return target
+    return None
 
 
 def verify_job(job, command, accept=None):
@@ -2787,20 +2814,42 @@ def verify_locked(job, command, accept, info, lock):
     if git_out(main, "rev-parse", "HEAD")[1] != row["commit"]:
         return fail("the main checkout moved past the merge of %s (%s): ask the user; if they accept "
                     "the merge as it is, `oke job verify %s --accept \"<why>\"`" % (job, row["commit"][:12], job))
+    planned = plan_command(job)
+    if command and planned and command != planned:
+        return fail(u"the 검증 명령 given (%s) differs from plan.md's (%s): run `oke job verify %s` "
+                    u"without a command" % (command, planned, job))
+    command = planned or command
+    if not command:
+        return fail(u"give the 검증 명령 (plan.md names none), or --accept \"<why>\" when the user "
+                    u"accepts the merge as it is")
+    rev = criteria_rev(job)
+    same = same_tree_check(job, main, row["commit"], rev)
+    if same:
+        # the merged code is exactly what `oke check` passed on: running it again proves nothing new
+        ledger_add(job, "oke", row["commit"], "verify", "pass", "same tree as " + same)
+        tell_after_waiters(load_state(), job, AFTER_VERIFIED, ("merging",))
+        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "skipped": True,
+                          "same_tree_as": same}))
+        return 0
     n = len([r for r in ledger_rows(job) if r["check"] == "verify"]) + 1
     log = os.path.join(oke_home(), "jobs", job, "verify-%d.log" % n)
-    code = run_check(command, main, log, lock)
+    base = read_baseline(job)
+    if (base or {}).get("criteria_rev") != rev:
+        base = None  # another command's failures say nothing about this one's
+    now = run_signatures(command, main, log, lock)
+    code = now["exit"]
+    new, _ = diff_baseline(base, now)
     with io.open(log, encoding="utf-8", errors="replace") as f:
         tail = f.read().splitlines()[-40:]
     log = log.replace("\\", "/")
-    if code == 0:
+    if now["unrunnable"]:  # the shell could not run the command: not a verdict on the merge
+        return fail("the 검증 명령 could not run (exit %d, see %s): fix the command; the merge stays"
+                    % (code, log))
+    if not new:
         ledger_add(job, "oke", row["commit"], "verify", "pass", command)
         tell_after_waiters(load_state(), job, AFTER_VERIFIED, ("merging",))
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "log": log}))
         return 0
-    if code in (126, 127):  # the shell could not run the command: not a verdict on the merge
-        return fail("the 검증 명령 could not run (exit %d, see %s): fix the command; the merge stays"
-                    % (code, log))
     ledger_add(job, "oke", row["commit"], "verify", "fail", "exit %d: %s" % (code, command))
     words = row["detail"].split()
     if "already-in" in words:
@@ -2809,7 +2858,7 @@ def verify_locked(job, command, accept, info, lock):
         ledger_add(job, "oke", row["commit"], "rollback", "ok", "already-in: nothing undone")
         print(json.dumps({"result": "verify_failed", "job": job, "exit": code, "log": log,
                           "rolled_back_to": row["commit"], "already_in": True, "uncommitted": False,
-                          "tail": tail}))
+                          "tail": tail, "new": new}))
         return 3
     pre = words[0][len("pre="):] if words and words[0].startswith("pre=") else None
     # a direct commit (no worktree) goes back to uncommitted changes for the worker to fix
@@ -2823,7 +2872,7 @@ def verify_locked(job, command, accept, info, lock):
                     % (job, log))
     ledger_add(job, "oke", pre, "rollback", "ok", "after verify fail")
     print(json.dumps({"result": "verify_failed", "job": job, "exit": code, "log": log,
-                      "rolled_back_to": pre, "uncommitted": mode == "--mixed", "tail": tail}))
+                      "rolled_back_to": pre, "uncommitted": mode == "--mixed", "tail": tail, "new": new}))
     return 3
 
 
