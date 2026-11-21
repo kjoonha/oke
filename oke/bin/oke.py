@@ -3290,6 +3290,8 @@ def deliver(agent):
             return None
         text = "OKe inbox: " + " | ".join(t for _, t in msgs)
         took = runtime().prompt(agent, text)
+        if took is None:
+            return None  # in progress (Orca: another deliver reopens it), as a held lock above
         if not took:
             return False
         done = os.path.join(inbox_dir(agent), "read")
