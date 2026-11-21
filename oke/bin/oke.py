@@ -384,6 +384,8 @@ def bank_usage(folder):
 def agent_command(kind, role, config, home, plugin_dir, folder, resume=None):
     """herdr's --kind and the CLI arguments for one worker or reviewer."""
     bank_usage(folder)
+    if runtime().name == "orca":
+        config = dict(config, lean_launch=False)  # Orca starts the agent: no flags reach it
     if kind == "claude":
         header = read_header(os.path.join(folder, "assignment.md")) if folder else None
         return kind, launch_args(role, config, home, plugin_dir, resume, folder, header)
@@ -1426,6 +1428,7 @@ def new_pane(state, role, key, cwd):
 
 
 def relaunch(state, role, key, name, record, folder):
+    mail = []
     if role == "orchestrator":
         agent, prompt, cwd = ORCH_NAME, "/oke:start", native_path(record.get("cwd") or oke_home())
         args = strip_resume(record["argv"])
@@ -1441,6 +1444,9 @@ def relaunch(state, role, key, name, record, folder):
                 " Also re-read your board.md, then continue."
         if role == "pm":
             prompt += pm_jobs_note(state, key)
+        mail = inbox_messages(name)  # queued while it was down: it gets them with its start
+        if mail:
+            prompt += "\n\nOKe inbox: " + " | ".join(t for _, t in mail)
         kind, args = agent_command(kind, role, load_config(), oke_home(), plugin_root(), folder,
                                    record.get("session"))
     if role == "orchestrator" and record.get("session"):
@@ -1460,8 +1466,8 @@ def relaunch(state, role, key, name, record, folder):
     pane = new_pane(state, role, key, cwd)
     # The folder was trusted when the agent first started; a trust dialog now is unexpected.
     try:
-        return runtime().start(agent, pane, args, prompt, lambda: False,
-                           kind=kind if role != "orchestrator" else "claude")
+        info = runtime().start(agent, pane, args, prompt, lambda: False,
+                               kind=kind if role != "orchestrator" else "claude")
     except (HerdrError, DialogError):
         # herdr keeps the name of a start that failed; with the pane closed it is
         # gone again, so the next watcher round does not read it as alive.
@@ -1470,6 +1476,8 @@ def relaunch(state, role, key, name, record, folder):
         except HerdrError:
             pass
         raise
+    mark_read(agent, mail)
+    return info
 
 
 def revive(name, auto=False):
@@ -3297,22 +3305,28 @@ def deliver(agent):
         took = runtime().prompt(agent, text)
         if not took:
             return False
-        done = os.path.join(inbox_dir(agent), "read")
-        if not os.path.isdir(done):
-            os.makedirs(done, exist_ok=True)
         # shortcut: with ask_caller the mail counts as read once handed out; a caller
         # compacted before its SendMessage loses it (the file stays in read/)
-        for path, _ in msgs:
-            replace_file(path, os.path.join(done, os.path.basename(path)))
-        for old in os.listdir(done):  # read mail is kept a week, for a look back
-            try:
-                if os.path.getmtime(os.path.join(done, old)) < time.time() - 7 * 86400:
-                    os.remove(os.path.join(done, old))
-            except OSError:
-                pass
+        mark_read(agent, msgs)
         return text if took == "ask_caller" else True
     finally:
         unlock(lock)
+
+
+def mark_read(agent, msgs):
+    """Move delivered inbox messages to read/ (kept a week, for a look back)."""
+    if not msgs:
+        return
+    done = os.path.join(inbox_dir(agent), "read")
+    os.makedirs(done, exist_ok=True)
+    for path, _ in msgs:
+        replace_file(path, os.path.join(done, os.path.basename(path)))
+    for old in os.listdir(done):
+        try:
+            if os.path.getmtime(os.path.join(done, old)) < time.time() - 7 * 86400:
+                os.remove(os.path.join(done, old))
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------- pending

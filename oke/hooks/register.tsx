@@ -246,7 +246,7 @@ export function promptRole(text: string): { role: string, folder: string } | nul
 
 /** The refusal for a reviewer's tool call that could change the repository, else null.
  * The reviewer's launch flags say the same; this holds where no flags reach the agent
- * (a session Orca reopened itself, without OKe's flags). It writes only its own folder (report, board). */
+ * (Orca starts it itself). It writes only its own folder (report, board). */
 export function reviewerDenied(tool: string, input: any, own: string | null): string | null {
   if (!REVIEWER_TOOLS.includes(tool)) return `OKe reviewers do not use ${tool}: read, review and report.`
   if (tool === 'Edit' || tool === 'Write') {
@@ -918,7 +918,7 @@ async function openBoard($: any) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    // herdr pane, else Orca terminal, else this Claude session (bg children)
+    // herdr pane, else Orca terminal or chat, else this Claude session (bg children)
     // the process env has no session id (seen live): ask the session itself
     pane = (await $.env.get('HERDR_PANE_ID')) || (await $.env.get('ORCA_TERMINAL_HANDLE'))
       || `session:${await $.session.id()}`

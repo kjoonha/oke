@@ -249,6 +249,29 @@ class TestRevive(ReviveBase):
         self.assertFalse(self.child()["auto_revived"])
         self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")
 
+    def test_a_revived_agent_gets_the_mail_queued_while_it_was_down(self):
+        # seen in an e2e: the mail stayed in the inbox and the PM worked from the older assignment
+        oke.queue_mail("fix-a-w1", "pm", "use the new plan")
+        self.revive_scenario()
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")
+        self.assertIn("OKe inbox: pm: use the new plan", json.dumps(self.calls()))
+        self.assertEqual(oke.inbox_messages("fix-a-w1"), [])
+
+    def test_mail_stays_queued_when_the_revive_fails(self):
+        oke.queue_mail("fix-a-w1", "pm", "use the new plan")
+        original = oke.relaunch
+
+        def broken(*a):
+            raise runtime_herdr.HerdrError("agent_not_ready", "no")
+        self.revive_scenario()
+        self.assertEqual(len(oke.inbox_messages("fix-a-w1")), 1)
+        oke.relaunch = broken
+        try:
+            self.assertEqual(oke.revive("fix-a-w1"), "failed")
+        finally:
+            oke.relaunch = original
+        self.assertEqual(len(oke.inbox_messages("fix-a-w1")), 1)
+
     def test_an_automatic_resume_lost_to_an_outage_does_not_count(self):
         original = oke.relaunch
 
