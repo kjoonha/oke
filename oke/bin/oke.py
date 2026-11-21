@@ -2520,6 +2520,80 @@ def run_check(command, cwd, log, lock):
                     pass
 
 
+# Failure signatures: a port of oh-my-claudecode's feedback baseline (signatureLines,
+# diffAgainstBaseline). Lines of a failing run minus known noise; new lines are new failures.
+MAX_SIGNATURES = 200
+FAILURE_WORD = re.compile(u"\\bfail(?:ed|ure|ures|ing)?\\b|\\w*(?:Error|Exception)s?\\b|✗|×", re.I)
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+VOLATILE = [  # in this order, each part becomes <v>
+    (re.compile(r"(\bin \d+(?:\.\d+)?s\s)\(\d+:\d{2}(?::\d{2})?(?:\.\d+)?\)"), r"\1<v>"),
+    (re.compile(r"\b\d+(?:\.\d+)?\s*(?:ms|s|sec|secs|seconds)\b", re.I), "<v>"),
+    (re.compile(r"\bduration(?:_ms)?\s*:?\s*\d+(?:\.\d+)?\b", re.I), "<v>"),
+    (re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?"), "<v>"),
+    (re.compile(r"[A-Za-z]:\\[^\s]*\\Temp\\[^\s]*", re.I), "<v>"),
+    (re.compile(r"/tmp/[\w.-]+"), "<v>"),
+    (re.compile(r"(?<=\(node:)\d+(?=\) (?:\[[^\]]+\] )?\w+:)"), "<v>"),
+    (re.compile(r"\b[0-9a-f]{8,}\b", re.I), "<v>"),
+]
+# shortcut: macOS /var/folders temp paths are not normalized; port OMC's normalizer for a macOS user
+NOISE = [re.compile(p, re.I) for p in (
+    r"^(?:npm|yarn|pnpm)\s+warn\b", r"^>\s+\S+@\S+",
+    r"^>\s+(?:tsc|vite|vitest|jest|node|npm|yarn|pnpm|eslint|tsx|ts-node)\b",
+    r"^(?:RUN\s+v?\d|Duration\s)", r"^\d+\|\s", r"^\|\s*\^", u"^(?:✓|√)",
+    r"^[.sxX]+(?:\s*\[\s*\d+%\]\s*)?$",
+    r"^\d+ passed(?:, \d+ (?:warnings?|skipped|xfailed|xpassed|deselected))* in <v>(?: <v>)*(?: \([^)]*\))?$",
+    r"^Start at \d{2}:\d{2}:\d{2}$", r"^#\s*(?:pass|tests?|skipped|cancelled|todo)\s+\d+\s*$",
+    r"^#\s*fail\s+0\s*$", r"^#\s*<v>\s*(<v>\s*)*$", r"^\d+\.\.\d+\s*$")]
+NOISE_UNLESS_FAILURE = [re.compile(p, re.I) for p in (
+    r"^(?:\[[^\]]*\]\s*)*(?:<v>\s+)?(?:TRACE|DEBUG|INFO|NOTICE)\b", r"^\[(?:TRACE|DEBUG|INFO|NOTICE)\]",
+    r"^(?:Test Files|Tests)\b", r"^(running|collecting|compiling|building|passing|tap\s+version|%|\s*at\s)")]
+PASSING_TAP = re.compile(r"^ok\s+\d+\s+", re.I)
+
+
+def signature_lines(output):
+    """The failure signatures of one failing run's output: sorted, de-duplicated, capped."""
+    seen = []
+    for raw in ANSI.sub("", output).splitlines():
+        line = raw.strip()
+        for pattern, repl in VOLATILE:
+            line = pattern.sub(repl, line)
+        line = " ".join(line.split())
+        if not line or len(line) > 500 or any(p.search(line) for p in NOISE):
+            continue
+        if not FAILURE_WORD.search(line) and any(p.search(line) for p in NOISE_UNLESS_FAILURE):
+            continue
+        if PASSING_TAP.search(line) and "not ok" not in line:
+            continue
+        if line not in seen:
+            seen.append(line)
+            if len(seen) >= MAX_SIGNATURES:
+                break
+    return sorted(seen)
+
+
+def diff_baseline(before, now):
+    """(new failures, resolved signatures). No baseline counts as a passing one."""
+    before = before or {"exit": 0, "unrunnable": False, "signatures": []}
+    if now["unrunnable"] and not before.get("unrunnable"):
+        return ["<command became unrunnable>"], []
+    new = []
+    if before.get("exit") == 0 and now["exit"] != 0:
+        new.append("<exited with code %s>" % now["exit"])
+    old = set(before.get("signatures") or [])
+    new += [s for s in now["signatures"] if s not in old]
+    return new, sorted(old - set(now["signatures"]))
+
+
+def run_signatures(command, cwd, log, lock):
+    """Run the command (no time limit) and reduce its run to exit code and signatures."""
+    code = run_check(command, cwd, log, lock)
+    unrunnable = code in (126, 127)
+    if code == 0 or unrunnable:
+        return {"exit": code, "unrunnable": unrunnable, "signatures": []}
+    with io.open(log, encoding="utf-8", errors="replace") as f:
+        return {"exit": code, "unrunnable": False, "signatures": signature_lines(f.read())}
+
+
 def verify_job(job, command, accept=None):
     """Run the 검증 명령 on the merged main checkout. A failure undoes the merge, but never
     anybody else's work: only while HEAD is still the merge, and with `reset --keep`,
