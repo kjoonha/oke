@@ -313,10 +313,11 @@ RUNTIMES = {"herdr": runtime_herdr.HerdrRuntime, "bg": runtime_bg.BgRuntime, "or
 
 
 def default_runtime():
-    """herdr inside a herdr pane, orca inside an Orca terminal or chat, else bg."""
+    """herdr inside a herdr pane, orca inside Orca, else bg. An Orca chat counts as Orca
+    (never bg), though OKe refuses to run there (cmd_status)."""
     if os.environ.get("HERDR_ENV") == "1":
         return "herdr"
-    return "orca" if os.environ.get("ORCA_TERMINAL_HANDLE") else "bg"
+    return "orca" if os.environ.get("ORCA_TERMINAL_HANDLE") or runtime_orca.in_chat() else "bg"
 _runtimes = {}
 
 
@@ -383,8 +384,6 @@ def bank_usage(folder):
 def agent_command(kind, role, config, home, plugin_dir, folder, resume=None):
     """herdr's --kind and the CLI arguments for one worker or reviewer."""
     bank_usage(folder)
-    if runtime().name == "orca":
-        config = dict(config, lean_launch=False)  # Orca starts the agent: no flags reach it
     if kind == "claude":
         header = read_header(os.path.join(folder, "assignment.md")) if folder else None
         return kind, launch_args(role, config, home, plugin_dir, resume, folder, header)
@@ -1652,7 +1651,7 @@ TODO_MARKS = {"completed": "v", "in_progress": ">", "pending": "o"}
 
 
 def board_lines(tree):
-    """The board as (depth, text) lines: one renderer-neutral list for --text and --html."""
+    """The board as (depth, text) lines."""
     out = []
 
     def agent(n, depth):
@@ -1679,15 +1678,9 @@ def board_lines(tree):
 
 
 def cmd_board(args):
-    """The board for hosts that cannot draw the mod's pane (Orca chat, SDK hosts)."""
+    """The board for hosts that cannot draw the mod's pane (SDK hosts)."""
     lines = board_lines(board_tree(load_state(), list_agents()))
-    if not args.html:
-        print("\n".join("  " * d + t for d, t in lines))
-        return 0
-    import html
-    items = "".join('<li style="margin-left:%dem">%s</li>' % (d * 1.5, html.escape(t)) for d, t in lines)
-    print('<div style="font-family:monospace"><h3>OKe board</h3><ul style="list-style:none;padding:0">%s</ul></div>'
-          % items)
+    print("\n".join("  " * d + t for d, t in lines))
     return 0
 
 
@@ -1843,6 +1836,8 @@ def cmd_status(args):
     # herdr calls are slow (seconds each): make them before taking the lock, so
     # spawn and the waits do not time out on it. The agent list may then be a few
     # seconds old: an agent that just started can show as dead until the next status.
+    if runtime_orca.in_chat():
+        return fail(runtime_orca.CHAT_REFUSAL)  # /oke:start's first command: no screen, no mod there
     if args.claim and not os.environ.get("OKE_RUNTIME"):
         # one runtime per OKe home, chosen by where the orchestrator starts
         want = default_runtime()
@@ -3540,8 +3535,7 @@ def build_parser():
             p.add_argument("--remove", metavar="ID")
             p.add_argument("--job", dest="remove_job", help="with --remove: the job the worktree is for")
 
-    board = sub.add_parser("board", help="the board as text or HTML, for hosts without the mod pane")
-    board.add_argument("--html", action="store_true")
+    board = sub.add_parser("board", help="the board as text, for hosts without the mod pane")
     board.set_defaults(func=cmd_board)
 
     send = sub.add_parser("send")

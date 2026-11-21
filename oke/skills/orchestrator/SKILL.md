@@ -33,7 +33,7 @@ Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`.
 
 ## Start
 
-1. Run `$OKE status`.
+1. Run `$OKE status`. If it fails with "OKe runs in an Orca terminal, not a chat", tell the user exactly that and stop.
 2. `herdr.inside` false: say OKe cannot start its agents here, stop. (Outside herdr OKe runs them as background sessions, or as Orca workers inside Orca, and this is true.)
 3. `herdr.missing` not empty: name the missing herdr commands, stop (only in a herdr pane).
 4. `orchestrator_conflict` set: say which pane already runs the orchestrator, stop.
@@ -55,7 +55,7 @@ The OKe mod in every agent does this without you:
 - An agent whose turn ends on an API error that clears by itself (rate limit, overload, server error) resubmits the turn after 30 s, 1 m, 2 m, 4 m, then every 5 m, up to `api_retry_limit` (default 20) tries. Other API errors, and the last try, make a child or PM report `failed` with "API error" in the summary.
 - An agent that ends its turn without a report gets one nudge to continue (`idle_no_report`, below).
 - The user opens the board with `/oke-board` (type it in this pane; it is a command of the mod, not of the skill).
-- A host that draws no mod pane (Orca's chat, other SDK hosts) has no `/oke-board`. There, when the user asks for the board or a job changes phase, run `$OKE board` and put its text in your reply. In Orca's chat (`ORCA_CHAT_SCRATCH_DIR` is set) you may instead write `$OKE board --html` to a file in that folder with a shell redirect (`> <folder>/oke-board.html`) and show it as an Orca visual.
+- A host that draws no mod pane (an SDK host) has no `/oke-board`. There, when the user asks for the board or a job changes phase, run `$OKE board` and put its text in your reply.
 
 ## Intake
 
@@ -275,6 +275,6 @@ With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merg
 - Write a decision or a user instruction into the assignment or intake file the moment you get it. Your context can be compacted; the files cannot.
 - After compaction, run `$OKE status` and the queue, and start a wait for each PM with open jobs (a held job is not open).
 - `$OKE attach <agent>` prints `"attached": false` and a `hint` when OKe cannot show the agent itself (background sessions, Orca workers): give the user that hint. `$OKE keys` fails there too: for a dialog, offer only that command.
-- Inside Orca, Orca also wakes you with its own messages from your PMs (`worker_done`, `escalation`). They only wake you: read the PM's report.md and handle it as the wait would, then start the wait again. Never answer them with `orca orchestration` commands. OKe needs Orca's Agent Orchestration setting on, and the OKe plugin installed in Claude Code (Orca starts the agents itself, without OKe's `--plugin-dir`).
+- Inside Orca, Orca also wakes you with its own messages from your PMs (`worker_done`, `escalation`). They only wake you: read the PM's report.md and handle it as the wait would, then start the wait again. Never answer them with `orca orchestration` commands. OKe needs Orca's Agent Orchestration setting on. OKe opens each agent's Orca terminal itself and starts claude there with its own flags, whatever the user's Orca default for new agent tabs.
 - OKe blocks git commands that lose or publish work (`push`, `reset --hard`, `clean`, forced checkouts, branch deletes) in your session too. When the user wants one, tell them to run it themselves.
 - Do not send text starting with `/` through `$OKE send` from Git Bash; it is rewritten into a Windows path.

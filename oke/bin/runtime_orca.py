@@ -1,10 +1,11 @@
-"""Orca runtime: OKe's agents as Orca supervised workers (`orca orchestration
-worker-start`), for a user who runs Claude Code inside Orca. Same methods as
-runtime_herdr.HerdrRuntime, and agent records in herdr's shape.
+"""Orca runtime: OKe's agents as Orca supervised workers in Orca terminals, for a user
+who runs Claude Code inside Orca. Same methods as runtime_herdr.HerdrRuntime, and agent
+records in herdr's shape.
 
-Orca starts the agent itself: OKe cannot pass claude flags, so there is no lean
-launch, no --plugin-dir (OKe must be installed as a Claude Code plugin) and no
---resume (a revived agent gets the dead one's transcript instead). Each worker's
+OKe runs only in Orca terminals, never in an Orca chat (no screen, no mod), whatever the
+user's Orca default for new agent tabs: OKe creates each agent's terminal itself with the
+same claude command line the herdr runtime starts (`terminal create --command`), then
+dispatches the task onto it (`orchestration worker-start --terminal`). Each worker's
 caller is the Orca terminal that ran `oke` (ORCA_TERMINAL_HANDLE), so the orchestrator
 coordinates its PMs and each PM its workers.
 
@@ -12,16 +13,18 @@ Place: before a start it is the folder the agent starts in; after it, the worker
 first terminal handle. A follow-up may run in a new terminal (`terminal` in the
 registry): the first handle stays the agent's place, as OKe's state records it. Errors reuse HerdrError and its codes.
 """
-import glob
 import io
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import time
+import uuid
 
+from runtime_bg import claude_argv
 from runtime_herdr import HerdrError, replace_file
 
 # errors no lookup may read as "agent gone": the caller sees them
@@ -39,6 +42,31 @@ TASK_NOTE = ("This task is an OKe role. It asks you to use subagents and to star
              "what you do; your report is the report.md file it describes. Each time you "
              "write a report.md, also send worker_done once, with the report's type as "
              "subject.\n\n")
+
+
+CHAT_REFUSAL = ("OKe runs in an Orca terminal, not a chat: open a terminal tab in Orca and run "
+                "/oke:start there.")
+# `terminal wait --for tui-idle` names this while claude asks whether to trust the folder (measured)
+TRUST_BLOCK = "agent-trust-workspace"
+READY_MS = 60000  # one `terminal wait` for a starting agent
+
+
+def in_chat():
+    """True in an Orca chat: Orca sets ORCA_CHAT_SCRATCH_DIR there, and a chat worker's
+    handle is a structured one (structworker_...). It has no ORCA_TERMINAL_HANDLE when
+    opened from the UI, so without this check OKe would pick the bg runtime there."""
+    return bool(os.environ.get("ORCA_CHAT_SCRATCH_DIR")) or         (os.environ.get("ORCA_TERMINAL_HANDLE") or "").startswith("struct")
+
+
+def shell_line(words):
+    """`words` as one command line for the terminal's shell. On Windows OKe makes the
+    terminal PowerShell, whose Orca profile wraps a bare `claude` with Orca's status hooks
+    (measured: `--plugin-dir ...orca-agent-view` added), so the program stays a bare word."""
+    if os.name != "nt":
+        return " ".join(shlex.quote(w) for w in words)
+    quoted = ["'%s'" % w.replace("'", "''") for w in words[1:]]
+    first = words[0] if re.match(r"^[\w.-]+$", words[0]) else "& '%s'" % words[0].replace("'", "''")
+    return " ".join([first] + quoted)
 
 
 def orca_argv():
@@ -257,22 +285,6 @@ def mark_live(name, ours, live):
             raise  # else best effort: the next look saves it
 
 
-def transcript_of(dispatch, cwd):
-    """The Claude Code transcript of the session that ran `dispatch`: Orca's preamble
-    names the dispatch id in its first message. None when not found."""
-    base = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
-    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd or "")
-    for folder in [os.path.join(base, "projects", slug)] + glob.glob(os.path.join(base, "projects", "*")):
-        for path in sorted(glob.glob(os.path.join(folder, "*.jsonl")), key=os.path.getmtime, reverse=True):
-            try:
-                with io.open(path, encoding="utf-8", errors="replace") as f:
-                    if dispatch in f.read(20000):
-                        return path
-            except (IOError, OSError):
-                continue
-    return None
-
-
 def title_of(name):
     """The tab title a person reads: `OKe PM: <repo>`, `OKe worker: <job>`."""
     m = re.match(r"^pm-(.+)-[0-9a-f]{6}$", name)
@@ -404,6 +416,10 @@ class OrcaRuntime(object):
                 owner = resource.get("ownerDispatchId")
                 if resource.get("terminalHandle") == here and resource.get("releaseState") != "released"                         and owner and owner != entry["dispatch"]:
                     return {"dispatch": owner, "terminal": here}
+                # only newer rows: in a terminal OKe opened every dispatch keeps its own
+                # retained row on it (measured), so an older one would bounce the entry back
+                if row.get("dispatchId") == entry["dispatch"]:
+                    break
             # Orca closed the terminal: a newer dispatch (rows come newest first) names
             # this one as the dispatch it follows up. Each row is asked once: `seen` is
             # the newest row already asked, so a long rest costs one list per look.
@@ -427,9 +443,8 @@ class OrcaRuntime(object):
     def as_agent(self, name, entry, show):
         return {"name": name, "pane_id": entry["handle"], "terminal_id": entry.get("terminal") or entry["handle"],
                 "agent_status": status_of(show) or "gone", "cwd": entry.get("cwd"),
-                # the first dispatch stands for the session: Orca's preamble names it at the
-                # start of the transcript, where a revive looks for it
-                "agent_session": {"value": entry.get("origin") or entry["dispatch"]}}
+                # claude's own session id (OKe gave it --session-id), which a revive resumes
+                "agent_session": {"value": entry.get("session")}}
 
     def agents(self):
         out = []
@@ -447,7 +462,7 @@ class OrcaRuntime(object):
         return self.as_agent(name, entry, show)
 
     def screen(self, name):
-        """The end of the worker's transcript (Orca has no screen read for a chat worker)."""
+        """The end of the worker's transcript (worker-read works also once its terminal is closed)."""
         entry = load_registry().get(name)
         if not entry:
             raise HerdrError("agent_not_found", name)
@@ -470,48 +485,116 @@ class OrcaRuntime(object):
         return "\n".join(lines[-40:]) + "\n"
 
     def start(self, name, place, argv, prompt, trusted, registered=lambda: None, kind="claude"):
-        """Start a supervised Orca worker in folder `place`. Only --model and the resumed
-        session of `argv` mean anything here (see the module doc)."""
+        """Start the agent in a new Orca terminal in folder `place` and dispatch its first
+        prompt onto it as a supervised worker."""
         argv = list(argv)
-        spec = TASK_NOTE + prompt
-        # the replaced session: claude --resume, codex resume, opencode --session
-        old = next((argv[argv.index(f) + 1] for f in ("--resume", "resume", "--session")
-                    if f in argv[:-1]), None)
-        if old and kind == "claude":  # codex and opencode keep no Claude transcript
-            path = transcript_of(old, place)
-            if path:
-                spec += ("\n\nThe session you replace died. Its transcript is %s: read its end "
-                         "to see where it was." % path.replace("\\", "/"))
-        args = ["orchestration", "worker-start", "--spec", spec, "--agent", kind,
-                "--worktree", "path:" + place.replace("\\", "/"), "--keep-open", "--task-title", name]
-        if "--model" in argv:
-            args += ["--model", argv[argv.index("--model") + 1]]
-        try:
-            result = run_orca(args)
-        except HerdrError as e:
-            # a revive from a new session: the dead agent's Run may fence the start. Its
-            # origin dispatch (--resume) names that Run; relaunch already dropped the
-            # registry row, and its follow-ups share the origin's Run.
-            if e.code != "consumer_fenced" or not old:
-                raise
-            try:
-                show = run_orca(["orchestration", "worker-show", "--dispatch", old])
-            except HerdrError as e2:
-                if e2.code in FATAL:
-                    raise  # an outage is no crash: the revive try is not spent
-                show = None
-            rebind(e, show)
-            result = run_orca(args)
-        entry = {"dispatch": result["dispatchId"], "handle": result["terminal"], "cwd": place, "kind": kind,
+        session = argv[argv.index("--resume") + 1] if "--resume" in argv[:-1] else None
+        if session and session.startswith("ctx_"):
+            # shortcut: a record from before terminal mode holds an Orca dispatch id, which
+            # claude cannot resume: start fresh. Drop once no such record is left.
+            i = argv.index("--resume")
+            del argv[i:i + 2]
+            session = None
+        bare = [w for i, w in enumerate(argv) if w != "--resume" and (i == 0 or argv[i - 1] != "--resume")]
+        if kind == "claude" and not session:
+            session = str(uuid.uuid4())
+            argv += ["--session-id", session]
+        handle = self.launch(name, place, argv, trusted, kind)
+        result = self.dispatch(handle, place, TASK_NOTE + prompt, name)
+        entry = {"dispatch": result["dispatchId"], "handle": handle, "cwd": place, "kind": kind,
                  # worker-start returns only after the agent's first hook (measured): it ran live
-                 "live": result["dispatchId"]}
-        try:  # Orca titles every tab worker-task_<id>: say who it is (seen live)
-            run_orca(["terminal", "rename", "--terminal", entry["handle"], "--title", title_of(name)])
-        except HerdrError:
-            pass  # only the tab's name
+                 "live": result["dispatchId"],
+                 # what reopen() starts again after its terminal was closed
+                 "session": session if kind == "claude" else None, "argv": bare}
         update_registry(lambda r: r.__setitem__(name, entry))
         registered()
         return self.as_agent(name, entry, {"activity": "working", "liveness": "live"})
+
+    def launch(self, name, place, argv, trusted, kind):
+        """A new Orca terminal in `place` running the agent, ready for its first prompt.
+        Answers claude's folder trust dialog only when `trusted()` allows it; any other
+        stop closes the terminal again (OKe could not track it)."""
+        program = claude_argv() if kind == "claude" else [kind]
+        args = ["terminal", "create", "--worktree", "path:" + place.replace("\\", "/"), "--title", title_of(name),
+                "--command", shell_line(program + list(argv))]
+        if os.name == "nt":
+            args += ["--shell", "powershell.exe"]  # see shell_line
+        handle = run_orca(args)["terminal"]["handle"]
+        try:
+            for _ in range(3):
+                wait = run_orca(["terminal", "wait", "--terminal", handle, "--for", "tui-idle",
+                                 "--timeout-ms", str(READY_MS)]).get("wait") or {}
+                if wait.get("satisfied"):
+                    return handle
+                if wait.get("blockedReason") != TRUST_BLOCK or wait.get("status") == "exited" or not trusted():
+                    break
+                # claude preselects "No, exit": Down, then Enter (codex preselects trust)
+                if kind == "claude":
+                    run_orca(["terminal", "send", "--terminal", handle, "--text", "\x1b[B"])
+                run_orca(["terminal", "send", "--terminal", handle, "--text", "\r"])
+            try:
+                screen = "\n".join(run_orca(["terminal", "read", "--terminal", handle, "--screen"])
+                                   .get("terminal", {}).get("tail") or [])
+            except HerdrError:
+                screen = ""
+            raise HerdrError("agent_not_ready", "%s did not start (%s):\n%s" % (
+                name, wait.get("blockedReason") or wait.get("status") or "not ready", screen.strip()[-1500:]))
+        except BaseException:
+            self.close_terminal(handle)
+            raise
+
+    def dispatch(self, handle, place, spec, name):
+        """worker-start onto the agent in `handle`; closes the terminal when it fails."""
+        args = ["orchestration", "worker-start", "--terminal", handle, "--worktree",
+                "path:" + place.replace("\\", "/"), "--spec", spec, "--keep-open", "--task-title", name]
+        try:
+            for tries in range(5):
+                try:
+                    result = run_orca(args)
+                    break
+                except HerdrError as e:
+                    # Orca refuses a terminal whose agent it does not recognise yet (measured
+                    # right after the create): nothing was typed, so a retry is safe
+                    if e.code != "agent_unconfigured" or tries == 4:
+                        raise
+                    time.sleep(2)
+        except BaseException:
+            self.close_terminal(handle)
+            raise
+        try:  # Orca titles every tab worker-task_<id>: say who it is (seen live)
+            run_orca(["terminal", "rename", "--terminal", handle, "--title", title_of(name)])
+        except HerdrError:
+            pass  # only the tab's name
+        return result
+
+    def close_terminal(self, handle):
+        try:
+            run_orca(["terminal", "close", "--terminal", handle])
+        except HerdrError as e:
+            if e.code in FATAL:
+                raise  # else closed already
+
+    def terminal_gone(self, entry):
+        """True when the agent's terminal was closed (Orca: connected and writable false,
+        or the handle is stale after an Orca restart)."""
+        try:
+            t = run_orca(["terminal", "show", "--terminal", entry.get("terminal") or entry["handle"]]).get("terminal") or {}
+        except HerdrError as e:
+            if e.code in FATAL:
+                raise
+            return True
+        return t.get("connected") is False or t.get("writable") is False
+
+    def reopen(self, entry, name, text):
+        """Mail for a settled agent whose terminal was closed: start it again in a new
+        terminal on its own session, with its own command line, and dispatch the mail
+        onto it. Orca's own reopen (what `send` does here) runs a bare `claude --resume`
+        without OKe's flags (measured: no allowed tools, settings or plugin dir)."""
+        handle = self.launch(name, entry["cwd"], entry["argv"] + ["--resume", entry["session"]],
+                             lambda: False, entry.get("kind") or "claude")
+        result = self.dispatch(handle, entry["cwd"], TASK_NOTE + text, name)
+        self.adopt(entry, name, {"dispatch": result["dispatchId"], "terminal": handle, "seen": None,
+                                 "live": result["dispatchId"]})
 
     def prompt(self, name, text):
         """Orca mail to the worker: a working one gets it when its turn ends, a finished
@@ -520,6 +603,12 @@ class OrcaRuntime(object):
         if not entry:
             raise HerdrError("agent_not_found", name)
         show = self.show(entry, name)  # mail the current dispatch, not one a follow-up replaced
+        if entry.get("session") and entry.get("argv") is not None and (show or {}).get("stage") == "settled" \
+                and self.terminal_gone(entry):
+            # shortcut: the terminal may close between this look and the send; Orca then
+            # reopens it without OKe's flags. Rare: OKe keeps every agent's terminal open.
+            self.reopen(entry, name, text)
+            return True
         try:
             self.sent(entry, name, mutate(["orchestration", "send", "--to", "dispatch:" + entry["dispatch"],
                                            "--subject", "OKe", "--body", text], show))
@@ -598,16 +687,10 @@ class OrcaRuntime(object):
             # a wrong place (an agent name, a follow-up's terminal) must not read as closed
             raise HerdrError("agent_not_found", "no open OKe agent in %s: already closed (job cancel "
                              "closes a job's children), or not a pane spawn printed" % place)
-        show = self.show(entry, name)  # stop the follow-up that runs now, not the dispatch it replaced
-        try:
-            stopped = mutate(["orchestration", "worker-stop", "--dispatch", entry["dispatch"]], show)
-            if stopped.get("alreadySettled"):
-                # a settled worker's stop changes nothing and its kept-open terminal stays
-                # (measured): release closes it
-                mutate(["orchestration", "worker-release", "--dispatch", entry["dispatch"]], show)
-        except HerdrError as e:
-            if e.code in FATAL:
-                raise  # already stopped or released: forget it anyway
+        self.show(entry, name)  # close the terminal a follow-up runs in now
+        # worker-stop changes nothing in a terminal Orca did not start ("The worker terminal
+        # is external", measured); closing the terminal ends the dispatch (failed / process_exited)
+        self.close_terminal(entry.get("terminal") or entry["handle"])
         update_registry(lambda r: r.pop(name, None))
 
     def worktree_create(self, repo, branch, label):

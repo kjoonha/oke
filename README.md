@@ -61,7 +61,7 @@ Agents talk through files under `$OKE_HOME` (default `~/.oke`), so a crash loses
 - Python 3.6 or later (standard library only) and git
 - One place to run the agents:
   - herdr 0.9.5 or later (agents run in herdr panes), or
-  - Orca (agents run as Orca orchestration workers; tested with 1.4.261), or
+  - Orca (agents run as Orca orchestration workers, each in its own Orca terminal; tested with 1.4.261), or
   - neither: agents run as background `claude --bg` sessions.
 - Optional: codex or opencode, to use as the worker or reviewer
 
@@ -95,6 +95,8 @@ This is the same place a marketplace from GitHub lives. The plugin is read from 
 ## Use
 
 Start Claude Code in a herdr pane, an Orca terminal or a plain terminal, and run `/oke:start`. That session becomes the orchestrator. Tell it what you want done. If the session was cut off, run `/oke:resume`.
+
+In Orca, OKe runs only in a terminal tab, never in an Orca chat (a chat draws no mod pane), whatever your Orca default for new agent tabs (Chat or CLI): `/oke:start` in a chat refuses. OKe opens a terminal for each PM, worker and reviewer itself and starts claude there with OKe's own flags. Orca's Agent Orchestration setting must be on.
 
 Things you can say along the way:
 

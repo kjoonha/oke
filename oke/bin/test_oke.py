@@ -25,7 +25,7 @@ class Base(unittest.TestCase):
         os.environ["OKE_HOME"] = self.home
         for k in ("HERDR_ENV", "HERDR_PANE_ID", "OKE_HERDR", "FAKE_HERDR_DIR", "OKE_RUNTIME",
                   "OKE_CLAUDE", "CLAUDE_CODE_SESSION_ID", "ORCA_TERMINAL_HANDLE", "OKE_ORCA",
-                  "ORCA_CLI_COMMAND", "ORCA_DEV_REPO_ROOT"):
+                  "ORCA_CLI_COMMAND", "ORCA_DEV_REPO_ROOT", "ORCA_CHAT_SCRATCH_DIR"):
             os.environ.pop(k, None)
         os.environ["OKE_RUNTIME"] = "herdr"  # outside a herdr pane OKe would pick bg
         self.out = ""
