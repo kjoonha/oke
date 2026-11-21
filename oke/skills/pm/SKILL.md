@@ -94,12 +94,13 @@ after: <job>[, <job>]   (only when the peer talk showed this job must merge afte
 ## 접근
 ## worktree        (with one: its branch, oke/<job>; without: 없음)
 ## 단위 작업        (ordered list for the worker)
-## 검증 명령        (required: the command and what passing looks like)
+## 수용 기준        (numbered list: the interview's 성공 기준, one checkable line each)
+## 검증 명령        (required: `<one bash command>` in backticks on the first line, then what passing looks like)
 ## 다른 레포 영향    (who was asked, each answer, what changed in the plan; or 없음 and why)
 ## 사용자에게 물을 것 (or 없음)
 ```
 
-For the 검증 명령, use the repository's own check first: the command a verify skill (`.claude/skills/verify*/SKILL.md`) runs, or the check command its README, CONTRIBUTING or CLAUDE.md names. The 검증 명령 is always one bash command line, never a skill: `job verify` runs it after the merge. Write a new command only when none fits the change, and say why in 접근.
+For the 검증 명령, use the repository's own check first: the command a verify skill (`.claude/skills/verify*/SKILL.md`) runs, or the check command its README, CONTRIBUTING or CLAUDE.md names. The 검증 명령 is always one bash command line, never a skill, in backticks on the section's first line: `$OKE baseline`, `$OKE check` and `job verify` read it from there. The 수용 기준 and the 검증 명령 together give the job's `criteria_rev`: change either after approval and the merge needs a new `$OKE check` and a new review (and a new `$OKE baseline` when the command changed). Write a new command only when none fits the change, and say why in 접근.
 
 Before you report the plan, ask the other repositories' PMs. List what this plan changes that code outside this repository may use: APIs, schemas, CLI flags, config keys, file formats, shared services. Nothing like that: 다른 레포 영향 is `없음 (nothing other code uses)`. Otherwise read and follow "Asking" in `${CLAUDE_PLUGIN_ROOT}/skills/pm/references/peers.md`.
 
@@ -119,7 +120,7 @@ While planning, decide how big the job is and record it: `$OKE job size <job> <s
 
 The orchestrator may change the size before it assigns `kind: execute` (the user wanted to approve the merge separately): follow the size its execute instruction names. A plan or instruction written before the rename says `lane:` with the old names (trivial = `small`, small = `normal`, normal = `large`): the `size` that `$OKE status` shows for the job is the one that counts.
 
-**Work subagent (small).** No worker pane and no wait. Call the Agent tool with `subagent_type: general-purpose` and a prompt that holds everything a worker would get: the cwd, the change from the plan, what not to touch, the 검증 명령, and "Make the change. Do not commit. Run the 검증 명령. Answer with the files you changed and the command's output." Check its answer as a worker `report done`. Findings from the review go to a new subagent call with the findings added.
+**Work subagent (small).** No worker pane and no wait. Call the Agent tool with `subagent_type: general-purpose` and a prompt that holds everything a worker would get: the cwd, the change from the plan, what not to touch, and "Make the change. Do not commit. Answer with the files you changed." (you run `$OKE check <job>` on its answer) Check its answer as a worker `report done`. Findings from the review go to a new subagent call with the findings added.
 
 **Review subagent (small and normal).** Write the reviewer's assignment exactly as for a reviewer pane (see **Review**), but do not spawn it: call the Agent tool with `subagent_type: oke:reviewer`, `model` from `models.reviewer` in `$OKE_HOME/config.json`, and the prompt `Review: <the assignment path>`. It answers with the review report (Claude Code does not let a subagent write report files): write that answer, unchanged, to `report.md` next to the assignment, which `$OKE job merge` checks as for a reviewer pane. An answer without the `type`, `seq` and `verdict` lines is no review: call it again. Every new review round is a new call, after `seq` + 1 and the new `commit:` or `tree:` in the assignment. The subagent is told, not forced, to change nothing: after its pass, `git status --short` must match what you saw before the call (`$OKE job merge` also refuses a tree or commit other than the one reviewed).
 
@@ -127,9 +128,11 @@ The orchestrator may change the size before it assigns `kind: execute` (the user
 
 ### kind: execute
 
-Size `small`: no worker pane. Do step 1 if the plan uses a worktree, then the work subagent and the review subagent (see Job size), then continue at "verdict: pass" under **Review**.
+Size `small`: no worker pane. Do step 1 if the plan uses a worktree, then the baseline (below), then the work subagent; after its answer run `$OKE check <job>` (exit 1: a new subagent call with the new failures), then the review subagent (see Job size), then continue at "verdict: pass" under **Review**.
 
-1. Worktree, if the plan uses one: `$OKE worktree <job> --repo <repo>`. It prints `id` (to remove it later), `path` (the checkout) and `place` (where to start the worker). Write `id` and `path` on your board. If it fails, report `failed` with the error. It always uses branch `oke/<job>`, the only one `$OKE job merge` merges.
+Baseline, before any work: write the job's report as `waiting` (`on: baseline`, `expect:` how long the 검증 명령 takes), run `$OKE baseline <job>` in the background, end your turn. It runs the 검증 명령 on the untouched worktree (without one, the main checkout) and saves what already fails, so only new failures count later. Exit 2: the message says why (no command in plan.md, or it could not run): fix plan.md and run it again. A baseline that already fails (`exit` not 0): say so in your next report, with the number of failing lines.
+
+1. Worktree, if the plan uses one: `$OKE worktree <job> --repo <repo>`. It prints `id` (to remove it later), `path` (the checkout) and `place` (where to start the worker). Write `id` and `path` on your board. If it fails, report `failed` with the error. It always uses branch `oke/<job>`, the only one `$OKE job merge` merges. Then the baseline (see above), before the worker starts.
 2. Write `$OKE_HOME/jobs/<job>/<job>-w1/assignment.md`:
 
 ```
@@ -181,10 +184,12 @@ When a child's wait finishes, act on its first line:
 
 **New files.** You decide which untracked files (`git -C <cwd> status --short`, `??`) belong to the job: the ones the worker's report names or the plan calls for. Leave out what builds and checks leave behind (caches, compiled files, logs, build output) and anything you do not recognise; never delete a file you did not see the job create. `$OKE job merge` commits tracked changes plus only what you staged, and names the untracked files it left (`left_untracked`): mention them in your report.
 
+Before you write or update the reviewer's assignment: `$OKE ledger show <job>`. Unless its last `check` row is a pass on that commit (without a worktree: on `tree:<the tree>`), run `$OKE check <job>` first (exit 1: back to the worker with the new failures). Put `criteria_rev: <from that row or the check's output>` in the reviewer's header next to `commit:` or `tree:`. `$OKE job merge` refuses a review whose `criteria_rev` is not the plan's current one, and a commit without a passing check.
+
 Every new instruction to the reviewer (another round, a rebase) repeats this: commit the worker's changes if needed, and put the new `commit:` (without a worktree: a new `tree:`) and range in its assignment. `$OKE job merge` refuses a branch whose tip is not the commit the passing review named.
 
 - `verdict: changes`: pass the `[important]` findings to the worker as a new instruction, wait, then give the reviewer a new instruction to review again. Each new review instruction lists, under `## 이전 지적` in 이번 지시, every earlier finding with the worker's answer: the reviewer checks those and does not raise a fixed one again. Rounds 1 and 2 review the whole range; from round 3 on, with a worktree, the range is only the new commits (`<last reviewed commit>...<new commit>`) plus the 이전 지적 check (`commit:` is still the new tip); after a rebase it is the whole `<base branch>...<new commit>` range again. After the third `changes` round, do not pass the findings on one by one: tell the worker the findings keep coming, name the kinds of problem they share, and have it reconsider the approach and fix each kind everywhere at once. `[pre-existing]` findings (problems the change did not introduce) never go to the worker: name them in the job's `done` report. Repeat until `verdict: pass`, up to the job's review round limit (10 unless the user allowed more; `$OKE job rounds <job>` shows the round and the limit). A reviewer pane past the limit is refused by `spawn` and `send`; before each review subagent call, check `$OKE job rounds <job>` yourself, and past the limit report `question` as in the table above. A finding that comes back after the worker answered it is not a reason to stop early: pass it on with the worker's earlier answer, and let the reviewer decide again. At the limit, the `question` lists the open findings and, for each one that came back, both sides.
-- `verdict: pass`: run `git -C <cwd> status --short` and compare it with the worker's report: the reviewer must not have changed anything (with a worktree it must be clean: the work was committed before the review). Report `done` for the job: summary, branch, number of changed files (`git diff --stat <base>...oke/<job>`, or `git diff --stat HEAD` when uncommitted), the worktree path, and the workers' 배운 것.
+- `verdict: pass`: run `git -C <cwd> status --short` and compare it with the worker's report: the reviewer must not have changed anything (with a worktree it must be clean: the work was committed before the review). Report `done` for the job: summary, the 수용 기준 lines of the review, "main already failed N lines (warning)" when `$OKE_HOME/jobs/<job>/baseline.json` has signatures, branch, number of changed files (`git diff --stat <base>...oke/<job>`, or `git diff --stat HEAD` when uncommitted), the worktree path, and the workers' 배운 것.
 
 A worker report, a review finding or your own look shows the job changes something other code may use that the plan did not list: read and follow "A cross-repo change shows up during work" in `${CLAUDE_PLUGIN_ROOT}/skills/pm/references/peers.md`.
 

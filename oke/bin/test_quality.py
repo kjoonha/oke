@@ -145,6 +145,18 @@ class TestBaselineCheck(SpawnBase):
         self.assertEqual((out["added"], out["removed"]), (1, 1))
         self.assertEqual(len(os.listdir(os.path.join(self.home, "jobs", "q", "baseline.history"))), 1)
 
+    def test_uncommitted_worktree_change_is_recorded_as_a_tree(self):
+        self.plan("true")
+        self.write(os.path.join(self.wt, "c.txt"), "c\n")
+        self.git(self.wt, "add", "c.txt")
+        self.git(self.wt, "commit", "-q", "-m", "c")
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        self.write(os.path.join(self.wt, "c.txt"), "changed\n")
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        target = self.rows()[-1]["commit"]
+        self.assertTrue(target.startswith("tree:"), target)
+        self.assertNotEqual(target[5:], self.git_out(self.wt, "rev-parse", "HEAD^{tree}"))
+
     def test_unrunnable_command_is_never_a_pass(self):
         self.plan("no-such-command-oke-xyz")
         self.assertEqual(self.cli("baseline", "q"), 2)

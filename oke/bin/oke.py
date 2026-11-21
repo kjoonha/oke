@@ -2646,6 +2646,10 @@ def check_dir(info):
     wt = (info.get("worktree") or {}).get("path")
     if wt:
         cwd = native_path(wt)
+        code, dirty = git_out(cwd, "status", "--porcelain", "-uno")
+        if code == 0 and dirty:  # uncommitted work: HEAD is not what ran
+            tree = pending_tree(cwd)
+            return cwd, "tree:" + tree if tree else None
         code, head = git_out(cwd, "rev-parse", "HEAD")
         return cwd, head if code == 0 else None
     main = native_path(os.path.dirname(info["repo"]))

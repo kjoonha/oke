@@ -61,6 +61,8 @@ Orca 에서:
 
 `oke status` (와 `oke board`) 는 어느 터미널에서나 된다: orchestrator 가 고른 runtime 을 읽는다. 그 runtime 의 터미널 밖 (예: OKe 가 herdr 나 Orca 에서 도는데 일반 셸) 에서는 보여 주기만 하고 아무것도 띄우지 못한다.
 
+검사: 계획에는 번호 붙은 수용 기준 (`## 수용 기준`) 과 검사 명령 하나 (`## 검증 명령`, 백틱 안) 가 있다. 일을 시작하기 전에 `oke baseline <job>` 이 손대지 않은 checkout 에서 명령을 돌려 원래 깨진 것을 저장한다. worker 는 `oke check <job>` 으로 검사한다: OKe 가 명령을 돌리고, baseline 에 없던 실패 줄만 새 실패로 친다. 결과는 job 장부에 OKe 가 적고, agent 는 이 줄을 적을 수 없다. `oke job merge` 는 리뷰가 계획의 현재 `criteria_rev` (수용 기준과 명령의 해시) 를 적었고, 장부에 리뷰한 커밋에서 통과한 `oke check` 가 있을 때만 합친다. 합친 뒤 `oke job verify <job>` 은 합친 코드가 검사를 통과한 코드와 같으면 돌리지 않고 통과로 적고, 다르면 main 에서 명령을 돌려 새 실패가 있을 때 merge 를 되돌린다.
+
 ## 설정: `~/.oke/config.json`
 
 없어도 된다. 있으면 아래 값만 덮어쓴다.

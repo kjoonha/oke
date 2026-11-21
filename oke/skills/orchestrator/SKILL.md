@@ -209,7 +209,7 @@ When the user sets a job aside, or wants a held job back: read and follow `${CLA
 | Step | You do | Phase to set |
 |---|---|---|
 | Intake done | Assign `kind: plan`. A research job: assign `kind: research` instead | `planning`, research `working` |
-| PM reports the plan (`report_done`, phase `planning`) | Read `<job_dir>/plan.md`. If its 검증 명령 section is empty, send it back (`kind: plan`, say why). Otherwise it becomes a `plan` item | `awaiting_approval` |
+| PM reports the plan (`report_done`, phase `planning`) | Read `<job_dir>/plan.md`. If its 검증 명령 section has no command in backticks, or its 수용 기준 section is empty, send it back (`kind: plan`, say why). Show the user the 수용 기준 with the plan. Otherwise it becomes a `plan` item | `awaiting_approval` |
 | User approves | Assign `kind: execute`; its 이번 지시 names the size (`size: <size>`) | `working` |
 | User wants changes | Assign `kind: plan` with the requested changes | `planning` |
 | PM reports research done, or a direct job's work reviewed (`report_done`, phase `working` or `reviewing`) | Nothing to merge. Tell the user the report's 요약 (for research, its findings; offer the report path), update the shared wiki from 배운 것 (공용), `$OKE job phase <job> done` (refused: see "Shared wiki"), then `$OKE job archive <job>` | |

@@ -17,12 +17,13 @@ type: done
 seq: <seq from the assignment>
 ---
 verdict: pass | changes        (this exact line, first after ---)
+## 수용 기준     (one line per item of plan.md's 수용 기준: `- <n>: pass | fail — <evidence>`)
 ## 요약
 ## 지적          (one line each: `[important]` or `[pre-existing]`, file:line, the problem, how to fix it)
 ## 배운 것       (or 없음)
 ```
 
 - `[important]`: must be fixed before the merge: wrong behavior, a missed requirement, an untested risky branch. `[pre-existing]`: a real problem the change did not introduce. Style preferences are not findings.
-- `verdict: changes` only when there is at least one `[important]` finding.
+- `verdict: changes` only when there is at least one `[important]` finding or a 수용 기준 line is `fail`.
 - Several findings of the same kind are one line naming every place.
 - If you cannot read the diff at all, answer `type: failed` and say why.

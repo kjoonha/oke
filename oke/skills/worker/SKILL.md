@@ -15,11 +15,10 @@ If your first prompt says you were restarted after a crash, your earlier turns a
 2. Read `<wiki>/index.md` and `<shared_wiki>/index.md` where they exist, and the pages that matter for this job.
 3. Do the work in `cwd`. Stay inside the assignment's 범위. Do not write outside `cwd`, except your own folder.
 4. If your assignment header says `commit: yes`, commit your work in `cwd` on the current branch. Otherwise leave it uncommitted and say so in the report; the PM commits it (with a worktree, before the review; without one, after the user approves the merge).
-5. Run the assignment's 검증 명령 for real. Paste the command and the end of its output into the report. Then record it in the job's ledger (append-only, the merge question shows it to the user):
-
-   ```
-   python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py" ledger add <job> --by <you> --commit <git -C <cwd> rev-parse HEAD, or uncommitted> --check worker-verify --result pass|fail --detail "<the command>"
-   ```
+5. Check the work: `python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py" check <job>`. It runs the plan's 검증 명령 in `cwd`, compares the failures with what failed before the work started, and records the result in the job's ledger. Do not run the 검증 명령 yourself to decide pass or fail. Paste its output into the report.
+   - Exit 0: no new failure.
+   - Exit 1: `new` lists the new failure lines (the full output is at `log`). Fix them and check again.
+   - Exit 2: it cannot judge (no baseline, the command changed, or it could not run): report `blocked` with the message.
 6. Delete the untracked files your builds and checks left behind that are not part of the work: caches (`__pycache__`, `.pytest_cache`), compiled files, test logs (`git -C <cwd> status --short` shows them; outside git, look at the files you touched). Otherwise the worktree cannot be removed. In your report, list the new files that are part of the work: the PM commits only those. Keep anything that is work; when unsure, keep it and list it in the report.
 7. Write your report and end your turn.
 
@@ -73,7 +72,7 @@ expect: <how long the wait should take, e.g. 2h or 40m; optional, with waiting>
 
 The `## wiki` lines are how OKe learns which pages help: a page nobody reads goes to the archive after 30 days, and a `wrong` page is fixed first.
 
-- `done` only when the 검증 명령 passed. If it fails and you cannot fix it, report `failed` with the output.
+- `done` only after `oke check` exited 0. If it keeps finding new failures you cannot fix, report `failed` with its output.
 - Unclear requirement: report `question`. Do not guess what the user wants.
 - A check that fails only sometimes (flaky): do not rerun it until it passes, skip it or add a sleep. Report `question` with both outputs.
 - A command that runs longer than about 10 minutes (a simulation, a long build): start it in the background, write the report as `waiting` with `on:` naming the command and `expect:` your estimate of its run time, and end your turn. A wait past 1.5 times `expect:` is shown to the user; nothing stops it. You are woken when it finishes; then continue. Without the `waiting` report the PM thinks you died.
