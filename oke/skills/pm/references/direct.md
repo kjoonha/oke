@@ -1,0 +1,3 @@
+# PM: direct job
+
+`direct: true` in the assignment and in `$OKE status` under `jobs`: the folder is not a git repository, and the files change in place. Plan and execute as usual, with these differences. No worktree, and `commit: no` for the worker. Skip the git steps (`job tree`, `add`, `commit`, `status`). The reviewer's assignment has no `commit:` or `tree:`; its 이번 지시 lists the files the worker reported as changed or new, to read whole. On `verdict: pass` close the worker and reviewer (`$OKE close <pane>`, as merge step 7 does) and report `done` (files changed, the worker's 검증 출력): there is no merge, and `$OKE job merge` refuses one.
