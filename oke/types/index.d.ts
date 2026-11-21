@@ -27,6 +27,10 @@ export type BoardJob = {
   pending: string | null
   /** The user put it on hold (`oke job hold`): nothing runs for it until it is back. */
   held?: boolean
+  /** Repositories whose PM still owes this job an answer (`oke peer ask`). */
+  peer_wait?: string[]
+  /** Jobs that must merge and verify before this one may merge (plan `after:`). */
+  after_wait?: string[]
 }
 
 export type BoardRepo = { repo: string; key: string; pm: BoardNode | null; jobs: BoardJob[] }

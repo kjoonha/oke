@@ -182,6 +182,7 @@ const PENDING: Record<string, string> = {
   plan: 'approve the plan',
   merge: 'approve the merge',
   question: 'PM asks',
+  peer: 'a PM did not answer',
   blocked: 'PM is blocked',
   failed: 'PM reports a failure',
   silent: 'PM is silent',
@@ -969,6 +970,9 @@ export const register: Register = on => {
         if (finished.includes(job)) continue
         const [label, labelColor] = LEDGER[job.merge] ?? ['', undefined]
         const at = step(job)
+        const peers = (job.peer_wait ?? []).map(r => r.replace(/-[0-9a-f]{6}$/, ''))
+        const wait = [peers.length ? `PM ${peers.join(', ')}` : '', (job.after_wait ?? []).join(', ')]
+          .filter(Boolean).join('; ')
         const hurt = !job.held && job.agents.some(n => n.status === 'dead')
         cards.push(
           <Box flexDirection="column" borderStyle="round" borderColor={job.pending ? INK.yellow : hurt ? INK.red : INK.lavender} paddingX={1} marginTop={1}>
@@ -989,6 +993,7 @@ export const register: Register = on => {
                 >
                   {i === at ? ` ${s} ` : s}
                 </Text>,
+                i === at && wait ? <Text color={INK.yellow} dimColor>{` (wait ${wait})`}</Text> : '',
               ])}
             </Text>
             {job.agents.map(n => agentBlock(n, n.agent.startsWith(`${job.job}-`) ? n.agent.slice(job.job.length + 1) : n.agent))}
