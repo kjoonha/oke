@@ -2465,7 +2465,7 @@ def ledger_rows(job, path=None):
 
 
 # Rows only OKe itself writes; `oke ledger add` refuses them so nobody forges a verdict.
-OKE_CHECKS = ("review", "merge", "verify", "rollback")
+OKE_CHECKS = ("review", "merge", "verify", "rollback", "check")
 
 
 def merge_state(job, path=None):
@@ -2592,6 +2592,143 @@ def run_signatures(command, cwd, log, lock):
         return {"exit": code, "unrunnable": unrunnable, "signatures": []}
     with io.open(log, encoding="utf-8", errors="replace") as f:
         return {"exit": code, "unrunnable": False, "signatures": signature_lines(f.read())}
+
+
+BASELINE_HISTORY = 20
+
+
+def plan_section(job, name):
+    try:
+        with io.open(os.path.join(oke_home(), "jobs", job, "plan.md"), encoding="utf-8") as f:
+            text = f.read()
+    except (IOError, OSError, ValueError):
+        return ""
+    m = re.search(r"^## " + re.escape(name) + r"[^\n]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    return m.group(1).strip() if m else ""
+
+
+def plan_command(job):
+    """The 검증 명령: the first backticked span of plan.md's section."""
+    m = re.search(r"`([^`]+)`", plan_section(job, u"검증 명령"))
+    return m.group(1).strip() if m else None
+
+
+def criteria_rev(job):
+    """Changes whenever the acceptance criteria or the 검증 명령 change."""
+    text = plan_section(job, u"수용 기준") + "\n" + (plan_command(job) or "")
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def check_dir(info):
+    """(cwd, what is checked): the worktree and its HEAD, or the main checkout and
+    tree:<sha> of its pending changes (what a review of a job without a worktree names)."""
+    wt = (info.get("worktree") or {}).get("path")
+    if wt:
+        cwd = native_path(wt)
+        code, head = git_out(cwd, "rev-parse", "HEAD")
+        return cwd, head if code == 0 else None
+    main = native_path(os.path.dirname(info["repo"]))
+    tree = pending_tree(main)
+    return main, "tree:" + tree if tree else None
+
+
+def quality_target(job):
+    """(info, command, cwd, target) or an exit code."""
+    info = load_state()["jobs"].get(job)
+    if not info:
+        return fail("unknown job: %s" % job)
+    if info.get("size") == "research" or info.get("direct"):
+        return fail("job %s has nothing to merge (research or direct): no baseline or check" % job)
+    command = plan_command(job)
+    if not command:
+        fail(u"plan.md of %s names no 검증 명령: its section's first line is the command in backticks" % job)
+        return 2
+    cwd, target = check_dir(info)
+    if not target:
+        fail("cannot read the commit or tree of %s in %s" % (job, cwd))
+        return 2
+    return info, command, cwd, target
+
+
+def read_baseline(job):
+    try:
+        with io.open(os.path.join(oke_home(), "jobs", job, "baseline.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (IOError, OSError, ValueError):
+        return None
+
+
+def cmd_baseline(args):
+    found = quality_target(args.job)
+    if isinstance(found, int):
+        return found
+    info, command, cwd, target = found
+    job_dir = os.path.join(oke_home(), "jobs", args.job)
+    lock = "check-" + args.job
+    while not try_lock(lock):
+        time.sleep(5)
+    try:
+        log = os.path.join(job_dir, "baseline.log")
+        now = run_signatures(command, cwd, log, lock)
+        path = os.path.join(job_dir, "baseline.json")
+        old = read_baseline(args.job)
+        if old is not None:
+            history = os.path.join(job_dir, "baseline.history")
+            if not os.path.isdir(history):
+                os.makedirs(history)
+            os.rename(path, os.path.join(history, time.strftime("%Y%m%dT%H%M%S") + ".json"))
+            for stale in sorted(os.listdir(history))[:-BASELINE_HISTORY]:
+                os.remove(os.path.join(history, stale))
+        base = dict(now, version=1, recorded_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    criteria_rev=criteria_rev(args.job), commit=target)
+        write_json_atomic(path, base)
+    finally:
+        unlock(lock)
+    before = set((old or {}).get("signatures") or [])
+    print(json.dumps({"result": "recorded", "exit": now["exit"], "signatures": len(now["signatures"]),
+                      "added": len(set(now["signatures"]) - before),
+                      "removed": len(before - set(now["signatures"])),
+                      "log": log.replace("\\", "/")}))
+    return 0
+
+
+def cmd_check(args):
+    """Run the 검증 명령 where the job's work is and judge it against the baseline:
+    0 no new failure, 1 new failures, 2 cannot judge. Written to the ledger by OKe."""
+    found = quality_target(args.job)
+    if isinstance(found, int):
+        return found
+    info, command, cwd, target = found
+    rev = criteria_rev(args.job)
+    base = read_baseline(args.job)
+    if base is None:
+        fail("job %s has no baseline: run `oke baseline %s` before the work starts" % (args.job, args.job))
+        return 2
+    if base.get("criteria_rev") != rev:
+        fail(u"the 검증 명령 or the criteria of %s changed since the baseline: run `oke baseline %s` again"
+             % (args.job, args.job))
+        return 2
+    lock = "check-" + args.job
+    while not try_lock(lock):
+        time.sleep(5)
+    try:
+        n = len([r for r in ledger_rows(args.job) if r["check"] == "check"]) + 1
+        log = os.path.join(oke_home(), "jobs", args.job, "check-%d.log" % n)
+        now = run_signatures(command, cwd, log, lock)
+        new, resolved = diff_baseline(base, now)
+        log = log.replace("\\", "/")
+        if now["unrunnable"] and not base.get("unrunnable"):
+            fail(u"the 검증 명령 could not run (exit %d, see %s)" % (now["exit"], log))
+            return 2
+        result = "fail" if new else "pass"
+        ledger_add(args.job, "oke", target, "check", result,
+                   "%s new=%d resolved=%d log=%s" % (rev, len(new), len(resolved), log))
+    finally:
+        unlock(lock)
+    print(json.dumps({"result": result, "criteria_rev": rev, "commit": target, "new": new,
+                      "resolved": len(resolved), "baseline_failures": len(base.get("signatures") or []),
+                      "log": log}, ensure_ascii=False))
+    return 1 if new else 0
 
 
 def verify_job(job, command, accept=None):
@@ -3620,6 +3757,12 @@ def build_parser():
             p.add_argument("--reason", required=True)
     wk.set_defaults(func=cmd_wiki)
 
+    bl = sub.add_parser("baseline", help="record the plan's 검증 명령 failures before the work starts")
+    bl.add_argument("job")
+    bl.set_defaults(func=cmd_baseline)
+    ck = sub.add_parser("check", help="run the 검증 명령 on the job's work and judge it against the baseline")
+    ck.add_argument("job")
+    ck.set_defaults(func=cmd_check)
     ledger = sub.add_parser("ledger")
     ledger_sub = ledger.add_subparsers(dest="action")
     ledger_sub.required = True

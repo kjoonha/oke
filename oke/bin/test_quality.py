@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """Quality protocol: failure signatures, baseline, oke check."""
+import json
 import os
+import subprocess
 import tempfile
 import unittest
 
 import oke
+from test_oke import SpawnBase
 
 PYTEST_A = ("tests/t.py::test_div FAILED [ 50%]\nFAILED tests/t.py::test_div - ZeroDivisionError\n"
             "===== 1 failed, 4 passed in 3.21s (0:00:03) =====\n....F\n")
@@ -68,6 +71,96 @@ class TestSignatures(unittest.TestCase):
                 os.environ.pop("OKE_HOME")
             else:
                 os.environ["OKE_HOME"] = old
+
+
+class TestBaselineCheck(SpawnBase):
+    def setUp(self):
+        SpawnBase.setUp(self)
+        self.job("q", "working")
+        self.wt = self.git_worktree(self.repo, "wt")
+        state = oke.load_state()
+        state["jobs"]["q"]["worktree"] = {"id": "wt", "path": self.wt}
+        oke.save_state(state)
+
+    def plan(self, command, criteria="1. a.txt exists"):
+        self.write(os.path.join(self.home, "jobs", "q", "plan.md"),
+                   u"job: q\n---\n## 접근\nx\n## 수용 기준\n%s\n## 검증 명령        (what passing is)\n"
+                   u"`%s` passes\n## 다른 레포 영향\n없음\n" % (criteria, command))
+
+    def rows(self):
+        return [r for r in oke.ledger_rows("q") if r["check"] == "check"]
+
+    def test_criteria_rev_changes_with_command_or_criteria(self):
+        self.plan("true")
+        a = oke.criteria_rev("q")
+        self.plan("true")
+        self.assertEqual(oke.criteria_rev("q"), a)
+        self.plan("false")
+        b = oke.criteria_rev("q")
+        self.plan("true", "1. other")
+        self.assertEqual(len({a, b, oke.criteria_rev("q")}), 3)
+        self.assertEqual(oke.plan_command("q"), "true")
+
+    def test_check_without_baseline_exits_2_and_writes_no_row(self):
+        self.plan("true")
+        self.assertEqual(self.cli("check", "q"), 2)
+        self.assertIn("oke baseline", self.err)
+        self.assertEqual(self.rows(), [])
+
+    def test_baseline_then_pass(self):
+        self.plan('test -f a.txt || { echo "FAILED old"; exit 1; }')
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        with open(os.path.join(self.home, "jobs", "q", "baseline.json")) as f:
+            base = json.load(f)
+        self.assertEqual((base["exit"], base["signatures"]), (1, ["FAILED old"]))
+        self.write(os.path.join(self.wt, "a.txt"), "a\n")
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        row = self.rows()[-1]
+        self.assertEqual(row["result"], "pass")
+        self.assertEqual(row["detail"].split()[0], oke.criteria_rev("q"))
+        self.assertEqual(row["commit"], self.git_out(self.wt, "rev-parse", "HEAD"))
+
+    def test_new_line_fails_old_line_does_not(self):
+        self.plan('echo "FAILED old"; test -f b.txt && echo "FAILED new"; exit 1')
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        self.write(os.path.join(self.wt, "b.txt"), "b\n")
+        self.assertEqual(self.cli("check", "q"), 1)
+        self.assertEqual(json.loads(self.out)["new"], ["FAILED new"])
+        self.assertEqual(self.rows()[-1]["result"], "fail")
+
+    def test_stale_baseline_refused(self):
+        self.plan("true")
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        self.plan("true && true")
+        self.assertEqual(self.cli("check", "q"), 2)
+        self.assertIn("oke baseline", self.err)
+
+    def test_rebaseline_keeps_history(self):
+        self.plan('echo "FAILED one"; exit 1')
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        self.plan('echo "FAILED two"; exit 1')
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        out = json.loads(self.out)
+        self.assertEqual((out["added"], out["removed"]), (1, 1))
+        self.assertEqual(len(os.listdir(os.path.join(self.home, "jobs", "q", "baseline.history"))), 1)
+
+    def test_ledger_add_cannot_forge_check(self):
+        self.assertEqual(self.cli("ledger", "add", "q", "--by", "w", "--commit", "abc", "--check", "check",
+                                  "--result", "pass"), 1)
+        self.assertEqual(self.rows(), [])
+
+    def test_no_worktree_records_tree(self):
+        state = oke.load_state()
+        state["jobs"]["q"]["worktree"] = None
+        oke.save_state(state)
+        self.plan("true")
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        self.assertEqual(self.rows()[-1]["commit"], "tree:" + oke.pending_tree(self.repo))
+
+    def git_out(self, cwd, *args):
+        return subprocess.check_output(["git", "-C", cwd] + list(args)).decode().strip()
 
 
 if __name__ == "__main__":
