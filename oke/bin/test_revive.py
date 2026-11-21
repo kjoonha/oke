@@ -574,6 +574,19 @@ class TestTick(ReviveBase):
         self.assertIn("pending", job)
         self.assertEqual(job["agents"][0]["todos"], [])
 
+    def test_a_wait_past_one_and_a_half_times_its_expect_is_overdue(self):
+        report = os.path.join(self.child_dir, "report.md")
+        self.write_file(report, "type: waiting\nseq: 2\non: sim\nexpect: 1h\n---\n")
+        agents = [AG(None, pane="w7:p1", session="s-o"), AG("fix-a-w1", pane="w1:p5", status="idle")]
+        old = time.time() - 80 * 60  # 1.33x: not yet
+        os.utime(report, (old, old))
+        self.assertIsNone(self.tick("w7:p1", agents, "--board")["board"][0]["jobs"][0]["agents"][0]["overdue"])
+        old = time.time() - 100 * 60
+        os.utime(report, (old, old))
+        self.assertEqual(self.tick("w7:p1", agents, "--board")["board"][0]["jobs"][0]["agents"][0]["overdue"], "1h")
+        self.assertEqual([oke.duration_seconds(t) for t in ("2h", "40m", "1h30m", "90s", "soon", "")],
+                         [7200, 2400, 5400, 90, None, None])
+
     def test_board_shows_todos_and_tick_names_the_folder(self):
         todos = [{"content": "write test", "status": "completed"}, {"content": "fix", "status": "in_progress"},
                  "junk", {"content": "docs"}]

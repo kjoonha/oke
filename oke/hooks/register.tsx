@@ -123,15 +123,19 @@ let asked: Set<string> | null = null
  * away, on their phone). The first look only learns what already waited. */
 async function notifyAsks($: any, tree: BoardRepo[]) {
   if (!tree.length) return  // a failed read, not "nothing waits": keep what was asked
-  const now = new Set(tree.flatMap(r => r.jobs)
+  const jobs = tree.flatMap(r => r.jobs)
+  const now = new Set(jobs
     .filter(j => j.pending && ASKS_USER.includes(j.pending))
     .map(j => `${j.job}:${j.pending}`))
+  // a wait past 1.5x its expected time: told once, nothing is stopped
+  for (const j of jobs) for (const n of j.agents) if (n.overdue) now.add(`${n.agent}:overdue:${n.overdue}`)
   const fresh = asked ? [...now].filter(k => !asked!.has(k)) : []
   asked = now
   for (const k of fresh) {
-    const [jobName, kind] = k.split(':') as [string, string]
+    const [jobName, kind, expect] = k.split(':') as [string, string, string?]
+    const text = kind === 'overdue' ? `waiting longer than expected (${expect})` : PENDING[kind] ?? kind
     try {
-      await $.ui.notify(`${jobName}: ${PENDING[kind] ?? kind}`, { title: 'OKe', key: `oke-${jobName}` })
+      await $.ui.notify(`${jobName}: ${text}`, { title: 'OKe', key: `oke-${jobName}` })
     } catch {
       // no channel, or the person turned notifications off
     }
@@ -1230,7 +1234,8 @@ export const register: Register = on => {
     const agentBlock = (n: BoardNode, name: string) => {
       const t = times[n.agent]
       const [mark, word, color] = STATUS[n.status] ?? ['·', n.status, undefined]
-      const extra = [n.report ? `report ${n.report}` : '', n.revives ? `revived ${n.revives}x` : ''].filter(Boolean)
+      const extra = [n.report ? `report ${n.report}` : '', n.overdue ? `over expected ${n.overdue}` : '',
+        n.revives ? `revived ${n.revives}x` : ''].filter(Boolean)
       const isOpen = open.includes(n.agent)
       const notes = NOTES.flatMap(([title, mark, label, noteColor]) =>
         section(n.board, title, 5).map(line => (

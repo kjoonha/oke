@@ -4,6 +4,8 @@ export type BoardNode = {
   status: string
   pane: string | null
   report: string | null
+  /** The `expect:` of a waiting report whose wait ran past 1.5x it; null otherwise. */
+  overdue?: string | null
   board: string
   revives: number
   /** US dollars the agent's session has cost, from its usage.json; null before its first turn. */

@@ -62,6 +62,7 @@ Before every turn ends, overwrite `report.md` in your folder:
 type: done | question | failed | waiting
 seq: <seq from your assignment>
 on: <what you wait for, when type is waiting>
+expect: <how long the wait should take, e.g. 2h or 40m; optional, with waiting>
 ---
 ## 요약
 ## 검증 출력     (required for done: the command and the end of its output)
@@ -75,5 +76,5 @@ The `## wiki` lines are how OKe learns which pages help: a page nobody reads goe
 - `done` only when the 검증 명령 passed. If it fails and you cannot fix it, report `failed` with the output.
 - Unclear requirement: report `question`. Do not guess what the user wants.
 - A check that fails only sometimes (flaky): do not rerun it until it passes, skip it or add a sleep. Report `question` with both outputs.
-- A command that runs longer than about 10 minutes (a simulation, a long build): start it in the background, write the report as `waiting` with `on:` naming the command, and end your turn. You are woken when it finishes; then continue. Without the `waiting` report the PM thinks you died.
+- A command that runs longer than about 10 minutes (a simulation, a long build): start it in the background, write the report as `waiting` with `on:` naming the command and `expect:` your estimate of its run time, and end your turn. A wait past 1.5 times `expect:` is shown to the user; nothing stops it. You are woken when it finishes; then continue. Without the `waiting` report the PM thinks you died.
 - If a person types an instruction into this pane, follow it and mention it in 요약.

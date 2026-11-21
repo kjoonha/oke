@@ -1621,6 +1621,30 @@ def whoami(state, pane):
     return None, agents
 
 
+def duration_seconds(text):
+    """`2h`, `30m`, `90s` or `1h30m` in seconds; None when it is none of these."""
+    m = re.match(r"^\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?\s*$", str(text or ""), re.I)
+    if not m or not any(m.groups()):
+        return None
+    h, mins, s = (int(g or 0) for g in m.groups())
+    return h * 3600 + mins * 60 + s
+
+
+OVERDUE_FACTOR = 1.5  # a wait past 1.5x its `expect:` is shown to the user; nothing is stopped
+
+
+def overdue(report_path, header):
+    """The `expect:` of a `waiting` report whose wait has run past OVERDUE_FACTOR times it."""
+    expect = duration_seconds((header or {}).get("expect"))
+    if (header or {}).get("type") != "waiting" or not expect:
+        return None
+    try:
+        waited = time.time() - os.path.getmtime(report_path)
+    except OSError:
+        return None
+    return header["expect"] if waited > OVERDUE_FACTOR * expect else None
+
+
 def board_node(role, name, key, record, agents):
     folder = agent_folder(role, name, key, record)
     a = live_agent(record, agents)
@@ -1640,6 +1664,7 @@ def board_node(role, name, key, record, agents):
     return {"agent": name, "role": role, "status": a.get("agent_status") if a else "dead",
             "pane": (a or {}).get("pane_id") or record.get("pane"),
             "report": (report or {}).get("type"), "board": board,
+            "overdue": overdue(os.path.join(folder, "report.md"), report) if report else None,
             "revives": record.get("revives", 0),
             "cost": cost if isinstance(cost, (int, float)) else None,
             "todos": [{"content": str(t.get("content", "")), "status": str(t.get("status", "pending"))}
@@ -1687,7 +1712,8 @@ def board_lines(tree):
 
     def agent(n, depth):
         out.append((depth, "%s %s: %s%s" % (n["role"], n["agent"], n["status"],
-                                            ", report " + n["report"] if n.get("report") else "")))
+                                            ", report " + n["report"] if n.get("report") else "")
+                                         + (", waiting past its expected %s" % n["overdue"] if n.get("overdue") else "")))
         for t in n.get("todos") or []:
             out.append((depth + 1, "%s %s" % (TODO_MARKS.get(t["status"], "o"), t["content"])))
 
