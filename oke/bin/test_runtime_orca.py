@@ -301,13 +301,21 @@ class TestOrcaRuntime(OrcaBase):
         self.rt.sent({"dispatch": "ctx_1", "handle": "term_1"}, "pm-toy", {"dispatchId": "ctx_2", "state": "ready"})
         self.assertEqual(runtime_orca.load_registry()["pm-toy"]["dispatch"], "ctx_5")
 
-    def test_a_follow_up_whose_terminal_cannot_be_read_still_moves_and_is_live(self):
+    def test_a_follow_up_whose_terminal_cannot_be_read_stays_for_a_look_but_is_live(self):
         self.register("pm-toy", "ctx_1", "term_1", kind="claude")
-        self.fake({"orchestration worker-show --dispatch ctx_2 --full": [ERR("orca_failed")],
-                   "orchestration worker-keep-open": [OK({})]})
+        self.fake({"orchestration worker-show --dispatch ctx_2 --full": [ERR("orca_failed")]})
         self.rt.sent(runtime_orca.load_registry()["pm-toy"], "pm-toy", {"dispatchId": "ctx_2", "state": "ready"})
         entry = runtime_orca.load_registry()["pm-toy"]
-        self.assertEqual((entry["dispatch"], entry["terminal"], entry["live"]), ("ctx_2", "term_1", "ctx_2"))
+        # the row stays (follow_up moves it with the real terminal); the live mark is kept
+        self.assertEqual((entry["dispatch"], entry.get("terminal"), entry["live"]), ("ctx_1", None, "ctx_2"))
+
+    def test_a_failed_keep_open_keeps_the_move_and_live_mark(self):
+        self.register("pm-toy", "ctx_1", "term_1", kind="claude")
+        self.fake({"orchestration worker-show --dispatch ctx_2 --full": [OK({"worker": {"agentTerminalHandle": "term_2"}})],
+                   "orchestration worker-keep-open": [ERR("herdr_unavailable")]})
+        self.rt.sent(runtime_orca.load_registry()["pm-toy"], "pm-toy", {"dispatchId": "ctx_2", "state": "ready"})
+        entry = runtime_orca.load_registry()["pm-toy"]
+        self.assertEqual((entry["dispatch"], entry["terminal"], entry["live"]), ("ctx_2", "term_2", "ctx_2"))
 
     def test_start_unknown_is_only_blocked_for_claude(self):
         self.register(kind="codex")

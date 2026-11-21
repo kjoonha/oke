@@ -348,6 +348,9 @@ class OrcaRuntime(object):
         old = entry["dispatch"]
         entry.setdefault("origin", old)
         entry.update(nxt)
+        if name:  # first: a failed keep-open below must not lose the move (or its live mark)
+            update_registry(lambda r: (r.get(name) or {}).get("dispatch") in (old, nxt["dispatch"])
+                            and r[name].update(origin=entry["origin"], **nxt))
         try:
             # plain run_orca: a status read must never rebind this session's Run (run-use
             # keeps only the Run it names); a fenced keep-open is caught below
@@ -355,9 +358,6 @@ class OrcaRuntime(object):
         except HerdrError as e:
             if e.code in FATAL:
                 raise  # else it settled and closed already: the next mail reopens it
-        if name:
-            update_registry(lambda r: (r.get(name) or {}).get("dispatch") in (old, nxt["dispatch"])
-                            and r[name].update(origin=entry["origin"], **nxt))
 
     def sent(self, entry, name, result):
         """After a mail: when it started a follow-up (a new `dispatchId`, in the same or a
@@ -369,18 +369,24 @@ class OrcaRuntime(object):
         nxt = result.get("dispatchId") if isinstance(result, dict) else None
         if not nxt or nxt == entry["dispatch"]:
             return
-        try:
-            full = run_orca(["orchestration", "worker-show", "--dispatch", nxt, "--full"])
-        except HerdrError:
-            full = None  # keep the terminal it had: a later look moves it
-        worker = (full.get("worker") if isinstance(full, dict) else None) or {}
+        ready = result.get("state") == "ready"
         try:  # the mail went in: nothing here may fail it (a retry would mail twice)
-            moved = {"dispatch": nxt, "terminal": worker.get("agentTerminalHandle") or entry.get("terminal")
-                     or entry["handle"], "seen": None}
-            if result.get("state") == "ready":
+            try:
+                full = run_orca(["orchestration", "worker-show", "--dispatch", nxt, "--full"])
+            except HerdrError:
+                full = None
+            worker = (full.get("worker") if isinstance(full, dict) else None) or {}
+            if not worker.get("agentTerminalHandle"):
+                # its terminal unknown: leave the row, a later look moves it (follow_up finds
+                # the new terminal); keep only the live mark, which that move carries over
+                if ready:
+                    mark_live(name, (entry["dispatch"], nxt), nxt)
+                return
+            moved = {"dispatch": nxt, "terminal": worker["agentTerminalHandle"], "seen": None}
+            if ready:
                 moved["live"] = nxt
             self.adopt(entry, name, moved)
-        except HerdrError:
+        except (HerdrError, OSError):
             pass  # an outage or a locked registry: a later look finds the follow-up
 
     def follow_up(self, show, entry, name=None):
