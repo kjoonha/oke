@@ -258,6 +258,27 @@ class TestOrcaRuntime(OrcaBase):
         self.rt.start("fix-a-w1", self.repo, [], "go", lambda: False, kind="codex")
         self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["kind"], "codex")
 
+    def test_a_worker_killed_before_the_first_look_is_gone(self):
+        # measured: worker-start returns only after the agent's first hook
+        self.fake({"orchestration worker-start": [OK(STARTED)],
+                   "orchestration worker-show --dispatch ctx_1": [OK(self.KILLED)],
+                   "orchestration worker-show --dispatch ctx_1 --full": [OK(self.DROPPED)]})
+        self.rt.start("fix-a-w1", self.repo, [], "go", lambda: False)
+        self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["live"], "ctx_1")
+        self.assertEqual(self.rt.agents(), [])
+
+    def test_a_held_registry_lock_does_not_break_a_look(self):
+        from unittest import mock
+        self.register(kind="claude")
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(WORKING)]})
+        locked = mock.patch.object(runtime_orca, "update_registry",
+                                   side_effect=oke.HerdrError("registry_locked", "locked"))
+        with locked:
+            self.assertEqual(self.rt.agent("fix-a-w1")["agent_status"], "working")
+        other = mock.patch.object(runtime_orca, "update_registry", side_effect=oke.HerdrError("boom", "x"))
+        with other, self.assertRaises(oke.HerdrError):
+            self.rt.agent("fix-a-w1")
+
     def test_a_live_or_settled_worker_needs_no_full_read(self):
         self.register(kind="claude", live="ctx_1")
         self.register("pm-toy", "ctx_2", "structworker_2", kind="claude", live="ctx_2")

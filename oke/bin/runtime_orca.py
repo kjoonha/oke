@@ -292,9 +292,13 @@ class OrcaRuntime(object):
         dispatch = entry["dispatch"]
         if isinstance(show, dict) and show.get("liveness") == "live" and entry.get("live") != dispatch:
             entry["live"] = dispatch  # once per dispatch: it started, so missing status means it died
-            if name:
-                update_registry(lambda r: (r.get(name) or {}).get("dispatch") == dispatch
-                                and r[name].update(live=dispatch))
+            try:
+                if name:
+                    update_registry(lambda r: (r.get(name) or {}).get("dispatch") == dispatch
+                                    and r[name].update(live=dispatch))
+            except HerdrError as e:
+                if e.code != "registry_locked":
+                    raise  # else best effort: the next look saves it
         # claude only: Orca records the agent process from claude's hooks (an entry from
         # before `kind` was stored may be codex: never read dead on absence)
         if isinstance(show, dict) and entry.get("kind") == "claude" and entry.get("live") == dispatch \
@@ -419,7 +423,9 @@ class OrcaRuntime(object):
                 show = None
             rebind(e, show)
             result = run_orca(args)
-        entry = {"dispatch": result["dispatchId"], "handle": result["terminal"], "cwd": place, "kind": kind}
+        entry = {"dispatch": result["dispatchId"], "handle": result["terminal"], "cwd": place, "kind": kind,
+                 # worker-start returns only after the agent's first hook (measured): it ran live
+                 "live": result["dispatchId"]}
         try:  # Orca titles every tab worker-task_<id>: say who it is (seen live)
             run_orca(["terminal", "rename", "--terminal", entry["handle"], "--title", title_of(name)])
         except HerdrError:
