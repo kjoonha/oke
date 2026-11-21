@@ -96,7 +96,14 @@ This is the same place a marketplace from GitHub lives. The plugin is read from 
 
 Start Claude Code in a herdr pane, an Orca terminal or a plain terminal, and run `/oke:start`. That session becomes the orchestrator. Tell it what you want done. If the session was cut off, run `/oke:resume`.
 
-In Orca, OKe runs only in a terminal tab, never in an Orca chat (a chat draws no mod pane), whatever your Orca default for new agent tabs (Chat or CLI): `/oke:start` in a chat refuses. OKe opens a terminal for each PM, worker and reviewer itself and starts claude there with OKe's own flags. Orca's Agent Orchestration setting must be on. Leave those terminals open: closing one means that agent is gone, and the orchestrator asks whether to resume it (in a new terminal, on the same session).
+In Orca:
+
+- OKe runs only in an Orca terminal tab. `/oke:start` in an Orca chat refuses ("OKe runs in an Orca terminal, not a chat"), whatever your Orca default for new agent tabs (Chat or CLI); a chat draws no mod pane. Orca's Agent Orchestration setting must be on.
+- OKe opens a terminal for each PM, worker and reviewer itself (tab title `OKe PM: <repo>`, `OKe worker 1: <job>`, ...) and starts claude there with OKe's own flags, as a supervised Orca worker.
+- Leave those terminals open. Closing one means that agent is gone: mail to it waits in its inbox and is never sent, and the orchestrator asks whether to resume it (resume, hold or cancel). A resume starts it in a new terminal on the same session. With autonomy `full` it is resumed once without asking (see `autonomy` below).
+- If Orca typed an agent's task but never saw claude start (`start_unknown`), reading that agent shows a note instead of its screen: revive it (`oke close <handle>`, then `oke revive <name> --reset`) or wait; it turns back to working once Orca sees its turn.
+
+`oke status` (and `oke board`) work from any terminal: they read the runtime the orchestrator chose. Outside that runtime's terminals (for example a plain shell while OKe runs in herdr or Orca) they only report; nothing can be started from there.
 
 Things you can say along the way:
 

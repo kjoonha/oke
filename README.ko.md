@@ -50,9 +50,16 @@ GitHub 으로 받은 marketplace 와 같은 자리다. 플러그인은 이 폴�
 
 ## 쓰기
 
-herdr pane 에서 Claude Code 를 켜고 `/oke:start`. 그 세션이 orchestrator 가 된다. 하고 싶은 일을 말하면 된다. 세션이 끊겼으면 `/oke:resume`.
+herdr pane, Orca 터미널 또는 일반 터미널에서 Claude Code 를 켜고 `/oke:start`. 그 세션이 orchestrator 가 된다. 하고 싶은 일을 말하면 된다. 세션이 끊겼으면 `/oke:resume`.
 
-Orca 에서는 터미널 탭에서만 돈다. Orca 의 새 agent 탭 기본값 (Chat / CLI) 과 상관없이 Orca chat 에서는 `/oke:start` 가 거절한다 (chat 에는 mod 화면이 없다). PM, worker, reviewer 의 터미널은 OKe 가 직접 열고 OKe 의 옵션으로 claude 를 띄운다. Orca 의 Agent Orchestration 설정이 켜져 있어야 한다. 그 터미널은 열어 두자: 닫으면 그 agent 는 gone 이고, orchestrator 가 다시 띄울지 (새 터미널, 같은 session) 묻는다.
+Orca 에서:
+
+- OKe 는 Orca 의 터미널 탭에서만 돈다. Orca chat 에서는 `/oke:start` 가 거절한다 ("OKe runs in an Orca terminal, not a chat"). Orca 의 새 agent 탭 기본값 (Chat / CLI) 과 상관없다. chat 에는 mod 화면이 없다. Orca 의 Agent Orchestration 설정이 켜져 있어야 한다.
+- PM, worker, reviewer 의 터미널은 OKe 가 직접 연다 (탭 이름 `OKe PM: <repo>`, `OKe worker 1: <job>` ...). 거기서 OKe 의 옵션으로 claude 를 감독되는 Orca worker 로 띄운다.
+- 그 터미널은 열어 두자. 닫으면 그 agent 는 gone 이다: 그 agent 에게 가는 메일은 보내지 않고 inbox 에서 기다리고, orchestrator 가 다시 띄울지 묻는다 (resume / hold / cancel). resume 은 새 터미널에서 같은 session 으로 띄운다. autonomy `full` 이면 한 번은 묻지 않고 다시 띄운다 (아래 `autonomy`).
+- Orca 가 task 를 타이핑했는데 claude 가 뜨는 것을 못 봤으면 (`start_unknown`), 그 agent 를 읽을 때 화면 대신 안내가 나온다: 다시 띄우거나 (`oke close <handle>`, 그다음 `oke revive <name> --reset`) 기다린다. Orca 가 turn 을 보면 다시 working 이 된다.
+
+`oke status` (와 `oke board`) 는 어느 터미널에서나 된다: orchestrator 가 고른 runtime 을 읽는다. 그 runtime 의 터미널 밖 (예: OKe 가 herdr 나 Orca 에서 도는데 일반 셸) 에서는 보여 주기만 하고 아무것도 띄우지 못한다.
 
 ## 설정: `~/.oke/config.json`
 
