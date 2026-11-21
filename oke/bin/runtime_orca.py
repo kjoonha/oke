@@ -348,7 +348,9 @@ class OrcaRuntime(object):
         old = entry["dispatch"]
         entry.setdefault("origin", old)
         entry.update(nxt)
-        if name:  # first: a failed keep-open below must not lose the move (or its live mark)
+        # first: a failed keep-open below must not lose the move (or its live mark); a keep-open
+        # lost to an outage is not retried: Orca may close the terminal later, the next mail reopens it
+        if name:
             update_registry(lambda r: (r.get(name) or {}).get("dispatch") in (old, nxt["dispatch"])
                             and r[name].update(origin=entry["origin"], **nxt))
         try:
