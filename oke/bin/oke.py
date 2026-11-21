@@ -2201,6 +2201,21 @@ def tell_after_waiters(state, job, news, phases=None):
                 queue_mail(pm["agent"], "oke", "Job %s: after-job %s %s" % (other, job, news))
 
 
+def quality_block(job, review_asg, target):
+    """Why the review or the check does not count for the current plan, or None. The review
+    must name the current criteria_rev; OKe's last `oke check` row for the reviewed commit
+    (or tree:<sha>) must be a pass under it."""
+    rev = criteria_rev(job)
+    if review_asg.get("criteria_rev") != rev:
+        return (u"the criteria or the 검증 명령 of %s changed since the review (or the review assignment "
+                u"names no criteria_rev): give the reviewer a new instruction with `criteria_rev: %s`"
+                % (job, rev))
+    rows = [r for r in ledger_rows(job) if r["check"] == "check" and r["commit"] == target]
+    if not rows or rows[-1]["result"] != "pass" or rows[-1]["detail"].split()[:1] != [rev]:
+        return "no passing `oke check` on %s with the current criteria: run `oke check %s`" % (target, job)
+    return None
+
+
 def merge_job(job):
     """Merge oke/<job> into the main checkout, only if the user approved the merge and
     the last review passed on the very commit the branch points at. A worker that
@@ -2257,6 +2272,9 @@ def merge_job(job):
     code, tip = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/%s^{commit}" % job)
     if code != 0 and review_asg.get("tree"):
         # no worktree: the review covered the uncommitted changes in the main checkout
+        why = quality_block(job, review_asg, "tree:" + review_asg["tree"])
+        if why:
+            return fail(why)
         return commit_direct(job, info, main, review[1], review_asg["tree"])
     reviewed = review_asg.get("commit")
     if code != 0:
@@ -2269,6 +2287,9 @@ def merge_job(job):
     if code != 0 or reviewed_full != tip:
         return fail("oke/%s is at %s but the review covered %s: give the reviewer a new instruction "
                     "with `commit: %s`, then merge" % (job, tip[:12], reviewed, tip))
+    why = quality_block(job, review_asg, reviewed_full)
+    if why:
+        return fail(why)
     if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
         return fail("a merge is already in progress in %s: leave it to the user" % main)
     code, dirty = main_changes(main)

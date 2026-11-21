@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """oke job merge: refuses to merge work the reviewer has not seen."""
+import io
 import json
 import os
 import subprocess
@@ -21,6 +22,16 @@ class MergeBase(SpawnBase):
         self.git(self.repo, "commit", "-q", "-m", "a")
         self.git(self.repo, "checkout", "-q", "-")
         self.jobs = os.path.join(self.home, "jobs", "fix-a")
+        self.set_plan("test -f a.txt")
+
+    def set_plan(self, command, criteria="1. a.txt exists"):
+        with io.open(os.path.join(self.jobs, "plan.md"), "w", encoding="utf-8") as f:
+            f.write(u"job: fix-a\n---\n## 수용 기준\n%s\n## 검증 명령\n`%s` passes\n" % (criteria, command))
+
+    def checked(self, target, result="pass"):
+        """The row `oke check` writes for a run on `target` under the current plan."""
+        oke.ledger_add("fix-a", "oke", target, "check", result,
+                       oke.criteria_rev("fix-a") + " new=0 resolved=0 log=-")
 
     def report(self, folder, seq, body=""):
         path = os.path.join(self.jobs, folder, "report.md")
@@ -30,14 +41,21 @@ class MergeBase(SpawnBase):
             f.write("type: done\nseq: %d\n---\n%s\n" % (seq, body))
         return path
 
-    def review(self, seq, verdict="pass", commit=None, report_seq=None):
-        """The reviewer's assignment (naming the commit to review) and its report."""
+    def review(self, seq, verdict="pass", commit=None, report_seq=None, checked=True):
+        """The reviewer's assignment (naming the commit to review) and its report, and
+        a passing `oke check` on that commit unless `checked` is False."""
         commit = commit or self.tip()
         path = os.path.join(self.jobs, "fix-a-rv", "assignment.md")
         if not os.path.isdir(os.path.dirname(path)):
             os.makedirs(os.path.dirname(path))
         with open(path, "w") as f:
-            f.write("agent: fix-a-rv\nrole: reviewer\njob: fix-a\nseq: %d\ncommit: %s\n---\n" % (seq, commit))
+            f.write("agent: fix-a-rv\nrole: reviewer\njob: fix-a\nseq: %d\ncommit: %s\ncriteria_rev: %s\n---\n"
+                    % (seq, commit, oke.criteria_rev("fix-a")))
+        if checked:
+            code = subprocess.call(["git", "-C", self.repo, "rev-parse", "-q", "--verify", commit + "^{commit}"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if code == 0:
+                self.checked(self.git_out(self.repo, "rev-parse", commit + "^{commit}").strip())
         return self.report("fix-a-rv", seq if report_seq is None else report_seq, "verdict: " + verdict)
 
     def tip(self):
@@ -147,6 +165,37 @@ class TestMergeGate(MergeBase):
         self.assertEqual(self.cli("job", "merge", "fix-a"), 2)
         self.assertIn("a.txt", self.out)
         self.assertEqual(self.git_out(self.repo, "status", "--short").strip(), "")
+
+
+class TestQualityGate(MergeBase):
+    def test_merge_refused_without_check_row(self):
+        self.order(self.report("fix-a-w1", 1), self.review(1, checked=False))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("oke check", self.err)
+        self.assertFalse(self.merged())
+
+    def test_merge_refused_when_plan_changed_after_review(self):
+        self.order(self.report("fix-a-w1", 1), self.review(1))
+        self.set_plan("test -f a.txt", "1. a.txt exists\n2. and more")
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("criteria_rev", self.err)
+        self.assertFalse(self.merged())
+
+    def test_merge_refused_when_last_check_failed(self):
+        self.order(self.report("fix-a-w1", 1), self.review(1))
+        self.checked(self.tip(), "fail")
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("oke check", self.err)
+
+    def test_merge_refused_when_check_ran_on_another_commit(self):
+        self.order(self.report("fix-a-w1", 1), self.review(1, checked=False))
+        self.checked(self.git_out(self.repo, "rev-parse", "HEAD").strip())
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+
+    def test_merge_allowed_with_current_review_and_check(self):
+        self.order(self.report("fix-a-w1", 1), self.review(1))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+        self.assertTrue(self.merged())
 
 
 class TestReviewedCommit(MergeBase):
@@ -303,9 +352,10 @@ class TestLedgerAndVerify(MergeBase):
         merged = self.merge()
         led = self.ledger()
         self.assertEqual(led["merge"], "unverified")
-        self.assertEqual([(r["check"], r["result"]) for r in led["rows"]], [("review", "pass"), ("merge", "ok")])
-        self.assertEqual(led["rows"][0]["commit"], self.tip())
-        self.assertEqual(led["rows"][1]["commit"], merged)
+        rows = [r for r in led["rows"] if r["check"] != "check"]
+        self.assertEqual([(r["check"], r["result"]) for r in rows], [("review", "pass"), ("merge", "ok")])
+        self.assertEqual(rows[0]["commit"], self.tip())
+        self.assertEqual(rows[1]["commit"], merged)
 
     def test_a_passing_check_verifies_the_merge(self):
         merged = self.merge()
@@ -435,7 +485,9 @@ class TestDirectCommit(MergeBase):
         self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
         self.tree = json.loads(self.out)["tree"]
         with open(path, "w") as f:  # it reviewed `git diff HEAD`: the tree, not a commit
-            f.write("agent: fix-a-rv\nrole: reviewer\njob: fix-a\nseq: 1\ncommit: no\ntree: %s\n---\n" % self.tree)
+            f.write("agent: fix-a-rv\nrole: reviewer\njob: fix-a\nseq: 1\ncommit: no\ntree: %s\ncriteria_rev: %s\n---\n"
+                    % (self.tree, oke.criteria_rev("fix-a")))
+        self.checked("tree:" + self.tree)
         self.order(self.report("fix-a-w1", 1), self.report("fix-a-rv", 1, "verdict: pass"))
         self.pre = self.git_out(self.repo, "rev-parse", "HEAD").strip()
 
@@ -464,6 +516,13 @@ class TestDirectCommit(MergeBase):
         self.write("toy/notes.txt", "the user's own\n")  # not staged: not the job's
         self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
         self.assertEqual(json.loads(self.out)["tree"], self.tree)
+
+    def test_direct_merge_needs_check_on_the_reviewed_tree(self):
+        self.checked("tree:" + self.tree, "fail")
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertIn("oke check", self.err)
+        self.checked("tree:" + self.tree)
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
 
     def test_a_tree_git_cannot_read_is_an_error_not_a_traceback(self):
         self.assertIsNone(oke.pending_tree(os.path.join(self.home, "no-such-repo")))
@@ -497,7 +556,9 @@ class TestDirectCommit(MergeBase):
         tree = self.git_out(self.repo, "rev-parse", "HEAD^{tree}").strip()
         path = os.path.join(self.jobs, "fix-a-rv", "assignment.md")
         with open(path, "w") as f:
-            f.write("agent: fix-a-rv\nrole: reviewer\njob: fix-a\nseq: 1\ncommit: no\ntree: %s\n---\n" % tree)
+            f.write("agent: fix-a-rv\nrole: reviewer\njob: fix-a\nseq: 1\ncommit: no\ntree: %s\ncriteria_rev: %s\n---\n"
+                    % (tree, oke.criteria_rev("fix-a")))
+        self.checked("tree:" + tree)
         self.order(self.report("fix-a-w1", 1), self.report("fix-a-rv", 1, "verdict: pass"))
         self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
         self.assertEqual(json.loads(self.out)["already_in"], True)
@@ -511,7 +572,9 @@ class TestDirectCommit(MergeBase):
         tree = self.git_out(self.repo, "rev-parse", "HEAD^{tree}").strip()
         path = os.path.join(self.jobs, "fix-a-rv", "assignment.md")
         with open(path, "w") as f:
-            f.write("agent: fix-a-rv\nrole: reviewer\njob: fix-a\nseq: 1\ncommit: no\ntree: %s\n---\n" % tree)
+            f.write("agent: fix-a-rv\nrole: reviewer\njob: fix-a\nseq: 1\ncommit: no\ntree: %s\ncriteria_rev: %s\n---\n"
+                    % (tree, oke.criteria_rev("fix-a")))
+        self.checked("tree:" + tree)
         self.order(self.report("fix-a-w1", 1), self.report("fix-a-rv", 1, "verdict: pass"))
         self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
         self.assertIn("untracked files d.txt", self.err)
