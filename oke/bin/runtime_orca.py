@@ -198,6 +198,24 @@ def status_of(show):
     return STATUS.get(show.get("activity"), "working")
 
 
+def agent_ended(dispatch):
+    """True when Orca holds no agent status at all for the dispatch: its hook stream
+    recorded the agent's process (pid + start time) and Orca's presence probe dropped the
+    row once that process was gone. Measured 2026-11-21 (Orca 1.4.261): taskkill of a
+    worker's claude mid-turn leaves the summary at ready/input_accepted/unverifiable for
+    good, and `--full` reads liveness reason missing_status with no evidence, 5 s after the
+    kill; a live worker reads live/agent_status, one silent for 30 min reads stale_status
+    (evidence kept), so neither matches. Not used for a settled task: a rest whose terminal
+    Orca closed reads the same, and mail reopens it."""
+    try:
+        p = run_orca(["orchestration", "worker-show", "--dispatch", dispatch, "--full"]).get("projection") or {}
+    except HerdrError as e:
+        if e.code in FATAL:
+            raise
+        return False  # unknown is never dead
+    return (p.get("liveness") or {}).get("reason") == "missing_status"         and (p.get("evidence") or {}).get("lastObservedAt") is None
+
+
 def transcript_of(dispatch, cwd):
     """The Claude Code transcript of the session that ran `dispatch`: Orca's preamble
     names the dispatch id in its first message. None when not found."""
@@ -257,6 +275,8 @@ class OrcaRuntime(object):
             if e.code in FATAL:
                 raise
             return None  # unknown dispatch: gone, so the watcher revives it
+        if show and show.get("stage") != "settled" and show.get("liveness") == "unverifiable"                 and status_of(show) and agent_ended(entry["dispatch"]):
+            show = dict(show, liveness="exited")
         nxt = self.follow_up(show, entry, name) if show and show.get("stage") == "settled" else None
         if not nxt:
             return show

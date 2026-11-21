@@ -53,3 +53,15 @@
 - `turn.complete` 는 정상 턴에서 `reason=answer`, 없는 모델로 낸 API 오류에서 `reason=error` 였다. 오류 종류 (`rate_limit` 등) 는 `turn.complete` 에 없다. 종류가 필요하면 `classic.StopFailure` 나 `model.complete` 에서 읽어야 한다 (미확인).
 - 턴이 끝난 뒤 `$.prompt.submit({ text })` 를 부르면 그 세션에서 새 턴이 바로 시작됐다.
 - `claude plugin validate`: mod 안에서 `$` 를 넘겨받는 함수는 파일 맨 위의 function 선언이어야 한다 (`const log = async ($) => ...` 를 hook 안에 두면 거부).
+
+# Orca: 작업 중에 죽은 agent (2026-11-21, Orca 1.4.261, terminal 모드)
+
+scratch toy repo 에서 `orchestration worker-start` 로 haiku worker 를 띄우고 (`ping -n 300` 을 Bash 로 돌리는 중), 그 claude 를 `taskkill //F //PID` 로 죽였다. 네 번 재현 (작업 중 셋, settled 하나).
+
+- `worker-show` 요약: 죽기 전 `ready / input_accepted / live / activity working`, 죽은 뒤 5 초 `ready / input_accepted / unverifiable`, activity 없음, `attention: ["unverifiable"]`. 시간이 지나도 그대로다. 터미널은 PowerShell 프롬프트만 남는다. OKe 의 `status_of` 는 이것을 working 으로 읽었다 (BUG-1).
+- `worker-show --full` 의 `projection`: 살아 있는 worker 는 `liveness {verdict live, source agent_status}`, `evidence.liveStatus fresh`. 죽은 worker 는 `liveness {verdict unverifiable, reason missing_status}`, `evidence {liveStatus unavailable, lastObservedAt null}`, `provider null`.
+- Orca 코드 (`orchestration-fleet-worker-projection.js`): `missing_status` 는 agent status 행이 아예 없을 때다. Claude hook 이 agent 프로세스 (pid + 시작 시각) 를 기록하고 Orca 의 presence probe 가 그 프로세스가 없으면 행을 지운다. hook 이 30 분 조용한 살아 있는 agent 는 행이 남아 `stale_status` (lastObservedAt 있음) 이므로 구분된다. 시간 기준이 아니다.
+- settled 된 worker 를 죽여도 `--full` 이 똑같이 `missing_status` 다. 하지만 Orca 가 터미널을 닫은 쉬는 PM 도 같은 모양이고 메일이 그것을 다시 연다. 그래서 settled 는 idle 로 두고, 메일이 거절되면 (NO_WORKER) gone 이 된다 (기존 처리).
+- 쓸 수 없는 신호: `terminal show` 의 `agentIdentity` 는 죽은 직후 사라졌다가 몇 분 뒤 탭이 그려지자 (`paneRuntimeId` -1 -> 1) 다시 `claude` 로 나왔다. `terminal list` 의 title 은 셸 경로로 바뀌지만 셸 title 에 기대는 것이라 쓰지 않는다. `diagnostics memory` 는 pty 별 셸 pid 를 주지만 OS 프로세스 트리를 직접 읽어야 해서 쓰지 않는다.
+- 결정: 정착 안 된 dispatch 의 요약이 `unverifiable` 이면 `--full` 을 한 번 더 읽고, `missing_status` + `lastObservedAt null` 이면 gone. 실제 Orca 에서 runtime_orca 로 확인: 죽인 셋은 gone, settled 하나는 idle, 살아 있는 worker 는 working.
+- 덤: claude 를 죽여도 그 Bash 자식 (`PING.EXE`) 은 고아로 계속 돈다.

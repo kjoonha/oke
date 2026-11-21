@@ -186,6 +186,41 @@ class TestOrcaRuntime(OrcaBase):
         asked = [c for c in self.calls() if c[:4] == ["orchestration", "worker-show", "--dispatch", "ctx_3"]]
         self.assertEqual(len(asked), 1)
 
+    def test_an_agent_killed_mid_turn_is_gone(self):
+        # measured live: taskkill of a worker's claude mid-turn; Orca keeps the summary
+        # ready/input_accepted/unverifiable and drops the agent's status row
+        self.register()
+        self.register("pm-toy", "ctx_2", "structworker_2")
+        self.register("pm-b", "ctx_3", "structworker_3")
+        killed = {"state": "ready", "stage": "input_accepted", "liveness": "unverifiable",
+                  "terminalState": "retained", "attention": ["unverifiable"]}
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(killed)],
+                   "orchestration worker-show --dispatch ctx_1 --full": [OK({"projection": {
+                       "liveness": {"verdict": "unverifiable", "reason": "missing_status"},
+                       "evidence": {"liveStatus": "unavailable", "lastObservedAt": None}}})],
+                   # a long silent turn: Orca keeps its last status, only stale
+                   "orchestration worker-show --dispatch ctx_2": [OK(killed)],
+                   "orchestration worker-show --dispatch ctx_2 --full": [OK({"projection": {
+                       "liveness": {"verdict": "unverifiable", "reason": "stale_status"},
+                       "evidence": {"liveStatus": "stale", "lastObservedAt": 1795232230069}}})],
+                   # the full read fails: unknown is never dead
+                   "orchestration worker-show --dispatch ctx_3": [OK(killed)],
+                   "orchestration worker-show --dispatch ctx_3 --full": [ERR("orca_failed")]})
+        self.assertEqual([(a["name"], a["agent_status"]) for a in self.rt.agents()],
+                         [("pm-b", "working"), ("pm-toy", "working")])
+        with self.assertRaises(oke.HerdrError) as c:
+            self.rt.agent("fix-a-w1")
+        self.assertEqual(c.exception.code, "agent_not_found")
+
+    def test_a_live_or_settled_worker_needs_no_full_read(self):
+        self.register()
+        self.register("pm-toy", "ctx_2", "structworker_2")
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(WORKING)],
+                   "orchestration worker-show --dispatch ctx_2": [OK(
+                       {"stage": "settled", "state": "succeeded", "liveness": "unverifiable"})]})
+        self.assertEqual([a["agent_status"] for a in self.rt.agents()], ["working", "idle"])
+        self.assertFalse([c for c in self.calls() if "--full" in c])
+
     def test_an_unknown_dispatch_is_gone(self):
         self.register()
         self.fake({"orchestration worker-show": [ERR("dispatch_not_found")]})
