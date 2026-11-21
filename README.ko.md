@@ -52,7 +52,7 @@ GitHub 으로 받은 marketplace 와 같은 자리다. 플러그인은 이 폴�
 
 herdr pane 에서 Claude Code 를 켜고 `/oke:start`. 그 세션이 orchestrator 가 된다. 하고 싶은 일을 말하면 된다. 세션이 끊겼으면 `/oke:resume`.
 
-Orca 에서는 터미널 탭에서만 돈다. Orca 의 새 agent 탭 기본값 (Chat / CLI) 과 상관없이 Orca chat 에서는 `/oke:start` 가 거절한다 (chat 에는 mod 화면이 없다). PM, worker, reviewer 의 터미널은 OKe 가 직접 열고 OKe 의 옵션으로 claude 를 띄운다. Orca 의 Agent Orchestration 설정이 켜져 있어야 한다.
+Orca 에서는 터미널 탭에서만 돈다. Orca 의 새 agent 탭 기본값 (Chat / CLI) 과 상관없이 Orca chat 에서는 `/oke:start` 가 거절한다 (chat 에는 mod 화면이 없다). PM, worker, reviewer 의 터미널은 OKe 가 직접 열고 OKe 의 옵션으로 claude 를 띄운다. Orca 의 Agent Orchestration 설정이 켜져 있어야 한다. 그 터미널은 열어 두자: 닫으면 그 agent 는 gone 이고, orchestrator 가 다시 띄울지 (새 터미널, 같은 session) 묻는다.
 
 ## 설정: `~/.oke/config.json`
 

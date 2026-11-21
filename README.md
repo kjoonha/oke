@@ -96,7 +96,7 @@ This is the same place a marketplace from GitHub lives. The plugin is read from 
 
 Start Claude Code in a herdr pane, an Orca terminal or a plain terminal, and run `/oke:start`. That session becomes the orchestrator. Tell it what you want done. If the session was cut off, run `/oke:resume`.
 
-In Orca, OKe runs only in a terminal tab, never in an Orca chat (a chat draws no mod pane), whatever your Orca default for new agent tabs (Chat or CLI): `/oke:start` in a chat refuses. OKe opens a terminal for each PM, worker and reviewer itself and starts claude there with OKe's own flags. Orca's Agent Orchestration setting must be on.
+In Orca, OKe runs only in a terminal tab, never in an Orca chat (a chat draws no mod pane), whatever your Orca default for new agent tabs (Chat or CLI): `/oke:start` in a chat refuses. OKe opens a terminal for each PM, worker and reviewer itself and starts claude there with OKe's own flags. Orca's Agent Orchestration setting must be on. Leave those terminals open: closing one means that agent is gone, and the orchestrator asks whether to resume it (in a new terminal, on the same session).
 
 Things you can say along the way:
 
