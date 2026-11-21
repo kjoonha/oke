@@ -2552,8 +2552,9 @@ VOLATILE = [  # in this order, each part becomes <v>
     (re.compile(r"\bduration(?:_ms)?\s*:?\s*\d+(?:\.\d+)?\b", re.I), "<v>"),
     (re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?"), "<v>"),
     (re.compile(r"[A-Za-z]:\\[^\s]*\\Temp\\[^\s]*", re.I), "<v>"),
-    (re.compile(r"/tmp/[\w.-]+"), "<v>"),
+    (re.compile(r"/tmp/\S*"), "<v>"),
     (re.compile(r"(?<=\(node:)\d+(?=\) (?:\[[^\]]+\] )?\w+:)"), "<v>"),
+    (re.compile(r"\b0x[0-9a-f]+\b", re.I), "<v>"),
     (re.compile(r"\b[0-9a-f]{8,}\b", re.I), "<v>"),
 ]
 # shortcut: macOS /var/folders temp paths are not normalized; port OMC's normalizer for a macOS user
@@ -2675,6 +2676,50 @@ def quality_target(job):
     return info, command, cwd, target
 
 
+def untracked_work(cwd):
+    code, out = git_out(cwd, "status", "--porcelain")
+    return [l[3:] for l in out.splitlines() if l.startswith("?? ") and not byproduct(l)] if code == 0 else []
+
+
+def base_point(info, cwd):
+    """The commit the job's work starts from: in a worktree, where its branch leaves the
+    base branch; without one, the main checkout's HEAD."""
+    main = native_path(os.path.dirname(info["repo"]))
+    code, head = git_out(main, "rev-parse", "HEAD")
+    if not (info.get("worktree") or {}).get("path"):
+        return head if code == 0 else None
+    code, point = git_out(cwd, "merge-base", "HEAD", info.get("base") or head)
+    return point if code == 0 else None
+
+
+def untouched(info, cwd, point):
+    code, dirty = git_out(cwd, "status", "--porcelain", "-uno")
+    if code != 0 or dirty:
+        return False
+    if (info.get("worktree") or {}).get("path"):
+        return not untracked_work(cwd) and git_out(cwd, "rev-parse", "HEAD")[1] == point
+    return True
+
+
+def run_at(cwd, commit, where, run):
+    """run(where) in a temporary detached checkout of `commit`, removed afterwards; None
+    when git cannot make it."""
+    def drop():
+        subprocess.call(["git", "-C", cwd, "worktree", "remove", "--force", where],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        shutil.rmtree(where, ignore_errors=True)
+        subprocess.call(["git", "-C", cwd, "worktree", "prune"],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    drop()  # a run that died left it behind
+    if subprocess.call(["git", "-C", cwd, "worktree", "add", "-q", "--detach", where, commit],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+        return None
+    try:
+        return run(where)
+    finally:
+        drop()
+
+
 def read_baseline(job):
     try:
         with io.open(os.path.join(oke_home(), "jobs", job, "baseline.json"), encoding="utf-8") as f:
@@ -2689,12 +2734,26 @@ def cmd_baseline(args):
         return found
     info, command, cwd, target = found
     job_dir = os.path.join(oke_home(), "jobs", args.job)
+    point = base_point(info, cwd)
+    if not point:
+        fail("cannot find the commit job %s started from in %s" % (args.job, cwd))
+        return 2
     lock = "check-" + args.job
     while not try_lock(lock):
         time.sleep(5)
     try:
         log = os.path.join(job_dir, "baseline.log")
-        now = run_signatures(command, cwd, log, lock)
+        if untouched(info, cwd, point):
+            now = run_signatures(command, cwd, log, lock)
+        else:
+            # the work has begun: run on the code it started from, so a re-run never
+            # takes the job's own failures for old ones
+            now = run_at(cwd, point, os.path.join(job_dir, "baseline-checkout"),
+                         lambda where: run_signatures(command, where, log, lock))
+            if now is None:
+                fail("cannot check out %s for the baseline of %s" % (point[:12], args.job))
+                return 2
+        target = point
         path = os.path.join(job_dir, "baseline.json")
         old = read_baseline(args.job)
         if old is not None:
@@ -2728,6 +2787,11 @@ def cmd_check(args):
     if isinstance(found, int):
         return found
     info, command, cwd, target = found
+    loose = untracked_work(cwd) if (info.get("worktree") or {}).get("path") else []
+    if loose:
+        fail("untracked files in %s: %s. `git add` the ones that are part of the work (the merge "
+             "carries only tracked files), delete the rest, then check again" % (cwd, ", ".join(loose)))
+        return 2
     rev = criteria_rev(args.job)
     base = read_baseline(args.job)
     if base is None:

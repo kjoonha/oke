@@ -41,6 +41,11 @@ class TestSignatures(unittest.TestCase):
         w2 = "Error C:\\Users\\me\\AppData\\Local\\Temp\\tmpzz99\\x.py\n"
         self.assertEqual(oke.signature_lines(w1), oke.signature_lines(w2))
 
+    def test_linux_pytest_tmp_and_object_addresses_normalized(self):
+        a = "FAILED t.py::x - assert <Obj at 0x7f3a2bc1d0e0> in /tmp/pytest-of-me/pytest-12/t0/f\n"
+        b = "FAILED t.py::x - assert <Obj at 0x7f00000a1b2c> in /tmp/pytest-of-me/pytest-13/t0/f\n"
+        self.assertEqual(oke.signature_lines(a), oke.signature_lines(b))
+
     def test_cap_and_long_lines(self):
         self.assertEqual(len(oke.signature_lines("\n".join("E%d boom" % i for i in range(300)))), 200)
         self.assertEqual(oke.signature_lines("x" * 501), [])
@@ -114,6 +119,8 @@ class TestBaselineCheck(SpawnBase):
             base = json.load(f)
         self.assertEqual((base["exit"], base["signatures"]), (1, ["FAILED old"]))
         self.write(os.path.join(self.wt, "a.txt"), "a\n")
+        self.git(self.wt, "add", "a.txt")
+        self.git(self.wt, "commit", "-q", "-m", "a")
         self.assertEqual(self.cli("check", "q"), 0, self.err)
         row = self.rows()[-1]
         self.assertEqual(row["result"], "pass")
@@ -125,6 +132,7 @@ class TestBaselineCheck(SpawnBase):
         self.assertEqual(self.cli("baseline", "q"), 0, self.err)
         self.assertEqual(self.cli("check", "q"), 0, self.err)
         self.write(os.path.join(self.wt, "b.txt"), "b\n")
+        self.git(self.wt, "add", "b.txt")
         self.assertEqual(self.cli("check", "q"), 1)
         self.assertEqual(json.loads(self.out)["new"], ["FAILED new"])
         self.assertEqual(self.rows()[-1]["result"], "fail")
@@ -156,6 +164,32 @@ class TestBaselineCheck(SpawnBase):
         target = self.rows()[-1]["commit"]
         self.assertTrue(target.startswith("tree:"), target)
         self.assertNotEqual(target[5:], self.git_out(self.wt, "rev-parse", "HEAD^{tree}"))
+
+    def test_untracked_work_file_refuses_the_check(self):
+        # a forgotten `git add`: the check would pass on a file the merge never carries
+        self.plan("true")
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        self.write(os.path.join(self.wt, "new_module.py"), "x = 1\n")
+        self.assertEqual(self.cli("check", "q"), 2)
+        self.assertIn("new_module.py", self.err)
+        self.assertEqual(self.rows(), [])
+        self.write(os.path.join(self.wt, "__pycache__", "m.pyc"), "x")  # a byproduct does not count
+        os.remove(os.path.join(self.wt, "new_module.py"))
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+
+    def test_rebaseline_after_work_still_sees_the_base_code(self):
+        # a worker cannot erase its own failure by recording a new baseline
+        self.plan('test -f broken.txt && { echo "FAILED broken"; exit 1; }; exit 0')
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        self.write(os.path.join(self.wt, "broken.txt"), "x\n")
+        self.git(self.wt, "add", "broken.txt")
+        self.git(self.wt, "commit", "-q", "-m", "work")
+        self.assertEqual(self.cli("check", "q"), 1)
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        with open(os.path.join(self.home, "jobs", "q", "baseline.json")) as f:
+            self.assertEqual(json.load(f)["exit"], 0)
+        self.assertEqual(self.cli("check", "q"), 1)
+        self.assertEqual(self.git_out(self.repo, "worktree", "list").count("\n"), 1)  # temp checkout removed
 
     def test_unrunnable_command_is_never_a_pass(self):
         self.plan("no-such-command-oke-xyz")

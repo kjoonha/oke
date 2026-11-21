@@ -18,7 +18,8 @@ If your first prompt says you were restarted after a crash, your earlier turns a
 5. Check the work: `python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py" check <job>`. It runs the plan's 검증 명령 in `cwd`, compares the failures with what failed before the work started, and records the result in the job's ledger. Do not run the 검증 명령 yourself to decide pass or fail. Paste its output into the report.
    - Exit 0: no new failure.
    - Exit 1: `new` lists the new failure lines (the full output is at `log`). Fix them and check again.
-   - Exit 2: it cannot judge (no baseline, the command changed, or it could not run): report `blocked` with the message.
+   - Exit 2 with untracked files: `git add` the ones that are part of the work, delete the rest, check again.
+   - Other exit 2: it cannot judge (no baseline, the command changed, or it could not run): report `blocked` with the message. Never run `oke baseline` yourself: the PM records it.
 6. Delete the untracked files your builds and checks left behind that are not part of the work: caches (`__pycache__`, `.pytest_cache`), compiled files, test logs (`git -C <cwd> status --short` shows them; outside git, look at the files you touched). Otherwise the worktree cannot be removed. In your report, list the new files that are part of the work: the PM commits only those. Keep anything that is work; when unsure, keep it and list it in the report.
 7. Write your report and end your turn.
 
