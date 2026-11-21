@@ -115,6 +115,7 @@ Optional. Only the values you set override the defaults.
   "interview_threshold": 0.2,
   "interview_max_rounds": 10,
   "lean_launch": true,
+  "effort": {"reviewer": "high"},
   "theme": "disco"
 }
 ```
@@ -126,6 +127,7 @@ Optional. Only the values you set override the defaults.
 - `autonomy`: `conservative` (the worker asks before every command), `balanced` (default) or `full`.
 - `agents`: the CLI that runs the worker and the reviewer: `claude`, `codex` or `opencode`. The orchestrator and PMs are always claude. Limits are listed under "안 되는 것" in `docs/superpowers/specs/2026-11-13-oke-slice4-design.md`.
 - `lean_launch`: start PMs, workers and reviewers without your plugins, hooks and MCP servers (`--setting-sources project,local --strict-mcp-config`). Only the herdr hooks and `env` from your `settings.json` are copied into `~/.oke/lean-settings.json`. This cuts the starting context from about 76k to 40k tokens. Each role also gets only its core tools (`--tools`, about 15k tokens at start). For each job, the PM turns on extra tools with the assignment header's `tools:`, `mcp:` and `plugins:` lines (`oke.py extras` lists them). Set it to `false` if the agents need all your personal settings.
+- `effort`: the effort level (`low` to `max`) per role (`pm`, `worker`, `reviewer`). A role left out keeps the `effortLevel` of your own settings. Claude agents only.
 - `interview_threshold`, `interview_max_rounds`: the interview the orchestrator runs when it takes a job. It scores the goal, constraints and success criteria from 0 to 1 and asks one question at a time about the vaguest part, until the ambiguity (`1 - 0.4 goal - 0.3 constraints - 0.3 criteria`) is at or below the threshold. It also stops when you pick "plan now" or it reaches the round limit.
 
 After installing, follow the checks in `docs/work-checklist.md`.

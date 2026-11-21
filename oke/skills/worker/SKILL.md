@@ -74,5 +74,6 @@ The `## wiki` lines are how OKe learns which pages help: a page nobody reads goe
 
 - `done` only when the 검증 명령 passed. If it fails and you cannot fix it, report `failed` with the output.
 - Unclear requirement: report `question`. Do not guess what the user wants.
+- A check that fails only sometimes (flaky): do not rerun it until it passes, skip it or add a sleep. Report `question` with both outputs.
 - A command that runs longer than about 10 minutes (a simulation, a long build): start it in the background, write the report as `waiting` with `on:` naming the command, and end your turn. You are woken when it finishes; then continue. Without the `waiting` report the PM thinks you died.
 - If a person types an instruction into this pane, follow it and mention it in 요약.

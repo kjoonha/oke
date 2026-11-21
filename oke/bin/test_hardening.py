@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 """Review findings 4-11 (timeouts, outages during a revive, phase gates, sender,
 reviewer verdict and permissions, orchestrator conflict) and the intake interview."""
+import io
 import json
 import os
+import shutil
+import tempfile
 import unittest
 
 import oke
@@ -190,6 +193,41 @@ class TestReviewerPermissions(unittest.TestCase):
         args = oke.launch_args("reviewer", config, "/h", "/p")
         denied = args[args.index("--disallowedTools") + 1:]
         self.assertIn("Bash(git *--output*)", denied)
+
+
+class TestClaudeDevFixes(unittest.TestCase):
+    config = {"models": {}, "wiki_path": "/w", "autonomy": "balanced", "lean_launch": False}
+
+    def denied(self, role, folder=None):
+        args = oke.launch_args(role, self.config, "/h", "/p", folder=folder)
+        return args[args.index("--disallowedTools") + 1:]
+
+    def test_every_child_gets_the_git_deny_rules(self):
+        for role in ("pm", "worker", "reviewer"):
+            self.assertIn("Bash(git push:*)", self.denied(role))
+            self.assertIn("Bash(git reset --hard:*)", self.denied(role))
+        for mode in ("conservative", "balanced"):
+            args = oke.launch_args("worker", dict(self.config, autonomy=mode), "/h", "/p")
+            self.assertIn("Bash(git push:*)", args[args.index("--disallowedTools") + 1:])
+
+    def test_a_worker_may_not_edit_the_files_the_merge_gate_trusts(self):
+        denied = self.denied("worker", "/h/jobs/j/j-w1")
+        for tail in ("/*.md", "/j-rv*/**", "/pm/**", "/*.tsv"):
+            self.assertIn(oke.edit_rules("/h/jobs/j", tail=tail)[0], denied)
+        self.assertFalse(any("j-w1" in r for r in denied))
+        self.assertFalse(any("/jobs/" in r for r in self.denied("reviewer", "/h/jobs/j/j-rv")))
+        # a job named with -rv must not deny its own worker folder
+        denied = self.denied("worker", "/h/jobs/fix-rv/fix-rv-w1")
+        self.assertIn(oke.edit_rules("/h/jobs/fix-rv", tail="/fix-rv-rv*/**")[0], denied)
+        self.assertFalse(any("/*-rv*" in r for r in denied))
+
+    def test_effort_per_role_is_the_effort_flag(self):
+        # the flag takes max too (effortLevel in settings does not), and works without lean
+        c = dict(self.config, effort={"reviewer": "max"})
+        r = oke.launch_args("reviewer", c, "/h", "/p")
+        self.assertEqual(r[r.index("--effort") + 1], "max")
+        self.assertNotIn("--effort", oke.launch_args("worker", c, "/h", "/p"))
+        self.assertNotIn("--effort", oke.launch_args("reviewer", dict(c, effort={"reviewer": "huge"}), "/h", "/p"))
 
 
 if __name__ == "__main__":
