@@ -641,6 +641,8 @@ class TestApiRetry(ReviveBase):
 
     def test_missing_error_kind_is_retried(self):
         self.assertEqual(self.retry("w1:p5", "--attempt", "1", "--error", "")["action"], "retry")
+        self.assertEqual(self.retry("w1:p5", "--attempt", "2", "--error", "unknown")["action"], "retry")
+        self.assertEqual(self.retry("w1:p5", "--attempt", "3", "--error", "")["action"], "give_up")
 
     def test_permanent_error_gives_up_with_a_failed_report(self):
         out = self.retry("w1:p5", "--attempt", "1", "--error", "authentication_failed")
@@ -648,6 +650,13 @@ class TestApiRetry(ReviveBase):
         header = oke.read_header(os.path.join(self.child_dir, "report.md"))
         self.assertEqual((header["type"], header["seq"]), ("failed", 2))
         self.assertFalse(os.path.exists(self.retry_file()))
+
+    def test_give_up_keeps_a_final_report_of_the_current_seq(self):
+        report = os.path.join(self.child_dir, "report.md")
+        seq = oke.read_header(os.path.join(self.child_dir, "assignment.md"))["seq"]
+        self.write_file(report, "type: done\nseq: %s\n---\nfinished\n" % seq)
+        self.assertEqual(self.retry("w1:p5", "--attempt", "1", "--error", "authentication_failed")["action"], "give_up")
+        self.assertEqual(oke.read_header(report)["type"], "done")
 
     def test_limit_comes_from_config(self):
         self.write_file(os.path.join(self.home, "config.json"), '{"api_retry_limit": 2}')

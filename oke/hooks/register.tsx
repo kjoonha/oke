@@ -60,10 +60,24 @@ async function oke($: any, args: string[]): Promise<any> {
   return null
 }
 
+/** Whether OKe runs on this machine at all: without its state.json no session is an
+ * OKe agent, and the many plain sessions need not run python. */
+async function okeRunning($: any): Promise<boolean> {
+  const base = home ?? (await $.env.get('OKE_HOME'))
+    ?? `${(await $.env.get('USERPROFILE')) || (await $.env.get('HOME'))}/.oke`
+  try {
+    // a Git Bash style /c/x home, as oke.py's native_path reads it
+    return await $.fs.exists(`${base}/state.json`.replace(/\\/g, '/').replace(/^\/([a-zA-Z])\//, '$1:/'))
+  } catch {
+    return true  // unsure: look as before
+  }
+}
+
 async function tick($: any) {
   if (!pane || ticking) return
   ticking = true
   try {
+    if (role === null && !(await okeRunning($))) return
     const args = ['tick', '--pane', pane, '--board']
     if (eventsOffset !== null) args.push('--events-from', String(eventsOffset))
     const out = await oke($, args)
@@ -150,6 +164,11 @@ async function compactAtBoundary($: any) {
 
 async function submitRetry($: any, kind: string) {
   pending = null
+  // the person is typing: their own turn replaces the retry (prompt.submit cancels it)
+  if ((await $.prompt.read()).text.trim()) {
+    $.ui.status('OKe: API error retry waits for your prompt')
+    return
+  }
   $.ui.status(undefined)
   await $.prompt.submit({
     text: `Your previous turn ended with an API error (${kind || 'unknown'}). Continue where you left off.`,
@@ -925,7 +944,7 @@ export const register: Register = on => {
     if (!pane) return r
     await $.command.register({ name: 'oke-board', description: 'Show the OKe agents and their boards' })
     // A process that died during a backoff leaves its marker; this one starts clean.
-    await clearRetry($)
+    if (await okeRunning($)) await clearRetry($)
     if (role === null) {
       // a hot reload cleared the module state: the guards hold again before the tick answers
       const was = await read($, who)
@@ -1081,6 +1100,7 @@ export const register: Register = on => {
   })
 
   on('classic.StopFailure', async ($, e: any, next) => {
+    if (e.agent_id) return next(e)  // a subagent's error is not the main turn's
     lastError = String(e.error ?? '')
     return next(e)
   })
@@ -1103,6 +1123,8 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e: any, next) => {
+    // a subagent's turn ends with its own turn.complete: retry and compaction are the main loop's
+    if (e.agentId !== undefined) return next(e)
     const r = await next(e)
     if (!pane) return r
     if (folder) {

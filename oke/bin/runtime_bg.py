@@ -13,7 +13,7 @@ import re
 import subprocess
 import time
 
-from runtime_herdr import HerdrError
+from runtime_herdr import HerdrError, write_private
 
 # terminal escapes in `claude logs`: CSI, OSC (ended by BEL or ST), and two-byte ones
 ANSI = re.compile(r"\x1b(\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(\x07|\x1b\\)|[@-Z\\-_])")
@@ -111,8 +111,7 @@ def with_bg_settings(argv, folder):
             settings = json.load(f)
         settings.update(BG_SETTINGS)
         path = os.path.join(folder, "bg-settings.json")
-        with io.open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(settings, ensure_ascii=False))
+        write_private(path, json.dumps(settings, ensure_ascii=False))
         argv[i] = path
         return argv
     return argv + ["--settings", json.dumps(BG_SETTINGS)]

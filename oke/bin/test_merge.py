@@ -241,6 +241,12 @@ class TestMainCheckout(MergeBase):
         self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
         self.assertTrue(self.merged())
 
+    def test_another_tools_state_folder_does_not_block(self):
+        self.write("toy/.omc/state.json", "{}")
+        self.order(self.report("fix-a-w1", 1), self.review(1))
+        self.assertEqual(self.cli("job", "merge", "fix-a"), 0, self.err)
+        self.assertTrue(self.merged())
+
     def test_a_merge_in_progress_is_left_alone(self):
         # the user's own merge, half resolved: OKe must neither merge nor abort it
         self.git(self.repo, "checkout", "-q", "-b", "side")

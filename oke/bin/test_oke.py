@@ -276,9 +276,15 @@ class TestState(Base):
         self.assertEqual(st["jobs"]["fix-a"]["phase"], "planning")
         self.assertEqual(st["jobs"]["fix-a"]["repo"], oke.repo_key(repo))
         self.assertTrue(os.path.isdir(os.path.join(self.home, "jobs", "fix-a")))
+        os.makedirs(os.path.join(self.home, "jobs", "fix-a", "fix-a-w1"))
+        for name in ("lean-settings.json", "report.md"):
+            with open(os.path.join(self.home, "jobs", "fix-a", "fix-a-w1", name), "w") as f:
+                f.write("{}")
         self.assertEqual(self.cli("job", "archive", "fix-a"), 0)
         self.assertNotIn("fix-a", oke.load_state()["jobs"])
         self.assertEqual(len(os.listdir(os.path.join(self.home, "archive"))), 1)
+        kept = os.path.join(self.home, "archive", os.listdir(os.path.join(self.home, "archive"))[0], "fix-a-w1")
+        self.assertEqual(os.listdir(kept), ["report.md"])  # the settings copy held the user's env
         self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "fix-a")))
 
     def test_job_new_refuses_a_name_whose_branch_exists(self):
@@ -628,6 +634,31 @@ class TestSpawn(SpawnBase):
         self.assertIn("dontAsk", r)
         self.assertNotIn("Write", r)
         self.assertNotIn("Bash", r)
+
+    def test_lean_launch_keeps_the_users_deny_rules_and_guard_hooks(self):
+        conf = os.path.join(self.home, "claude-conf")
+        os.makedirs(conf)
+        guard = {"matcher": "Bash", "hooks": [{"type": "command", "command": "node guard.mjs"}]}
+        with open(os.path.join(conf, "settings.json"), "w") as f:
+            json.dump({"hooks": {"PreToolUse": [guard]},
+                       "permissions": {"deny": ["Read(~/.ssh/**)"], "ask": ["Bash(npm publish:*)"]}}, f)
+        old = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = conf
+        try:
+            args = oke.launch_args("worker", oke.load_config(), self.home, "/p")
+        finally:
+            if old is None:
+                del os.environ["CLAUDE_CONFIG_DIR"]
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = old
+        path = args[args.index("--settings") + 1]
+        with open(path) as f:
+            lean = json.load(f)
+        self.assertEqual(lean["permissions"]["deny"], ["Read(~/.ssh/**)"])
+        self.assertNotIn("ask", lean["permissions"])
+        self.assertEqual(lean["hooks"]["PreToolUse"], [guard])
+        if os.name != "nt":
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
 
     def test_lean_launch_keeps_only_herdr_hooks_and_env(self):
         conf = os.path.join(self.home, "claude-conf")
