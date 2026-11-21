@@ -341,7 +341,7 @@ class OrcaRuntime(object):
             show = dict(show, liveness="exited")
         if isinstance(show, dict) and entry.get("kind") == "claude" and start_unknown(show) and status_of(show):
             show = dict(show, activity="waiting")  # blocked: the user decides, nothing reads it dead
-        nxt =self.follow_up(show, entry, name) if show and show.get("stage") == "settled" else None
+        nxt = self.follow_up(show, entry, name) if show and show.get("stage") == "settled" else None
         if not nxt:
             return show
         entry.setdefault("origin", entry["dispatch"])
