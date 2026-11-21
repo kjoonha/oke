@@ -31,10 +31,11 @@ class OrcaBase(SpawnBase):
     def setUp(self):
         SpawnBase.setUp(self)
         self.rt = runtime_orca.OrcaRuntime()
+        runtime_orca.ENDED_SEEN.clear()
 
-    def register(self, name="fix-a-w1", dispatch="ctx_1", handle="structworker_1"):
+    def register(self, name="fix-a-w1", dispatch="ctx_1", handle="structworker_1", **more):
         reg = runtime_orca.load_registry()
-        reg[name] = {"dispatch": dispatch, "handle": handle, "cwd": self.repo}
+        reg[name] = dict({"dispatch": dispatch, "handle": handle, "cwd": self.repo}, **more)
         runtime_orca.save_registry(reg)
 
 
@@ -186,35 +187,80 @@ class TestOrcaRuntime(OrcaBase):
         asked = [c for c in self.calls() if c[:4] == ["orchestration", "worker-show", "--dispatch", "ctx_3"]]
         self.assertEqual(len(asked), 1)
 
+    KILLED = {"state": "ready", "stage": "input_accepted", "liveness": "unverifiable",
+              "terminalState": "retained", "attention": ["unverifiable"]}
+    DROPPED = {"projection": {"liveness": {"verdict": "unverifiable", "reason": "missing_status"},
+                              "evidence": {"liveStatus": "unavailable", "lastObservedAt": None}}}
+
     def test_an_agent_killed_mid_turn_is_gone(self):
         # measured live: taskkill of a worker's claude mid-turn; Orca keeps the summary
         # ready/input_accepted/unverifiable and drops the agent's status row
-        self.register()
-        self.register("pm-toy", "ctx_2", "structworker_2")
-        self.register("pm-b", "ctx_3", "structworker_3")
-        killed = {"state": "ready", "stage": "input_accepted", "liveness": "unverifiable",
-                  "terminalState": "retained", "attention": ["unverifiable"]}
-        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(killed)],
-                   "orchestration worker-show --dispatch ctx_1 --full": [OK({"projection": {
-                       "liveness": {"verdict": "unverifiable", "reason": "missing_status"},
-                       "evidence": {"liveStatus": "unavailable", "lastObservedAt": None}}})],
-                   # a long silent turn: Orca keeps its last status, only stale
-                   "orchestration worker-show --dispatch ctx_2": [OK(killed)],
-                   "orchestration worker-show --dispatch ctx_2 --full": [OK({"projection": {
-                       "liveness": {"verdict": "unverifiable", "reason": "stale_status"},
-                       "evidence": {"liveStatus": "stale", "lastObservedAt": 1795232230069}}})],
-                   # the full read fails: unknown is never dead
-                   "orchestration worker-show --dispatch ctx_3": [OK(killed)],
-                   "orchestration worker-show --dispatch ctx_3 --full": [ERR("orca_failed")]})
-        self.assertEqual([(a["name"], a["agent_status"]) for a in self.rt.agents()],
-                         [("pm-b", "working"), ("pm-toy", "working")])
+        self.register(kind="claude")
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(WORKING), OK(self.KILLED)],
+                   "orchestration worker-show --dispatch ctx_1 --full": [OK(self.DROPPED)]})
+        self.assertEqual(self.rt.agent("fix-a-w1")["agent_status"], "working")
+        self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["live"], "ctx_1")  # kept for later sessions
         with self.assertRaises(oke.HerdrError) as c:
             self.rt.agent("fix-a-w1")
         self.assertEqual(c.exception.code, "agent_not_found")
+        self.assertEqual(self.rt.agents(), [])
+        # a dead dispatch is asked in full once per process
+        self.assertEqual(len([c for c in self.calls() if "--full" in c]), 1)
+
+    def test_a_starting_agent_is_not_gone(self):
+        # measured live: a follow-up reads terminal_readying, then authority_attached with
+        # missing_status and no evidence for ~15 s, before its first hook
+        self.register(kind="claude", live="ctx_0")  # its previous dispatch read live, not this one
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(dict(self.KILLED, stage="authority_attached"))],
+                   "orchestration worker-show --dispatch ctx_1 --full": [OK(self.DROPPED)]})
+        self.assertEqual(self.rt.agent("fix-a-w1")["agent_status"], "working")
+        self.assertFalse([c for c in self.calls() if "--full" in c])
+
+    def test_a_dead_agent_in_another_unsettled_stage_is_gone(self):
+        self.register(kind="claude", live="ctx_1")
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(dict(self.KILLED, stage="turn_ended"))],
+                   "orchestration worker-show --dispatch ctx_1 --full": [OK(self.DROPPED)]})
+        self.assertEqual(self.rt.agents(), [])
+
+    def test_only_a_dropped_status_row_is_death(self):
+        self.register("w-stale", "ctx_2", "s2", kind="claude", live="ctx_2")
+        self.register("w-seen", "ctx_3", "s3", kind="claude", live="ctx_3")
+        self.register("w-fail", "ctx_4", "s4", kind="claude", live="ctx_4")
+        self.register("w-odd", "ctx_5", "s5", kind="claude", live="ctx_5")
+        self.register("w-codex", "ctx_6", "s6", kind="codex", live="ctx_6")
+        self.register("w-old", "ctx_7", "s7", live="ctx_7")  # before `kind` was stored
+        self.fake({"orchestration worker-show": [OK(self.KILLED)],
+                   "orchestration worker-show --dispatch ctx_6 --full": [OK(self.DROPPED)],
+                   "orchestration worker-show --dispatch ctx_7 --full": [OK(self.DROPPED)],
+                   # a long silent turn: Orca keeps its last status, only stale
+                   "orchestration worker-show --dispatch ctx_2 --full": [OK({"projection": {
+                       "liveness": {"verdict": "unverifiable", "reason": "stale_status"},
+                       "evidence": {"liveStatus": "stale", "lastObservedAt": 1795232230069}}})],
+                   # missing_status with evidence (a provider session row only): not a dropped row
+                   "orchestration worker-show --dispatch ctx_3 --full": [OK({"projection": {
+                       "liveness": {"verdict": "unverifiable", "reason": "missing_status"},
+                       "evidence": {"liveStatus": "stale", "lastObservedAt": 1795232230069}}})],
+                   "orchestration worker-show --dispatch ctx_4 --full": [ERR("orca_failed")],
+                   "orchestration worker-show --dispatch ctx_5 --full": [OK({"projection": ["odd"]})]})
+        self.assertEqual(sorted(a["name"] for a in self.rt.agents() if a["agent_status"] == "working"),
+                         ["w-codex", "w-fail", "w-odd", "w-old", "w-seen", "w-stale"])
+        asked = sorted(c[3] for c in self.calls() if "--full" in c)
+        self.assertEqual(asked, ["ctx_2", "ctx_3", "ctx_4", "ctx_5"])  # never for codex or an old entry
+
+    def test_odd_full_results_are_not_death(self):
+        for result in (["x"], {"projection": {"liveness": "missing_status", "evidence": None}},
+                       {"projection": {"liveness": {"reason": "missing_status"}, "evidence": "none"}}):
+            self.fake({"orchestration worker-show --dispatch ctx_9 --full": [OK(result)]})
+            self.assertFalse(runtime_orca.agent_ended("ctx_9"))
+
+    def test_start_records_the_kind(self):
+        self.fake({"orchestration worker-start": [OK(STARTED)]})
+        self.rt.start("fix-a-w1", self.repo, [], "go", lambda: False, kind="codex")
+        self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["kind"], "codex")
 
     def test_a_live_or_settled_worker_needs_no_full_read(self):
-        self.register()
-        self.register("pm-toy", "ctx_2", "structworker_2")
+        self.register(kind="claude", live="ctx_1")
+        self.register("pm-toy", "ctx_2", "structworker_2", kind="claude", live="ctx_2")
         self.fake({"orchestration worker-show --dispatch ctx_1": [OK(WORKING)],
                    "orchestration worker-show --dispatch ctx_2": [OK(
                        {"stage": "settled", "state": "succeeded", "liveness": "unverifiable"})]})

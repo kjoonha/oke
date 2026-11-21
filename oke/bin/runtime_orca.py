@@ -198,22 +198,36 @@ def status_of(show):
     return STATUS.get(show.get("activity"), "working")
 
 
+# dispatches whose agent read ended in this process: a dead process never comes back, so
+# a dead entry costs one Orca call per look until it is revived, not two
+ENDED_SEEN = set()
+
+
 def agent_ended(dispatch):
-    """True when Orca holds no agent status at all for the dispatch: its hook stream
+    """True when Orca holds no agent status at all for the dispatch: its claude hooks
     recorded the agent's process (pid + start time) and Orca's presence probe dropped the
     row once that process was gone. Measured 2026-11-21 (Orca 1.4.261): taskkill of a
     worker's claude mid-turn leaves the summary at ready/input_accepted/unverifiable for
     good, and `--full` reads liveness reason missing_status with no evidence, 5 s after the
     kill; a live worker reads live/agent_status, one silent for 30 min reads stale_status
-    (evidence kept), so neither matches. Not used for a settled task: a rest whose terminal
-    Orca closed reads the same, and mail reopens it."""
+    (evidence kept), so neither matches. A starting agent reads missing_status too (a
+    follow-up for ~15 s, before its first hook): callers ask only after it read live."""
+    if dispatch in ENDED_SEEN:
+        return True
     try:
-        p = run_orca(["orchestration", "worker-show", "--dispatch", dispatch, "--full"]).get("projection") or {}
+        result = run_orca(["orchestration", "worker-show", "--dispatch", dispatch, "--full"])
     except HerdrError as e:
         if e.code in FATAL:
             raise
         return False  # unknown is never dead
-    return (p.get("liveness") or {}).get("reason") == "missing_status"         and (p.get("evidence") or {}).get("lastObservedAt") is None
+    p = result.get("projection") if isinstance(result, dict) else None
+    liveness = p.get("liveness") if isinstance(p, dict) else None
+    evidence = p.get("evidence") if isinstance(p, dict) else None
+    if isinstance(liveness, dict) and liveness.get("reason") == "missing_status" \
+            and isinstance(evidence, dict) and evidence.get("lastObservedAt") is None:
+        ENDED_SEEN.add(dispatch)
+        return True
+    return False
 
 
 def transcript_of(dispatch, cwd):
@@ -275,7 +289,17 @@ class OrcaRuntime(object):
             if e.code in FATAL:
                 raise
             return None  # unknown dispatch: gone, so the watcher revives it
-        if show and show.get("stage") != "settled" and show.get("liveness") == "unverifiable"                 and status_of(show) and agent_ended(entry["dispatch"]):
+        dispatch = entry["dispatch"]
+        if isinstance(show, dict) and show.get("liveness") == "live" and entry.get("live") != dispatch:
+            entry["live"] = dispatch  # once per dispatch: it started, so missing status means it died
+            if name:
+                update_registry(lambda r: (r.get(name) or {}).get("dispatch") == dispatch
+                                and r[name].update(live=dispatch))
+        # claude only: Orca records the agent process from claude's hooks (an entry from
+        # before `kind` was stored may be codex: never read dead on absence)
+        if isinstance(show, dict) and entry.get("kind") == "claude" and entry.get("live") == dispatch \
+                and show.get("stage") != "settled" and show.get("liveness") == "unverifiable" \
+                and status_of(show) and agent_ended(dispatch):
             show = dict(show, liveness="exited")
         nxt = self.follow_up(show, entry, name) if show and show.get("stage") == "settled" else None
         if not nxt:
@@ -395,7 +419,7 @@ class OrcaRuntime(object):
                 show = None
             rebind(e, show)
             result = run_orca(args)
-        entry = {"dispatch": result["dispatchId"], "handle": result["terminal"], "cwd": place}
+        entry = {"dispatch": result["dispatchId"], "handle": result["terminal"], "cwd": place, "kind": kind}
         try:  # Orca titles every tab worker-task_<id>: say who it is (seen live)
             run_orca(["terminal", "rename", "--terminal", entry["handle"], "--title", title_of(name)])
         except HerdrError:
