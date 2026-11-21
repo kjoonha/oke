@@ -919,9 +919,15 @@ def check_once(agent, report, seq):
         return "cancelled"  # the user gave the job up: nothing about its children matters
     header = read_header(report)
     current = header is not None and header.get("seq") == seq
+    look = None
+    if not (current and header.get("type") in FINAL_TYPES):
+        look = look_at(agent, os.path.dirname(report))
+        if look and look.startswith("blocked"):
+            # a report written while we looked beats the blocked read before it (check_pm_once)
+            header = read_header(report)
+            current = header is not None and header.get("seq") == seq
     if current and header.get("type") in FINAL_TYPES:
         return "report %s" % header["type"]
-    look = look_at(agent, os.path.dirname(report))
     if look != "idle":
         return look
     if current and header.get("type") == "waiting":
@@ -1036,13 +1042,22 @@ def check_pm_once(agent, key):
     state = load_state()
     if not open_jobs(state, key) and not inbox_messages(agent):
         return "no_jobs"  # nothing left to watch or deliver (a cancel goes in first)
-    jobs = []
-    for name in sorted(open_jobs(state, key)):
-        seq, header, mtime = pm_job_report(name)
-        if seq is not None:
-            jobs.append((name, seq, header, mtime))
-    fresh = [j for j in jobs if j[2].get("seq") == j[1] and j[2].get("type") in FINAL_TYPES
-             and state["jobs"][j[0]].get("seen") != seen_mark(j[2])]
+    def reports():
+        jobs = []
+        for name in sorted(open_jobs(state, key)):
+            seq, header, mtime = pm_job_report(name)
+            if seq is not None:
+                jobs.append((name, seq, header, mtime))
+        return jobs, [j for j in jobs if j[2].get("seq") == j[1] and j[2].get("type") in FINAL_TYPES
+                      and state["jobs"][j[0]].get("seen") != seen_mark(j[2])]
+    jobs, fresh = reports()
+    look = None
+    if not fresh:
+        look = look_at(agent, pm_dir(key))
+        if look and look.startswith("blocked"):
+            # a report written while we looked beats the blocked read before it (an Orca PM
+            # slow to start reads blocked, then writes its report): read the reports again
+            jobs, fresh = reports()
     if fresh:
         name, seq, header, _ = min(fresh, key=lambda j: j[3] or 0)
         with locked():
@@ -1054,7 +1069,6 @@ def check_pm_once(agent, key):
             if header["type"] in ("done", "failed"):
                 end_peer_talk(name)  # the plan (or the job) is settled: nobody waits for answers now
         return "report %s %s" % (header["type"], name)
-    look = look_at(agent, pm_dir(key))
     if look != "idle":
         return look
     for name, seq, header, _ in jobs:

@@ -820,6 +820,19 @@ class TestWait(Base):
         self.assertEqual(out.splitlines()[0], "blocked")
         self.assertIn("Do you want to create r.md?", out)
 
+    def test_a_report_written_while_the_child_read_blocked_comes_first(self):
+        r = self.path("report.md")
+        original = oke.look_at
+
+        def blocked_then_report(*a, **kw):
+            self.report("type: done\nseq: 2\n---\n")
+            return "blocked\nOKe: a may have failed to start"
+        oke.look_at = blocked_then_report
+        try:
+            self.assertEqual(oke.check_once("a", r, 2), "report done")
+        finally:
+            oke.look_at = original
+
     def test_gone(self):
         self.fake({"agent get": [E("agent_not_found")]})
         self.assertEqual(oke.check_once("a", self.path("none.md"), 2), "gone")
