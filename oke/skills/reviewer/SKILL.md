@@ -20,7 +20,7 @@ If your first prompt says you were restarted after a crash, your earlier turns a
    `## 이전 지적` in 이번 지시 lists earlier findings with the worker's answers: check each one. Do not raise a fixed one again; one still open is a finding again, with the worker's answer weighed.
 3. Read the diff (`git diff <range>`) and the surrounding code it depends on. A direct job (no git) lists files instead of a range: read those files whole.
 4. Judge: does the change do what the plan says, is it correct on the edge cases, does it stay inside the planned scope, is risky new logic tested.
-5. Write `report.md` in your folder, then end your turn. Keep `board.md` in your folder (sections 지금, 한 일, 다음, 막힌 것, 결정, 결정 필요, 확인 필요, as the worker's) current from step 2 on. The board shows `## 지금` under your task in progress, so rewrite it each time you move to another task: how that task goes now, in one to three lines.
+5. Write `report.md` in your folder, then end your turn. Keep `board.md` in your folder (format under Board) current from step 2 on. The board shows `## 지금` under your task in progress, so rewrite it each time you move to another task: how that task goes now, in one to three lines.
 
 ## Report
 
@@ -49,4 +49,7 @@ updated: <ISO time>
 ## 한 일
 ## 다음
 ## 막힌 것
+## 결정
+## 결정 필요
+## 확인 필요
 ```
