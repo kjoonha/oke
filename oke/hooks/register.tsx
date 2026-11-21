@@ -878,6 +878,14 @@ export function paletteOf(name: string | null): Record<string, number> {
   return PAL[known(name)] ?? PALETTE
 }
 
+// a palette's '.' is the band's background: empty pixels take it, and so does the text beside them
+PAL.disco = { ...PALETTE, '.': 0x1e1433 }
+/** The band's background as a Box color, or undefined for the terminal's own. */
+export function bgOf(name: string | null): string | undefined {
+  const bg = paletteOf(name)['.']
+  return bg === undefined ? undefined : `#${bg.toString(16).padStart(6, '0')}`
+}
+
 function cells(pixels: string[], pal: Record<string, number>): string {
   const words = new Uint32Array(W * 4 * 3)
   for (let row = 0; row < 4; row++) {
@@ -1061,7 +1069,7 @@ export const register: Register = on => {
       : []
     const [word, color] = words[mood]
     return (
-      <Box flexDirection="row">
+      <Box flexDirection="row" backgroundColor={bgOf(theme)}>
         <Raster key="conductor" columns={W} rows={4} cells={frameCells(mood, frame)} />
         <Box flexDirection="column" marginLeft={1}>
           <Text bold color={color}>{word}</Text>
