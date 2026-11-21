@@ -91,10 +91,19 @@ Orca 재시작 (`taskkill //F //IM Orca.exe` 후 Explorer 로 시작; herdr 는 
 
 scratch 폴더 (`repo add --kind folder`), coordinator 터미널 하나, haiku worker 로 잰 것:
 
-- `terminal create --worktree path:<폴더> --command "claude ..."`: 명령은 터미널의 PowerShell 에 타이핑된다. Orca 의 PowerShell profile 이 `claude` 를 함수로 감싸 `--plugin-dir ...\orca-agent-view` (Orca 의 상태 hook) 를 붙인다 (프로세스 명령줄로 확인). `cmd /c` wrapper 로 띄우면 이 hook 이 빠진다. 그래서 OKe 는 Windows 에서 `--shell powershell.exe` 를 주고 `claude` 를 맨 단어로, 인자는 작은따옴표로 넘긴다.
+- `terminal create --worktree path:<폴더> --command "claude ..."`: 명령은 터미널의 셸에 타이핑되고, claude 에 `--plugin-dir ...\orca-agent-view` (Orca 의 상태 hook) 가 붙는다 (프로세스 명령줄로 확인). `cmd /c` wrapper 로 띄우면 이 hook 이 빠진다. 붙이는 주체는 아래 "리뷰 1 회차 뒤" 참고 (셸 함수가 아니라 Orca 가 시작 명령을 고친다).
 - 신뢰 안 된 폴더는 claude 의 trust 창이 뜬다. `terminal wait --for tui-idle` 이 그동안 `satisfied false, blockedReason agent-trust-workspace` 로 돌아오고, `terminal send --text ESC[B` 와 `--text CR` (Down, Enter) 뒤 다시 기다리면 `satisfied true`. OKe 는 herdr 처럼 `trusted()` 일 때만 답하고, 아니면 터미널을 닫고 실패를 알린다.
 - claude 가 뜨기 전의 `worker-start --terminal` 은 `agent_unconfigured` ("not running a recognized agent") 로 거절되고 아무것도 타이핑하지 않는다: 다시 시도해도 안전하다. `--model/--effort` 는 `--terminal` 과 함께 못 쓴다: 모델, effort, 권한, plugin, settings 는 claude 명령줄에 herdr 와 같은 `launch_args` 로 붙인다 (lean launch 포함, 명령줄로 확인).
 - 감독은 그대로다: preamble 과 TASK 가 터미널에 들어가고, `worker-show` 는 `ready/input_accepted/live/working` 에서 worker_done 뒤 `succeeded/settled/idle`, `--full` liveness `live / agent_status`. `--keep-open` 은 `keptOpen true`. 터미널이 열린 settled worker 에 메일을 보내면 같은 터미널의 follow-up (`delivery follow_up`).
 - 작업 중 claude 를 죽이면 이전과 같이 `--full` `missing_status` + `lastObservedAt null` (agent_ended 그대로 쓴다).
 - `worker-stop` 은 OKe 가 연 터미널에 아무것도 하지 않는다 ("The worker terminal is external; no terminal was closed", `stop_unknown`). `terminal close` 하면 dispatch 는 `failed / process_exited` (gone). 그래서 `close()` 는 터미널을 닫는다.
 - 터미널을 닫은 settled worker 에 메일을 보내면 Orca 가 새 터미널에서 다시 연다 (`delivery reopened`). 그런데 그 명령은 `claude --plugin-dir ...orca-agent-view --effort medium --resume <session>` 뿐이라 OKe 의 `--allowedTools`, `--settings`, `--plugin-dir` 가 빠졌다: 다시 연 worker 는 dontAsk 로 Bash 와 Edit 를 모두 거절당했다. 결정: claude 를 `--session-id <uuid>` 로 띄워 registry 에 session 과 명령줄을 저장하고, 터미널이 닫힌 (`terminal show` connected/writable false, 또는 handle stale) settled agent 에게 가는 메일은 OKe 가 직접 새 터미널에서 `<같은 명령줄> --resume <session>` 으로 띄우고 메일을 `worker-start --terminal` 로 준다. revive 도 이제 `--resume <session>` 이다 (transcript 경로를 spec 에 넣던 방식은 지웠다).
+
+리뷰 1 회차 뒤 측정 (같은 날):
+
+- Orca 의 상태 hook 은 셸 함수가 아니다. Orca 코드 (`claude-agent-view-launch.js`, main 번들의 같은 함수) 는 터미널의 시작 명령 문자열을 고쳐 claude 실행 파일 바로 뒤에 `--plugin-dir <ORCA_CLAUDE_AGENT_VIEW_PLUGIN_DIR>` 를 넣는다. claude 가 명령의 맨 앞 (POSIX 는 `K=V` 대입 뒤, PowerShell 은 `&` 뒤까지 허용) 일 때만이다. 셸 종류는 Windows `powershell`, 그 밖은 모두 `posix` 로 본다 (tcsh 구분 없음). 그 변수는 모든 Orca 터미널 환경에 있다 (측정). 그래서 OKe 는 그 plugin dir 을 직접 넘기고, Orca 가 고치지 않는 꼴로 명령을 만든다 (중복 없음: 프로세스 명령줄에 orca-agent-view 하나, liveness `live / agent_status` 확인).
+- `--shell` 은 macOS/Linux 에서 거절된다 (help: 로그인 셸로 띄운다). 그래서 POSIX 는 실행 줄을 파일에 쓰고 `sh <파일>` 을 타이핑한다 (tcsh 도 같다). Windows 는 `iex (Get-Content -Raw -Encoding UTF8 -LiteralPath <파일>)` (실행 정책 무관). 2.5k 자 줄을 PowerShell 에 그대로 타이핑하면 claude 가 뜨기까지 1 분이 넘어 `terminal wait` 가 `timeout` 으로 끝났다; 파일로 바꾼 뒤 trust 창 포함 12.7 초. Linux/mac 에서는 실물 확인 안 함.
+- 자식 터미널의 환경은 Orca 의 것이라 OKE_HOME 이 없다: 실행 줄이 OKE_HOME (없으면 ~/.oke 를 명시), 그 밖의 `OKE_*`, 호출자의 CLAUDE_CONFIG_DIR 를 넣는다 (자식 claude 의 `%OKE_HOME%` 로 확인).
+- `terminal show` 의 없는 handle: `terminal_handle_stale`. 닫힌 터미널: `connected false, writable false, orphaned true`. 이 둘만 "닫힘" 이다. 다른 오류에 다시 열면 같은 session 에 claude 가 둘이 될 수 있다.
+- fence: coordinator A 가 Run R 을 만들고 B 가 `run-use R` 하면, A 의 `worker-start` 는 fence 되지 않고 새 Run 을 만든다 (`runCreated true`). A 의 R 쪽 worker 로의 send 만 `consumer_fenced` (mutate 가 처리). 그래서 start 에는 fence 재시도가 필요 없다.
+- runtime_orca 로 다시 확인: 새 실행 꼴로 start, idle, 터미널을 닫은 뒤 메일로 OKe 가 다시 엶 (명령줄에 --resume, allowedTools, settings, plugin dir 둘).
