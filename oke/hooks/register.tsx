@@ -492,7 +492,14 @@ const PALETTE: Record<string, number> = {
   s: 0x7bd84f, l: 0xdcffc8, k: 0x1a1626, b: 0x4f9dff, B: 0xc8e4ff,
   a: 0xff8fc8, A: 0xffdcef, i: 0xffd84a, I: 0xfff3bf,
   o: 0xff8c2e, G: 0x4fbf55, P: 0xb38cff, t: 0xffe3b3, u: 0xe0bf8f,
+  // cast sprites: f leaf, j brown, q dark grey, x light grey
+  f: 0x5cc85c, j: 0x8a5a3c, q: 0x3a3a48, x: 0xd8d8e4,
 }
+/** Per-theme colors over PALETTE: the cast themes' role coats and color-scheme overrides. */
+const PAL: Record<string, Record<string, number>> = {}
+/** `a` mixed toward `b` by `t` (0..1), per RGB channel. */
+const mix = (a: number, b: number, t: number) =>
+  [16, 8, 0].reduce((n, s) => n | Math.round(((a >> s) & 255) * (1 - t) + ((b >> s) & 255) * t) << s, 0)
 /** `frame` with pixels set at [row, col, color]. */
 function put(frame: string[], dots: [number, number, string][]): string[] {
   const rows = frame.map(r => r.split(''))
@@ -618,6 +625,47 @@ function hopper(sprite: typeof SLIME, map: Record<string, string>, eye: string):
     stop: [stuck(rest!)],
   }
 }
+
+// cast: the generic builder. A sprite draws c (body), l (light) and s (shade) once; each role
+// repaints them with its coat. k are eyes (shut while sleeping), d other dark details.
+// Rows may stop before column 12: the rest is empty.
+type Sprite = {
+  a: string[]            // the pose; stop is this pose turned red
+  b?: string[]           // conduct's second frame; default: `a` bobbed down a row
+  conduct?: string[][]   // conduct's frames instead of a, b, a, b
+  sleep?: string[]       // rest's pose; default: `a` with its eyes turned to `lid`
+  lid?: string           // the color around the eyes; default c
+  wave?: string[][]      // wave's frames; default: a and b
+}
+const ROLES = ['orchestrator', 'pm', 'worker', 'reviewer']
+const COATS = [0xb9a6ff, 0x6aa0ff, 0x7ee8a6, 0xffa24d] // the disco role colors
+const SHOUT: [number, number, string][] = [[0, 10, 'n'], [1, 10, 'n'], [2, 10, 'n'], [4, 10, 'n']]
+/** `frame` with effect pixels set only where it is empty. */
+const fx = (frame: string[], dots: [number, number, string][]) => put(frame, dots.filter(([r, c]) => frame[r]?.[c] === '.'))
+function moods(s: Sprite): Record<Mood, string[][]> {
+  const pad = (f: string[]) => Array.from({ length: 8 }, (_, i) => (f[i] ?? '').padEnd(W, '.'))
+  const a = pad(s.a)
+  const b = pad(s.b ?? ['', ...s.a.slice(0, 7)])
+  const shut = pad(s.sleep ?? s.a.map(r => r.replace(/k/g, s.lid ?? 'c')))
+  return {
+    conduct: (s.conduct?.map(pad) ?? [a, b, a, b]).map((f, i) => fx(f, SPARKS[i % 4]!)),
+    rest: [fx(shut, [[2, 10, 'z']]), fx(shut, [[1, 10, 'z'], [0, 11, 'z']])],
+    wave: (s.wave?.map(pad) ?? [a, b]).map(f => fx(f, SHOUT)),
+    stop: [stuck(a)],
+  }
+}
+/** Registers theme `name`: sprite `s` once per role in that role's coat (with a light and a shade). */
+function cast(name: string, s: Sprite, coats = COATS, extra: Record<string, number> = {}) {
+  const m = moods(s)
+  const pal: Record<string, number> = { ...PALETTE, ...extra }
+  THEMES[name] = Object.fromEntries(ROLES.map((role, i) => {
+    const [c, l, sh] = ['QRST'[i]!, 'UVWX'[i]!, 'EFHJ'[i]!]
+    Object.assign(pal, { [c]: coats[i]!, [l]: mix(coats[i]!, 0xffffff, 0.55), [sh]: mix(coats[i]!, 0, 0.3) })
+    const map = { c, l, s: sh }
+    return [role, Object.fromEntries(Object.entries(m).map(([k, fs]) => [k, fs.map(f => paint(f, map))])) as Record<Mood, string[][]>]
+  }))
+  PAL[name] = pal
+}
 const THEMES: Record<string, Record<string, Record<Mood, string[][]>>> = {
   disco: { orchestrator: disco('c'), pm: disco('e'), worker: disco('g'), reviewer: disco('O') },
   slime: {
@@ -633,18 +681,209 @@ const THEMES: Record<string, Record<string, Record<Mood, string[][]>>> = {
     reviewer: hopper(SHROOM, { o: 'G' }, 't'),
   },
 }
-/** The band's frames for this session's theme and role. */
-export function framesOf(name: string | null, who: string | null): Record<Mood, string[][]> {
-  const set = THEMES[name ?? ''] ?? THEMES.disco!
-  return set[who ?? ''] ?? set.orchestrator!
+
+// puppy: floppy ears (s), wagging tail; curls up to sleep
+const DOG = [
+  '..ccccc...',
+  'scccccccs.',
+  'sckccckcs.',
+  'sacldlcas.',
+  's.ccccc.s.',
+  '..clllc.c.',
+  '..clllcc..',
+  '..cc.cc...',
+]
+const DOG_B = put(DOG, [[5, 8, '.'], [6, 8, 'c']])
+cast('cute-dog', {
+  a: DOG,
+  conduct: [DOG, DOG_B, put(DOG, [[2, 2, 'c'], [2, 6, 'c']]), put(DOG_B, [[4, 0, '.'], [3, 0, '.'], [0, 1, 's']])],
+  sleep: ['', '', '', '.cccc.....', 'sccccccc..', 'scssccccc.', 'dllccccccc', '..cllllcc.'],
+  wave: [put(DOG, [[4, 1, 'l'], [5, 1, 'c']]), put(DOG_B, [[4, 0, '.'], [3, 0, '.'], [0, 1, 's']])],
+}, [0xe8a85a, 0x9a6a44, 0xf0dcb0, 0x8a8fa0])
+
+// kitten: pointy ears, whiskers (w), swishing tail; curls up with its tail around it
+const CAT = [
+  '.c.....c..',
+  '.ca...ac..',
+  '.ccccccc..',
+  'wckccckcw.',
+  'wcccacccw.',
+  '..clllc..c',
+  '..clllc.c.',
+  '..cc.ccc..',
+]
+const CAT_B = put(CAT, [[5, 9, '.'], [5, 8, 'c'], [4, 9, 'c']])
+const KITTEN: Sprite = {
+  a: CAT,
+  conduct: [CAT, CAT_B, put(CAT, [[3, 2, 'c'], [3, 6, 'c']]), put(CAT_B, [[0, 7, '.'], [0, 8, 'c']])],
+  sleep: ['', '', '', '.c..c.....', 'cccccccc..', 'csccsccccc', 'ccaacccccc', 'sssssssc..'],
+  wave: [put(CAT, [[5, 1, 'c'], [4, 0, 'l']]), put(CAT_B, [[5, 1, 'c'], [4, 0, 'l']])],
+}
+cast('cute-cat', KITTEN, [0xf2a65a, 0x9ba7c0, 0xf4f0e8, 0xd9b98c])
+
+const GHOST: Sprite = {
+  a: ['...cccc', '..cccccc', '.cckcckcc', '.caccccac', '.cccccccc', '.cccccccc', '.cccccccc', '.cc.cc.cc'],
+  b: ['..cccc', '.cccccc', 'cckcckcc', 'caccccac', 'cccccccc', 'cccccccc', 'cccccccc', 'c.cc.cc.c'],
+}
+const ROBOT: Sprite = {
+  a: ['....i', '....x', '.cccccccc', 'xclkllklcx', 'xcllddllcx', '.cccccccc', '..cscsc', '..ss..ss'],
+  b: ['....m', '....x', '.cccccccc', 'xclkllklcx', 'xcllddllcx', '.cccccccc', 'x.cscsc.x', '..ss..ss'],
+  lid: 'l',
+}
+const FROG: Sprite = {
+  a: ['', '.cc...cc', 'cwkc.cwkc', 'ccccccccc', 'cacccccac', 'ccdddddcc', '.clllllc', 'cc.....cc'],
+  b: ['', '', '.cc...cc', 'cwkc.cwkc', 'ccccccccc', 'cacdddcac', 'cclllllcc', 'c.c...c.c'],
+  sleep: ['', '', '.cc...cc', 'cccc.cccc', 'ccccccccc', 'cacdddcac', 'cclllllcc', 'c.c...c.c'],
+}
+const PENGUIN: Sprite = {
+  a: ['...cccc', '..cccccc', '.ccwwwwcc', '.cwkwwkwc', '.cwwoowwc', 'ccwwwwwwcc', '.cwwwwwwc', '..oo..oo'],
+  b: ['', '...cccc', '..cccccc', '.ccwwwwcc', 'ccwkwwkwcc', 'c.cwoowc.c', '.cwwwwwwc', '..oo..oo'],
+  lid: 'w',
+}
+const BUNNY: Sprite = {
+  a: ['..ca..ac', '..ca..ac', '..cc..cc', '.cccccccc', '.cckcckcc', '.cacmmcac', '..cccccc', '..ll..ll'],
+  b: ['..ca', '..ca..accc', '..cc..cc', '.cccccccc', '.cckcckcc', '.cacmmcac', '..cccccc', '..ll..ll'],
+}
+const BEAR: Sprite = {
+  a: ['.cc....cc', '.csccccsc', '.cccccccc', '.cckcckcc', '.cclddlcc', '.acllllca', '.cccccccc', '.cc....cc'],
+}
+const DUCK: Sprite = {
+  a: ['...ccc', '..ccccc', '..ckccc', 'ooocccc', '...cccc..c', '..cccccccc', '..clllccc', '...ccccc'],
+  b: ['', '...ccc', '..ccccc', '..ckccc', 'ooocccc..c', '..ccclllcc', '..cccccc', '...ccccc'],
+}
+const OCTOPUS: Sprite = {
+  a: ['...cccc', '..cccccc', '.cccccccc', '.cckcckcc', '.caccccac', '.cccccccc', '.cc.cc.cc', 'c..c..c..c'],
+  b: ['', '...cccc', '..cccccc', '.cccccccc', '.cckcckcc', '.caccccac', 'cccccccccc', '.c..c..c'],
+}
+const ALIEN: Sprite = {
+  a: ['.l....l', '..c..c', '..cccc', '.cccccc', 'ckkcckkc', '.cccccc', '..cmmc', '...cc'],
+  b: ['l......l', '.c....c', '..cccc', '.cccccc', 'ckkcckkc', '.cccccc', '..cddc', '...cc'],
+}
+const CACTUS: Sprite = {
+  a: ['....pp', '...cccc', '..cccccc', 'c.ckcckc.c', 'ccaccccacc', '..cccccc', '.oooooooo', '..oooooo'],
+  b: ['....pp', '...cccc', 'c.cccccc.c', 'c.ckcckc.c', 'ccaccccacc', '..cccccc', '.oooooooo', '..oooooo'],
+}
+const JELLY: Sprite = {
+  a: ['...cccc', '..clcccc', '.cccccccc', '.cckcckcc', '.caccccac', '.c.c..c.c', '..c.cc.c', '.c..c..c'],
+  b: ['', '...cccc', '..clcccc', '.cccccccc', '.cckcckcc', '.caccccac', '..c.cc.c', '.c.c..c.c'],
+}
+const FOX: Sprite = {
+  a: ['c.......c', 'cc.....cc', 'ccccccccc', 'cckccckcc', 'wwwcdcwww', '.wwwwwww.c', '..ccccc.cc', '..c...c.cw'],
+  b: ['c.......c', 'cc.....cc', 'ccccccccc', 'cckccckcc', 'wwwcdcwww', '.wwwwwww', '..ccccc.cc', '..c...cccw'],
+}
+const PANDA: Sprite = {
+  a: ['.qq....qq', '.qwwwwwwq', '.wwwwwwww', '.wqkwwkqw', '.wwwddwww', '.cccccccc', '.qwwwwwwq', '..qq..qq'],
+  lid: 'q',
+}
+const HAMSTER: Sprite = {
+  a: ['', '..cc..cc', '.cccccccc', 'cckcccckcc', 'caclddlcac', 'cllllllllc', '.cllllllc', '..aa..aa'],
+  b: ['', '', '..cc..cc', '.cccccccc', 'cckcccckcc', 'aaclddlcaa', 'cllllllllc', '.caa..aac'],
+}
+const OWL_A = ['.c......c', '.cccccccc', '.cwwccwwc', '.cwkcckwc', '.cccooccc', '.cllllllc', '.cllllllc', 'jjojjjjojj']
+const OWL: Sprite = {
+  a: OWL_A,
+  b: put(OWL_A.map(r => r.padEnd(10, '.')), [[2, 0, 'c'], [3, 0, 'c'], [4, 0, 'c'], [2, 9, 'c'], [3, 9, 'c'], [4, 9, 'c']]),
+  sleep: OWL_A.map((r, i) => (i === 2 ? r.replace(/w/g, 'c') : i === 3 ? r.replace(/[wk]/g, 's') : r)),
+}
+const WHALE: Sprite = {
+  a: ['..e.e', '...e', '..ccccc..c', '.ccccccccc', 'cckccccccc', 'calllllcc', '.llllllc', ''],
+  b: ['...e', '..e.e', '..ccccc', '.cccccccc', 'cckccccccc', 'calllllccc', '.llllllc.c', ''],
+}
+const DINO: Sprite = {
+  a: ['.....cccc', '.....ckccc', '.....ccccc', 'c...cccc', 'cc.ccccl', '.cccllll', '..cccccc', '..cc..cc'],
+  b: ['.....cccc', '.....ckccc', '.....ccddd', 'c...cccc', 'cc.cccc.l', '.cccllll', '..cccccc', '..c..cc'],
+}
+const STAR: Sprite = {
+  a: ['....cc', '....cc', 'cccccccccc', '.cckcckcc', '..caccac', '..cccccc', '.ccc..ccc', '.cc....cc'],
+  b: ['....cc', 'w...cc...w', '.cccccccc', '.cckcckcc', '..caccac', '..cccccc', '.ccc..ccc', 'cc......cc'],
+}
+const HEART: Sprite = {
+  a: ['.ccc..ccc', 'cwcccccccc', 'cccccccccc', 'cckcccckcc', '.cacddcac', '..cccccc', '...cccc', '....cc'],
+  b: ['', '..cc..cc', '.cwcccccc', '.cckcckcc', '.cacddcac', '..cccccc', '...cccc', '....cc'],
+}
+const COFFEE: Sprite = {
+  a: ['...x.x', '..x.x', '.cjjjjjc', '.ckccckcc', '.cacdcac.c', '.cccccccc', '..ccccc', '.xxxxxxxx'],
+  b: ['..x.x', '...x.x', '.cjjjjjc', '.ckccckcc', '.cacdcac.c', '.cccccccc', '..ccccc', '.xxxxxxxx'],
+}
+const ONIGIRI: Sprite = {
+  a: ['....ww', '...wwww', '..wwwwww', '..wkwwkw', '.wawwwwaw', 'wwwwddwwww', 'wwccccccww', '.wccccccw'],
+  lid: 'w',
+}
+const AXOLOTL: Sprite = {
+  a: ['.s......s', 's.cccccc.s', 'sccccccccs', 'scckcckccs', '.cacddcac', '..cccccc', '..cllllc', '..c.cc.c'],
+  b: ['s........s', '.scccccccs', 'sccccccccs', '.cckcckcc', 'scacddcacs', '..cccccc', '..cllllc', '.c..cc..c'],
+}
+const BEE: Sprite = {
+  a: ['..d....d', '...d..d', 'ww.cccc.ww', 'wwckcckcww', '..cccccc', '..qqqqqq', '..cccccc', '....qq'],
+  b: ['..d....d', 'ww.d..d.ww', 'ww.cccc.ww', '..ckcckc', '..cccccc', '..qqqqqq', '..cccccc', '....qq'],
+}
+const SNAIL: Sprite = {
+  a: ['.k.k', '.t.t.cccc', '.t.tccsscc', '.tttcsccsc', '.tttcscscc', '.tttccsscc', 'tttttttttt', ''],
+  b: ['', '.k.k.cccc', '.t.tccsscc', '.tttcsccsc', '.tttcscscc', '.tttccsscc', 'tttttttttt', ''],
+  lid: 't',
+}
+const CHICK: Sprite = {
+  a: ['....cc', '...cccc', '..cccccc', '.cckcckcc', '.cacoocac', '.lccccccl', '..cccccc', '...o..o'],
+  b: ['....cc', '...cccc', '..cccccc', 'lcckcckccl', '.cacoocac', '.cccccccc', '..cccccc', '...o..o'],
+}
+const SAKURA: Sprite = {
+  a: ['....cc', '.cc.cc.cc', '.cciiiicc', '..ikiiki', '.ccimmicc', '.cc.cc.cc', '....ff', '..fffff'],
+  b: ['', '....cc', '.cc.cc.cc', '.cciiiicc', '..ikiiki', '.ccimmicc', '.cc.ff.cc', '..fffff'],
+  lid: 'i',
 }
 
-function cells(pixels: string[]): string {
+for (const [name, s] of [
+  ['ghost', GHOST], ['robot', ROBOT], ['frog', FROG], ['penguin', PENGUIN], ['bunny', BUNNY], ['bear', BEAR],
+  ['duck', DUCK], ['octopus', OCTOPUS], ['alien', ALIEN], ['cactus', CACTUS], ['jellyfish', JELLY], ['fox', FOX],
+  ['panda', PANDA], ['hamster', HAMSTER], ['owl', OWL], ['whale', WHALE], ['dino', DINO], ['star', STAR],
+  ['pixel-heart', HEART], ['coffee', COFFEE], ['onigiri', ONIGIRI], ['axolotl', AXOLOTL], ['bee', BEE],
+  ['snail', SNAIL], ['chick', CHICK], ['sakura', SAKURA],
+] as [string, Sprite][]) cast(name, s)
+// palette variants of the sprites above
+cast('pastel', BUNNY, [0xffc8dd, 0xbde0fe, 0xcaffbf, 0xfdffb6])
+cast('candy', HEART, [0xff8fc8, 0xff5c8a, 0xffc2e2, 0xc86bff])
+cast('ocean', WHALE, [0x2a6fdb, 0x2ec4b6, 0x5ab0ff, 0x7ef0c8])
+cast('autumn', FOX, [0xd9534f, 0xf08a24, 0xc9a227, 0xa0703c])
+cast('midnight', OWL, [0x5b5fc7, 0x3d7ea6, 0x7a5ba6, 0x9aa5c8])
+
+// famous color schemes: role coats from the scheme's accents; k/d (eyes, details) its background,
+// w its foreground, a its pink or red, o its orange, i its yellow
+const scheme = (bg: number, fg: number, a: number, o: number, i: number) => ({ k: bg, d: bg, w: fg, a, m: a, p: a, o, i })
+cast('tokyo-night', JELLY, [0xbb9af7, 0x7aa2f7, 0x9ece6a, 0xff9e64], scheme(0x1a1b26, 0xc0caf5, 0xf7768e, 0xff9e64, 0xe0af68))
+cast('catppuccin', KITTEN, [0xcba6f7, 0x89b4fa, 0xa6e3a1, 0xfab387], scheme(0x11111b, 0xcdd6f4, 0xf5c2e7, 0xfab387, 0xf9e2af))
+cast('github', ROBOT, [0xbc8cff, 0x58a6ff, 0x3fb950, 0xf0883e], { ...scheme(0x0d1117, 0xe6edf3, 0xff7b72, 0xffa657, 0xd29922), x: 0x8b949e, m: 0xff7b72 })
+cast('dracula', GHOST, [0xbd93f9, 0x8be9fd, 0x50fa7b, 0xffb86c], scheme(0x282a36, 0xf8f8f2, 0xff79c6, 0xffb86c, 0xf1fa8c))
+cast('nord', PENGUIN, [0xb48ead, 0x81a1c1, 0xa3be8c, 0xd08770], scheme(0x2e3440, 0xeceff4, 0xbf616a, 0xd08770, 0xebcb8b))
+cast('gruvbox', BEAR, [0xd3869b, 0x83a598, 0xb8bb26, 0xfe8019], scheme(0x282828, 0xebdbb2, 0xfb4934, 0xfe8019, 0xfabd2f))
+cast('solarized', STAR, [0x6c71c4, 0x268bd2, 0x859900, 0xcb4b16], scheme(0x002b36, 0xfdf6e3, 0xd33682, 0xcb4b16, 0xb58900))
+cast('one-dark', ALIEN, [0xc678dd, 0x61afef, 0x98c379, 0xd19a66], scheme(0x282c34, 0xabb2bf, 0xe06c75, 0xd19a66, 0xe5c07b))
+cast('monokai', FROG, [0xae81ff, 0x66d9ef, 0xa6e22e, 0xfd971f], scheme(0x272822, 0xf8f8f2, 0xf92672, 0xfd971f, 0xe6db74))
+cast('rose-pine', BUNNY, [0xc4a7e7, 0x9ccfd8, 0xebbcba, 0xf6c177], scheme(0x191724, 0xe0def4, 0xeb6f92, 0xebbcba, 0xf6c177))
+cast('everforest', CACTUS, [0xd699b6, 0x7fbbb3, 0xa7c080, 0xe69875], scheme(0x2d353b, 0xd3c6aa, 0xe67e80, 0xe69875, 0xdbbc7f))
+cast('kanagawa', WHALE, [0x957fb8, 0x7e9cd8, 0x98bb6c, 0xffa066], { ...scheme(0x1f1f28, 0xdcd7ba, 0xd27e99, 0xffa066, 0xe6c384), e: 0x7fb4ca })
+cast('ayu', FOX, [0xd2a6ff, 0x59c2ff, 0xaad94c, 0xff8f40], scheme(0x0b0e14, 0xbfbdb6, 0xf07178, 0xff8f40, 0xe6b450))
+cast('material', OWL, [0xc792ea, 0x82aaff, 0xc3e88d, 0xf78c6c], { ...scheme(0x263238, 0xeeffff, 0xf07178, 0xffcb6b, 0xffcb6b), j: 0x546e7a })
+cast('synthwave-84', HEART, [0xff7edb, 0x36f9f6, 0x72f1b8, 0xfede5d], scheme(0x262335, 0xffffff, 0xfe4450, 0xf97e72, 0xfede5d))
+
+/** Every theme name `theme` in config.json takes. */
+export const THEME_NAMES = Object.keys(THEMES)
+const known = (name: string | null) => (name && Object.hasOwn(THEMES, name) ? name : 'disco')
+/** The band's frames for this session's theme and role. */
+export function framesOf(name: string | null, who: string | null): Record<Mood, string[][]> {
+  const set = THEMES[known(name)]!
+  return set[who ?? ''] ?? set.orchestrator!
+}
+/** The colors of the theme's pixel letters. */
+export function paletteOf(name: string | null): Record<string, number> {
+  return PAL[known(name)] ?? PALETTE
+}
+
+function cells(pixels: string[], pal: Record<string, number>): string {
   const words = new Uint32Array(W * 4 * 3)
   for (let row = 0; row < 4; row++) {
     for (let col = 0; col < W; col++) {
-      const top = PALETTE[pixels[row * 2]?.[col] ?? '.']
-      const bottom = PALETTE[pixels[row * 2 + 1]?.[col] ?? '.']
+      const top = pal[pixels[row * 2]?.[col] ?? '.']
+      const bottom = pal[pixels[row * 2 + 1]?.[col] ?? '.']
       const at = (row * W + col) * 3
       if (top === undefined && bottom === undefined) words.set([0x20, DEFAULT, DEFAULT], at)
       else if (top === undefined) words.set([0x2584, bottom ?? DEFAULT, DEFAULT], at) // ▄
@@ -656,7 +895,7 @@ function cells(pixels: string[]): string {
 
 function frameCells(m: Mood, i: number): string {
   const list = framesOf(theme, role)[m]
-  return cells(list[Math.floor(i) % list.length] ?? [])
+  return cells(list[Math.floor(i) % list.length] ?? [], paletteOf(theme))
 }
 
 /** The band's mood from the board, or for a worker or reviewer from its own turn. */
