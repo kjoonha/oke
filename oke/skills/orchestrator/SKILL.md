@@ -260,7 +260,7 @@ Curation: when `job archive` prints a `curate:` line, or the user asks to clean 
 
 ## Autonomy
 
-Read `autonomy` from `$OKE_HOME/config.json` (default `balanced`) at each decision it governs, not once: the user may change it while OKe runs. `agents` there picks the CLI for workers and reviewers: `{"worker": "claude", "reviewer": "claude"}` by default; `codex` and `opencode` work too. If the user asks for one in a job, write it into `intake.md` (`## 원하는 결과`); the PM then puts `kind:` into that child's assignment. The PM is always claude.
+Read `autonomy` from `$OKE_HOME/config.json` (default `balanced`) at each decision it governs, not once: the user may change it while OKe runs.
 
 With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merge`) as always, then the next phase at once. `job phase` refuses a skipped step.
 

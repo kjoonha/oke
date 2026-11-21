@@ -728,6 +728,14 @@ class TestClaimAfterRevive(ReviveBase):
         self.assertEqual(self.argv_of("pane", "close"), [["pane", "close", "w1:p5"]])
 
 
+class TestRememberSession(ReviveBase):
+    def test_a_changed_session_id_is_recorded_for_the_next_revive(self):
+        oke._sessions.clear()
+        self.fake({"agent get": [AGENT("working", name="fix-a-w1", pane="w1:p5", session="s-new")]})
+        self.assertIsNone(oke.look_at("fix-a-w1", self.child_dir))
+        self.assertEqual(self.child()["session"], "s-new")
+
+
 class TestStaleRetryMarker(ReviveBase):
     def test_an_old_marker_no_longer_holds_the_wait(self):
         marker = os.path.join(self.child_dir, "api-retry.json")

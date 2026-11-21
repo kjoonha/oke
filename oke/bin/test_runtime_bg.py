@@ -87,10 +87,6 @@ class TestBgRuntime(BgBase):
         self.assertEqual(runtime_bg.without_bypass(["--permission-mode", "dontAsk"]),
                          ["--permission-mode", "dontAsk"])
 
-    def test_start_refuses_other_kinds(self):
-        with self.assertRaises(oke.HerdrError):
-            self.rt.start("x", self.repo, [], "go", lambda: False, kind="codex")
-
     def test_close_stops_then_removes(self):
         self.fake({"stop": [{"stderr": "not running", "exit": 1}], "rm": [OUT("")]})
         self.rt.close("a0")
@@ -137,7 +133,7 @@ class TestSpawnInBg(BgBase):
         os.environ["OKE_RUNTIME"] = "bg"
         self.job("fix-a", "working")
         a = self.assignment("fix-a-w1", "worker", "fix-a")
-        prompt = oke.first_prompt("claude", "worker", a.replace("\\", "/"))
+        prompt = oke.FIRST_PROMPT.format(role="worker", path=a.replace("\\", "/"))
         self.fake({"agents --json": [OUT("[]"), OUT("[]"), OUT(json.dumps(ROWS))],
                    prompt: [OUT("started")]})
         self.assertEqual(self.cli("spawn", a), 0, self.err)

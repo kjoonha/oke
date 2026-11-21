@@ -79,15 +79,6 @@ orchestrator 에게 지시: `~/oke-toy 저장소에 sub(a, b) 함수와 unittest
 - [ ] `~/.oke/inbox/<agent>/read/` 에 배달된 메시지가 남아 있다 (수신함 배달은 `oke wait` 가 한다. mod 가 없어도 된다)
 - [ ] 한 job 의 "보류" 를 고르면 그 job 은 다시 묻지 않고, 다른 job 은 계속 묻는다
 
-## 7-1. codex / opencode 하위 agent (조각 4, 해당 CLI 가 있을 때만)
-
-`~/.oke/config.json` 에 `{"agents": {"worker": "codex", "reviewer": "codex"}}` 를 넣고 job 하나를 준다 (opencode 도 같은 방식).
-
-- [ ] worker pane 에 codex 가 뜨고, 업데이트 제안이나 신뢰 창이 나와도 OKe 가 넘긴다 (모르는 창이면 spawn 이 화면과 함께 실패한다)
-- [ ] worker 가 skill 파일을 읽고 보고서를 쓴다. PM 이 그 보고서를 받는다
-- [ ] codex reviewer 는 저장소를 고치지 못한다 (자기 폴더에만 쓴다)
-- [ ] 안 되면 config 에서 `agents` 를 지우면 claude 로 돌아간다
-
 ## 8. 정리
 
 - [ ] 연습이 끝나면 `rm -rf ~/oke-toy ~/.oke/archive ~/.oke/wiki/oke-toy`

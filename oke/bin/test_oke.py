@@ -530,6 +530,12 @@ class TestSpawn(SpawnBase):
         self.assertEqual(prompt[2], "fix-a-w1")
         self.assertIn("oke:worker", prompt[3])
         self.assertIn(a.replace("\\", "/"), prompt[3])
+        start = self.argv_of("agent", "start")[0]
+        self.assertEqual(start[start.index("--kind") + 1], "claude")
+
+    def test_a_report_with_a_byte_order_mark_is_read(self):
+        path = self.write("r/report.md", u"﻿type: done\nseq: 1\n---\n")
+        self.assertEqual(oke.read_header(path), {"type": "done", "seq": 1})
 
     def test_spawn_pm_records_in_state(self):
         a = self.assignment("pm-toy", "pm")

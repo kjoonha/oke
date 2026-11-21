@@ -67,7 +67,6 @@ def load_config():
         "autonomy": "balanced",
         "wiki_path": os.path.join(home, "wiki"),
         "models": {"pm": "opus", "worker": "opus", "reviewer": "opus"},
-        "agents": {"worker": "claude", "reviewer": "claude"},  # which CLI runs each role
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
         "max_review_rounds": 10,  # a job's reviews stop there and the PM asks the user; null: no limit
         "merge_ignore_untracked": [".omc/"],  # other tools' untracked folders never block a merge
@@ -82,15 +81,12 @@ def load_config():
         user = {}
     if isinstance(user, dict):
         models = user.pop("models", None)
-        agents = user.pop("agents", None)
         effort = user.pop("effort", None)
         config.update(user)
         if isinstance(effort, dict):
             config["effort"] = effort
         if isinstance(models, dict):
             config["models"].update(models)
-        if isinstance(agents, dict):
-            config["agents"].update(agents)
     config["wiki_path"] = os.path.abspath(native_path(os.path.expanduser(config["wiki_path"])))
     return config
 
@@ -345,17 +341,6 @@ def list_agents():
 AGENT_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 FIRST_PROMPT = ("Use the oke:{role} skill. Your assignment file is {path}. "
                 "Read it first, then follow it.")
-KINDS = ("claude", "codex", "opencode")
-
-
-def first_prompt(kind, role, path):
-    if kind == "claude":
-        return FIRST_PROMPT.format(role=role, path=path)
-    # Other CLIs do not load Claude Code plugins: point them at the skill file itself.
-    plugin = plugin_root().replace("\\", "/")
-    return ("Read the OKe {role} instructions in {plugin}/skills/{role}/SKILL.md and follow them. "
-            "Where they say ${{CLAUDE_PLUGIN_ROOT}}, use {plugin}. Your assignment file is {path}. "
-            "Read it first.").format(role=role, plugin=plugin, path=path)
 
 
 def folder_cost(folder):
@@ -382,34 +367,13 @@ def bank_usage(folder):
         pass  # the cost just reads lower
 
 
-def agent_command(kind, role, config, home, plugin_dir, folder, resume=None):
-    """herdr's --kind and the CLI arguments for one worker or reviewer."""
+def agent_command(role, config, home, plugin_dir, folder, resume=None):
+    """The claude arguments for one worker or reviewer."""
     bank_usage(folder)
     if runtime().name == "orca":
         config = dict(config, lean_launch=False)  # Orca starts the agent: no flags reach it
-    if kind == "claude":
-        header = read_header(os.path.join(folder, "assignment.md")) if folder else None
-        return kind, launch_args(role, config, home, plugin_dir, resume, folder, header)
-    conservative = config.get("autonomy") == "conservative"
-    if kind == "codex":
-        # Hooks off: codex asks about untrusted hooks at a moment herdr cannot see,
-        # and a prompt typed into that question can pick "Trust all" (seen live).
-        args = ["-c", "features.hooks=false"] + (["resume", resume] if resume else [])
-        if role == "reviewer":
-            # Reads anywhere, writes only its own OKe folder: the sandbox enforces it.
-            args += ["-C", folder, "-s", "workspace-write", "-a", "never"]
-        elif conservative:
-            args += ["-s", "workspace-write", "-a", "on-request",
-                     "--add-dir", home, "--add-dir", config["wiki_path"]]
-        else:
-            args += ["--dangerously-bypass-approvals-and-sandbox"]
-        return kind, args
-    # opencode has no read-only mode: a reviewer stays read-only by its instructions,
-    # and the PM checks `git status` after the review (pm skill).
-    args = ["--session", resume] if resume else []
-    if not (conservative and role == "worker"):
-        args += ["--auto"]
-    return kind, args
+    header = read_header(os.path.join(folder, "assignment.md")) if folder else None
+    return launch_args(role, config, home, plugin_dir, resume, folder, header)
 REVIEWER_TOOLS = ["Read", "Grep", "Glob", "Skill", "Bash(git diff:*)", "Bash(git log:*)",
                   "Bash(git show:*)", "Bash(git status:*)"]
 # shortcut: relies on `*` matching anywhere in a Bash rule (not probed live, see
@@ -846,11 +810,6 @@ def cmd_spawn(args):
     if role not in ("pm", "worker", "reviewer"):
         return fail("bad role %r" % role)
     config = load_config()
-    kind = str(header.get("kind") or "").strip().lower() or ("claude" if role == "pm" else config["agents"].get(role, "claude"))
-    if kind not in KINDS:
-        return fail("unknown agent kind %r: use one of %s" % (kind, ", ".join(KINDS)))
-    if role == "pm" and kind != "claude":
-        return fail("a PM must be claude: it needs the OKe mod, hooks and AskUserQuestion")
 
     state = load_state()
     known_keys = set(state["repos"]) | set(j.get("repo") for j in state["jobs"].values())
@@ -887,7 +846,7 @@ def cmd_spawn(args):
     if not pane:
         pane = runtime().split(args.split_from, cwd)
 
-    record = {"agent": agent, "pane": pane, "session": None, "kind": kind,
+    record = {"agent": agent, "pane": pane, "session": None,
               "seq": header["seq"], "role": role, "job": header.get("job")}
 
     def save_record():
@@ -925,15 +884,14 @@ def cmd_spawn(args):
             return False
         return True
 
-    kind, cli_args = agent_command(kind, role, config, oke_home(), plugin_root(),
-                                   os.path.dirname(path), args.resume)
+    cli_args = agent_command(role, config, oke_home(), plugin_root(), os.path.dirname(path), args.resume)
     try:
-        prompt = first_prompt(kind, role, path)
+        prompt = FIRST_PROMPT.format(role=role, path=path)
         held = held_jobs(state, key) if role == "pm" else []
         if held:  # a fresh PM never saw the hold notices of an earlier one
             prompt += (" The user put these jobs on hold: %s. Do not work on them until a message "
                        "says one is back." % ", ".join(held))
-        info = runtime().start(agent, pane, cli_args, prompt, trusted_folder, save_record, kind)
+        info = runtime().start(agent, pane, cli_args, prompt, trusted_folder, save_record)
     except DialogError as e:
         # The record stays (the user may answer the dialog); a revive closes the old
         # pane only when it knows this terminal.
@@ -994,8 +952,8 @@ _sessions = {}
 
 
 def remember_session(agent, info):
-    """codex gets its session id only after the first turn: record it when herdr
-    shows it, so a revive resumes that session."""
+    """Record a child's session id when the runtime shows a new one (it can appear only
+    after spawn, or change), so a revive resumes the session it really has."""
     session = session_of(info)
     if not session or _sessions.get(agent) == session:
         return
@@ -1502,20 +1460,14 @@ def start_again(state, role, key, name, record, folder, with_mail):
     else:
         path = os.path.join(folder, "assignment.md").replace("\\", "/")
         cwd = native_path((read_header(path) or {}).get("cwd") or oke_home())
-        kind = record.get("kind") or "claude"
         agent = name
-        if kind == "claude":
-            prompt = REVIVE_PROMPT.format(role=role, path=path)
-        else:
-            prompt = "You were restarted after a crash. " + first_prompt(kind, role, path) + \
-                " Also re-read your board.md, then continue."
+        prompt = REVIVE_PROMPT.format(role=role, path=path)
         if role == "pm":
             prompt += pm_jobs_note(state, key)
         mail = fit_mail(inbox_messages(name)) if with_mail else []
         if mail:
             prompt += "\n\nOKe inbox: " + " | ".join(t for _, t in mail)
-        kind, args = agent_command(kind, role, load_config(), oke_home(), plugin_root(), folder,
-                                   record.get("session"))
+        args = agent_command(role, load_config(), oke_home(), plugin_root(), folder, record.get("session"))
     if role == "orchestrator" and record.get("session"):
         args = args + ["--resume", record["session"]]
     # Never start in the old pane: a force-killed claude leaves terminal modes set, and
@@ -1533,8 +1485,7 @@ def start_again(state, role, key, name, record, folder, with_mail):
     pane = new_pane(state, role, key, cwd)
     # The folder was trusted when the agent first started; a trust dialog now is unexpected.
     try:
-        info = runtime().start(agent, pane, args, prompt, lambda: False,
-                               kind=kind if role != "orchestrator" else "claude")
+        info = runtime().start(agent, pane, args, prompt, lambda: False)
     except (HerdrError, DialogError):
         # herdr keeps the name of a start that failed; with the pane closed it is
         # gone again, so the next watcher round does not read it as alive.
