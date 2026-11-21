@@ -425,6 +425,28 @@ test('a finished turn writes the session cost to the agent folder', async ($, on
   expect(JSON.parse(usage!.text)).toEqual({ usd: 1.2 })
 })
 
+test('each turn, a subagent turn too, adds a line to the agent usage.csv', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  engine(on, [], [])
+  let csv: string | null = null
+  on('fs.read', () => (csv === null ? { deny: 'missing' } : { value: csv }))
+  on('fs.write', (_: any, e: any) => {
+    if (/usage\.csv$/.test(e.path)) csv = e.text
+    return { value: undefined }
+  })
+  const usage = { model: 'claude-sonnet-5-5', input_tokens: 10, output_tokens: 20,
+    cache_read_input_tokens: 300, cache_creation_input_tokens: 40 }
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete({ ...TURN, reason: 'completed', usage } as any)
+  await $.turn.complete({ ...TURN, reason: 'completed', usage, agentId: 'a1' } as any)
+  const lines = csv!.trim().split('\n')
+  expect(lines[0]).toBe('time,model,input,output,cache_read,cache_write')
+  expect(lines.length).toBe(3)
+  expect(lines[2]).toMatch(/,claude-sonnet-5-5,10,20,300,40$/)
+})
+
 test('the orchestrator board shows its own todo list', async ($, on) => {
   mock.clock(on)
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })

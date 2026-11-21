@@ -150,6 +150,10 @@ OKe keeps its files in `~/.oke`. To use another folder, set `OKE_HOME` in the `e
 
 After installing, follow the checks in `docs/work-checklist.md`.
 
+## Token use
+
+Each agent's mod adds one line per turn (its subagents' turns included) to `usage.csv` in the agent's folder: time, model, input, output, cache read and cache write tokens. The orchestrator writes `$OKE_HOME/usage.csv`. `python oke/bin/oke.py cost [job]` adds them up per job (archived jobs too), per repository PM and for the orchestrator.
+
 ## Development
 
 ```

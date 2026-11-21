@@ -162,6 +162,30 @@ async function compactAtBoundary($: any) {
   $.clock.after(0, () => void $.session.compact({ instructions: COMPACT_NOTE }))
 }
 
+const USAGE_HEAD = 'time,model,input,output,cache_read,cache_write'
+
+/** One line per turn in the agent's usage.csv (the orchestrator's in the OKe home), which
+ * `oke cost` adds up. */
+async function logUsage($: any, e: any) {
+  const u = e.usage
+  const dir = folder ?? (role === 'orchestrator' ? home : null)
+  if (!pane || !u || !dir) return
+  const path = `${dir}/usage.csv`.replace(/\\/g, '/')
+  const line = [new Date().toISOString(), u.model ?? '', u.input_tokens ?? 0, u.output_tokens ?? 0,
+    u.cache_read_input_tokens ?? 0, u.cache_creation_input_tokens ?? 0].join(',')
+  try {
+    let old = ''
+    try {
+      old = await $.fs.read(path)
+    } catch {
+      old = `${USAGE_HEAD}\n`
+    }
+    await $.fs.write(path, `${old}${old.endsWith('\n') ? '' : '\n'}${line}\n`)
+  } catch {
+    // a missed line only makes the totals read lower
+  }
+}
+
 async function submitRetry($: any, kind: string) {
   pending = null
   // the person is typing: their own turn replaces the retry (prompt.submit cancels it)
@@ -1123,6 +1147,7 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e: any, next) => {
+    await logUsage($, e)  // subagents' turns too: they are part of the agent's cost
     // a subagent's turn ends with its own turn.complete: retry and compaction are the main loop's
     if (e.agentId !== undefined) return next(e)
     const r = await next(e)

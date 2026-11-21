@@ -361,6 +361,31 @@ def E(code, message="m"):
 OK = {"stdout": "", "exit": 0}
 
 
+class TestCost(Base):
+    def csv(self, rel, *rows):
+        path = os.path.join(self.home, *rel.split("/"))
+        if not os.path.isdir(os.path.dirname(path)):
+            os.makedirs(os.path.dirname(path))
+        with io.open(path, "w", encoding="utf-8") as f:
+            f.write(u"time,model,input,output,cache_read,cache_write\n" + u"".join(r + u"\n" for r in rows))
+
+    def test_cost_adds_up_turns_per_job_pm_and_orchestrator(self):
+        self.csv("jobs/fix-a/fix-a-w1/usage.csv", "t,sonnet,1,2,3,4", "t,sonnet,10,20,30,40")
+        self.csv("jobs/fix-a/fix-a-rv1/usage.csv", "t,opus,100,0,0,0", "broken line")
+        self.csv("archive/fix-a-20261122-101010/fix-a-w1/usage.csv", "t,opus,5,5,5,5")
+        self.csv("repos/toy-1/pm/usage.csv", "t,opus,7,7,7,7")
+        self.csv("usage.csv", "t,opus,9,9,9,9")
+        self.assertEqual(self.cli("cost"), 0)
+        out = json.loads(self.out)
+        job = out["jobs/fix-a"]
+        self.assertEqual(sorted(job.pop("models")), ["opus", "sonnet"])
+        self.assertEqual(job, {"turns": 3, "input": 111, "output": 22, "cache_read": 33, "cache_write": 44})
+        self.assertEqual(out["repos/toy-1"]["turns"], 1)
+        self.assertEqual(out["orchestrator"]["input"], 9)
+        self.assertEqual(self.cli("cost", "fix-a"), 0)
+        self.assertEqual(sorted(json.loads(self.out)), ["archive/fix-a-20261122-101010", "jobs/fix-a"])
+
+
 class TestHerdr(Base):
     def test_herdr_returns_result(self):
         self.fake({"agent list": [J({"agents": []})]})

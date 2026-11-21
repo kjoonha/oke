@@ -553,6 +553,49 @@ ROLE_TOOLS = {
 # and plugins come only from the assignment header.
 
 
+USAGE_FIELDS = ("input", "output", "cache_read", "cache_write")
+
+
+def usage_totals(home):
+    """Token totals per place from every usage.csv under `home` (the mod adds a line per
+    turn): {place: {"turns", "input", "output", "cache_read", "cache_write", "models"}}.
+    A place is a job (jobs/<job>, archive/<job>-<time>), a repository's PM or the orchestrator."""
+    out = {}
+    for path in glob.glob(os.path.join(glob.escape(home), "**", "usage.csv"), recursive=True):
+        parts = os.path.relpath(path, home).replace("\\", "/").split("/")
+        place = "/".join(parts[:2]) if parts[0] in ("jobs", "archive", "repos") else "orchestrator"
+        row = out.setdefault(place, dict([("turns", 0), ("models", [])] + [(f, 0) for f in USAGE_FIELDS]))
+        try:
+            with io.open(path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except (IOError, OSError):
+            continue
+        for line in lines[1:]:  # the first line names the columns
+            cells = line.split(",")
+            if len(cells) != 2 + len(USAGE_FIELDS):
+                continue
+            try:
+                numbers = [int(c) for c in cells[2:]]
+            except ValueError:
+                continue
+            row["turns"] += 1
+            for name, n in zip(USAGE_FIELDS, numbers):
+                row[name] += n
+            if cells[1] and cells[1] not in row["models"]:
+                row["models"].append(cells[1])
+    return out
+
+
+def cmd_cost(args):
+    """Tokens per job, PM and orchestrator, from the per-turn usage.csv files."""
+    totals = usage_totals(oke_home())
+    if args.job:
+        totals = dict((p, r) for p, r in totals.items() if p == "jobs/" + args.job
+                      or re.match(r"archive/%s-\d{8}-\d{6}$" % re.escape(args.job), p))
+    print(json.dumps(totals, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
 def cmd_extras(args):
     """What a PM may switch on for one child (`tools:`, `mcp:`, `plugins:` header lines)."""
     print(json.dumps({"default_tools": ROLE_TOOLS, "mcp": sorted(user_mcp_servers()),
@@ -3599,6 +3642,9 @@ def build_parser():
     pending.set_defaults(func=cmd_pending)
 
     sub.add_parser("extras", help="what a child's assignment may switch on").set_defaults(func=cmd_extras)
+    cost = sub.add_parser("cost", help="tokens per job, PM and orchestrator, from the usage.csv files")
+    cost.add_argument("job", nargs="?")
+    cost.set_defaults(func=cmd_cost)
 
     for name, helptext in (("agents", "names of the running agents"),
                            ("read", "the agent's screen"), ("keys", "press keys in the agent"),
