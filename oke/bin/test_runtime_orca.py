@@ -318,10 +318,9 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual((entry["dispatch"], entry["terminal"], entry["live"]), ("ctx_2", "term_2", "ctx_2"))
 
     def test_start_unknown_is_only_blocked_for_claude(self):
-        self.register(kind="codex")
-        self.register("w-old", "ctx_2", "s2")  # before `kind` was stored
+        self.register("w-old", "ctx_2", "s2")  # no `kind`
         self.fake({"orchestration worker-show": [OK(self.UNSEEN)]})
-        self.assertEqual([a["agent_status"] for a in self.rt.agents()], ["working", "working"])
+        self.assertEqual([a["agent_status"] for a in self.rt.agents()], ["working"])
 
     def test_a_dead_agent_in_another_unsettled_stage_is_gone(self):
         self.register(kind="claude", live="ctx_1")
@@ -334,10 +333,8 @@ class TestOrcaRuntime(OrcaBase):
         self.register("w-seen", "ctx_3", "s3", kind="claude", live="ctx_3")
         self.register("w-fail", "ctx_4", "s4", kind="claude", live="ctx_4")
         self.register("w-odd", "ctx_5", "s5", kind="claude", live="ctx_5")
-        self.register("w-codex", "ctx_6", "s6", kind="codex", live="ctx_6")
-        self.register("w-old", "ctx_7", "s7", live="ctx_7")  # before `kind` was stored
+        self.register("w-old", "ctx_7", "s7", live="ctx_7")  # no `kind`
         self.fake({"orchestration worker-show": [OK(self.KILLED)],
-                   "orchestration worker-show --dispatch ctx_6 --full": [OK(self.DROPPED)],
                    "orchestration worker-show --dispatch ctx_7 --full": [OK(self.DROPPED)],
                    # a long silent turn: Orca keeps its last status, only stale
                    "orchestration worker-show --dispatch ctx_2 --full": [OK({"projection": {
@@ -350,9 +347,9 @@ class TestOrcaRuntime(OrcaBase):
                    "orchestration worker-show --dispatch ctx_4 --full": [ERR("orca_failed")],
                    "orchestration worker-show --dispatch ctx_5 --full": [OK({"projection": ["odd"]})]})
         self.assertEqual(sorted(a["name"] for a in self.rt.agents() if a["agent_status"] == "working"),
-                         ["w-codex", "w-fail", "w-odd", "w-old", "w-seen", "w-stale"])
+                         ["w-fail", "w-odd", "w-old", "w-seen", "w-stale"])
         asked = sorted(c[3] for c in self.calls() if "--full" in c)
-        self.assertEqual(asked, ["ctx_2", "ctx_3", "ctx_4", "ctx_5"])  # never for codex or an old entry
+        self.assertEqual(asked, ["ctx_2", "ctx_3", "ctx_4", "ctx_5"])  # never for an entry without `kind`
 
     def test_odd_full_results_are_not_death(self):
         for result in (["x"], {"projection": {"liveness": "missing_status", "evidence": None}},
@@ -362,8 +359,10 @@ class TestOrcaRuntime(OrcaBase):
 
     def test_start_records_the_kind(self):
         self.fake({"orchestration worker-start": [OK(STARTED)]})
-        self.rt.start("fix-a-w1", self.repo, [], "go", lambda: False, kind="codex")
-        self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["kind"], "codex")
+        self.rt.start("fix-a-w1", self.repo, [], "go", lambda: False)
+        self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["kind"], "claude")
+        argv = self.calls()[0]
+        self.assertEqual(argv[argv.index("--agent") + 1], "claude")
 
     def test_a_chat_default_is_refused_and_its_worker_stopped(self):
         # measured: with Orca's default agent surface chat, worker-start gives a structworker_ handle
@@ -608,16 +607,6 @@ class TestOrcaRuntime(OrcaBase):
         self.assertIn(["orchestration", "run-use", "--id", "run_7", "--json"], self.calls()[n:])
         self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["dispatch"], "ctx_9")
 
-    def test_a_fenced_codex_revive_binds_too(self):
-        self.fake({"orchestration worker-start": [ERR("consumer_fenced"), OK(STARTED)],
-                   "orchestration run-use": [OK({})],
-                   "orchestration worker-show": [OK(dict(WORKING, runId="run_7"))],
-                   "terminal rename": [OK({})]})
-        self.rt.start("fix-a-w1", self.repo, ["-c", "features.hooks=false", "resume", "ctx_1"], "go",
-                      lambda: False, kind="codex")
-        self.assertIn(["orchestration", "worker-show", "--dispatch", "ctx_1", "--json"], self.calls())
-        self.assertIn(["orchestration", "run-use", "--id", "run_7", "--json"], self.calls())
-
     def test_an_outage_in_the_revive_lookup_stays_an_outage(self):
         self.fake({"orchestration worker-start": [ERR("consumer_fenced")],
                    "orchestration worker-show": [ERR("runtime_unavailable")]})
@@ -728,7 +717,7 @@ class TestOrcaChoice(OrcaBase):
         os.environ["ORCA_TERMINAL_HANDLE"] = "term_1"
         self.assertEqual(oke.runtime().name, "orca")
         self.assertEqual(self.rt.whoami(), "term_1")
-        _, args = oke.agent_command("claude", "worker", oke.load_config(), self.home, "/p", None)
+        args = oke.agent_command("worker", oke.load_config(), self.home, "/p", None)
         self.assertNotIn("--settings", args)
         os.environ["HERDR_ENV"] = "1"
         self.assertEqual(oke.runtime().name, "herdr")

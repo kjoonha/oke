@@ -156,11 +156,9 @@ class BgRuntime(object):
                 lines.append(line)
         return "\n".join(lines[-40:]) + "\n"
 
-    def start(self, name, place, argv, prompt, trusted, registered=lambda: None, kind="claude"):
+    def start(self, name, place, argv, prompt, trusted, registered=lambda: None):
         """Start `claude --bg` in folder `place`. A bg session cannot answer a dialog:
         an untrusted folder fails here, and `trusted` is not asked."""
-        if kind != "claude":
-            raise HerdrError("unsupported", "only claude agents run as background sessions")
         folder = place
         settings = argv[argv.index("--settings") + 1] if "--settings" in argv else None
         if settings and os.path.isfile(settings):

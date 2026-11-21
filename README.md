@@ -63,7 +63,6 @@ Agents talk through files under `$OKE_HOME` (default `~/.oke`), so a crash loses
   - herdr 0.9.5 or later (agents run in herdr panes), or
   - Orca (agents run as Orca orchestration workers, each in its own Orca terminal; tested with 1.4.261), or
   - neither: agents run as background `claude --bg` sessions.
-- Optional: codex or opencode, to use as the worker or reviewer
 
 ## Install (online)
 
@@ -142,9 +141,8 @@ OKe keeps its files in `~/.oke`. To use another folder, set `OKE_HOME` in the `e
   - Colour schemes, with role colours from the scheme's own palette: `tokyo-night`, `catppuccin` (mocha), `github` (dark), `dracula`, `nord`, `gruvbox`, `solarized`, `one-dark`, `monokai`, `rose-pine`, `everforest`, `kanagawa`, `ayu`, `material`, `synthwave-84`.
   - An unknown name falls back to `disco`.
 - `autonomy`: `conservative` (the worker asks before every command), `balanced` (default) or `full`. With `full` the orchestrator approves plans and merges without asking, and a PM or child that died (`gone`) is resumed once without asking (`oke revive <name> --auto`); you are told in one line (a PM notes a resumed child on its board). If it dies again before it reported anything, you are asked (resume, hold or cancel). Held jobs are never resumed. `conservative` and `balanced` always ask.
-- `agents`: the CLI that runs the worker and the reviewer: `claude`, `codex` or `opencode`. The orchestrator and PMs are always claude. Limits are listed under "안 되는 것" in `docs/superpowers/specs/2026-11-13-oke-slice4-design.md`.
 - `lean_launch`: start PMs, workers and reviewers without your plugins, hooks and MCP servers (`--setting-sources project,local --strict-mcp-config`). Only the herdr hooks, your `PreToolUse` hooks, `permissions.deny` and `env` from your `settings.json` are copied into the agent's `lean-settings.json` (readable only by you; `job archive` deletes it). `permissions.ask` is not copied. This cuts the starting context from about 76k to 40k tokens. Each role also gets only its core tools (`--tools`, about 15k tokens at start). For each job, the PM turns on extra tools with the assignment header's `tools:`, `mcp:` and `plugins:` lines (`oke.py extras` lists them). Set it to `false` if the agents need all your personal settings.
-- `effort`: the effort level (`low` to `max`) per role (`pm`, `worker`, `reviewer`). A role left out keeps the `effortLevel` of your own settings. Claude agents only.
+- `effort`: the effort level (`low` to `max`) per role (`pm`, `worker`, `reviewer`). A role left out keeps the `effortLevel` of your own settings.
 - `merge_ignore_untracked`: untracked paths in the repository that never block a merge, such as another tool's state folder. Default `[".omc/"]`. Python caches never block either.
 - `interview_threshold`, `interview_max_rounds`: the interview the orchestrator runs when it takes a job. It scores the goal, constraints and success criteria from 0 to 1 and asks one question at a time about the vaguest part, until the ambiguity (`1 - 0.4 goal - 0.3 constraints - 0.3 criteria`) is at or below the threshold. It also stops when you pick "plan now" or it reaches the round limit.
 

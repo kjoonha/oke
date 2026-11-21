@@ -337,8 +337,8 @@ class OrcaRuntime(object):
                 and show.get("stage") != "settled":
             entry["live"] = dispatch  # once per dispatch: it started, so missing status means it died
             mark_live(name, (dispatch,), dispatch)
-        # claude only: Orca records the agent process from claude's hooks (an entry from
-        # before `kind` was stored may be codex: never read dead on absence)
+        # Orca records the agent process from claude's hooks (an entry without `kind`
+        # may not be claude: never read dead on absence)
         if isinstance(show, dict) and entry.get("kind") == "claude" and entry.get("live") == dispatch \
                 and show.get("stage") != "settled" and show.get("liveness") == "unverifiable" \
                 and status_of(show) and agent_ended(dispatch):
@@ -483,20 +483,18 @@ class OrcaRuntime(object):
                     lines.append("%s: %s" % (m.get("role", "?"), text.strip()[:400]))
         return "\n".join(lines[-40:]) + "\n"
 
-    def start(self, name, place, argv, prompt, trusted, registered=lambda: None, kind="claude"):
+    def start(self, name, place, argv, prompt, trusted, registered=lambda: None):
         """Start a supervised Orca worker in folder `place`. Only --model and the resumed
         session of `argv` mean anything here (see the module doc)."""
         argv = list(argv)
         spec = TASK_NOTE + prompt
-        # the replaced session: claude --resume, codex resume, opencode --session
-        old = next((argv[argv.index(f) + 1] for f in ("--resume", "resume", "--session")
-                    if f in argv[:-1]), None)
-        if old and kind == "claude":  # codex and opencode keep no Claude transcript
+        old = argv[argv.index("--resume") + 1] if "--resume" in argv[:-1] else None  # the replaced session
+        if old:
             path = transcript_of(old, place)
             if path:
                 spec += ("\n\nThe session you replace died. Its transcript is %s: read its end "
                          "to see where it was." % path.replace("\\", "/"))
-        args = ["orchestration", "worker-start", "--spec", spec, "--agent", kind,
+        args = ["orchestration", "worker-start", "--spec", spec, "--agent", "claude",
                 "--worktree", "path:" + place.replace("\\", "/"), "--keep-open", "--task-title", name]
         if "--model" in argv:
             args += ["--model", argv[argv.index("--model") + 1]]
@@ -530,7 +528,7 @@ class OrcaRuntime(object):
                 message += " OKe could not stop that chat worker: close it in Orca (dispatch %s, %s)." % (
                     result["dispatchId"], result.get("terminal"))
             raise HerdrError("orca_chat_default", message)
-        entry = {"dispatch": result["dispatchId"], "handle": result["terminal"], "cwd": place, "kind": kind,
+        entry = {"dispatch": result["dispatchId"], "handle": result["terminal"], "cwd": place, "kind": "claude",
                  # worker-start returns only after the agent's first hook (measured): it ran live
                  "live": result["dispatchId"]}
         try:  # Orca titles every tab worker-task_<id>: say who it is (seen live)

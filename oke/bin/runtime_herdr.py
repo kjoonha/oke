@@ -121,17 +121,6 @@ TRUST_MARKER = "trust this folder"
 DIALOG_TRIES = 5
 DIALOG_POLL = 1.0
 START_TIMEOUT_MS = 90000
-READY_MARKERS = {"codex": "for shortcuts"}  # the input line's hint: no dialog left
-READY_TRIES = 10  # orchestrator and PM are always claude
-# Startup screens OKe answers by itself: (text on screen, kind or None for all, keys).
-SAFE_DIALOGS = [
-    ("update now", "codex", ["esc"]),  # "Update now / Skip": esc skips
-    # codex's hook review panel: esc closes it without trusting, so the hook stays off
-    ("hook needs review", "codex", ["esc"]),
-    # "Review hooks / Trust all / Continue without trusting": esc skips, hooks stay off.
-    # herdr shows this screen as idle, so a first prompt's Enter would pick "Review".
-    ("continue without trusting", "codex", ["esc"]),
-]
 
 
 def session_of(agent):
@@ -147,24 +136,20 @@ class DialogError(Exception):
     """The new agent stopped at a dialog OKe may not answer. The message is the screen."""
 
 
-def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: None, kind="claude"):
+def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: None):
     """Start claude in `pane`, answer the trust dialog only when `trusted()` allows it,
     send the first prompt and make sure the first turn started. `registered` runs once
     herdr knows the name. Returns herdr's agent info."""
     try:
         # herdr's 30 s default was too short live for a claude resuming a long session
-        herdr("agent", "start", agent, "--kind", kind, "--pane", pane, "--timeout", str(START_TIMEOUT_MS),
+        herdr("agent", "start", agent, "--kind", "claude", "--pane", pane, "--timeout", str(START_TIMEOUT_MS),
               "--", *claude_args)
     except HerdrError as e:
         if e.code != "agent_not_ready":
             raise
         registered()  # herdr keeps the name even though the agent is not ready
-        answer_startup_dialogs(agent, kind, trusted)
+        answer_startup_dialogs(agent, trusted)
     registered()
-    if kind != "claude":
-        # codex can show a panel after herdr already calls it ready; a prompt typed
-        # then is lost (seen live). Close such panels first.
-        close_startup_panels(agent, kind, READY_MARKERS.get(kind))
 
     # Wait until the first turn starts: for a few seconds after a prompt herdr still
     # says idle, and `oke wait` would read that as "idle with no report".
@@ -176,10 +161,6 @@ def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: No
             raise
     info = herdr("agent", "get", agent).get("agent", {})
     if info.get("agent_status") in ("idle", "done"):
-        if kind != "claude":
-            # codex asks about untrusted hooks only when the first prompt is submitted;
-            # herdr shows that as idle. Skip it; the prompt text stays in the input.
-            close_startup_panels(agent, kind, ready=None)
         # Seen live: the prompt text sat in the input box with its Enter lost.
         # Enter on an empty input does nothing, so one more is safe.
         herdr("agent", "send-keys", agent, "enter")
@@ -192,45 +173,21 @@ def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: No
     return info
 
 
-def startup_keys(screen, kind, trusted):
+def startup_keys(screen, trusted):
     """Keys for a startup screen OKe may answer, or None."""
-    low = screen.lower()
-    if TRUST_MARKER in low:
-        if not trusted():
-            return None
-        # claude preselects "No, exit"; codex preselects "Trust and continue"
-        return ["down", "enter"] if kind == "claude" else ["enter"]
-    for text, only, keys in SAFE_DIALOGS:
-        if text in low and only in (None, kind):
-            return keys
+    if TRUST_MARKER in screen.lower() and trusted():
+        return ["down", "enter"]  # claude preselects "No, exit"
     return None
 
 
-def close_startup_panels(agent, kind, ready):
-    """Skip the safe screens (update offer, hook trust) shown while herdr already
-    calls the agent ready or idle. With a `ready` marker, look until the input line
-    shows it: the next screen can take a moment to draw."""
-    for _ in range(READY_TRIES if ready else 3):
-        try:
-            screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
-        except HerdrError:
-            return  # cannot look: the prompt reports a real outage
-        keys = startup_keys(screen, kind, lambda: False)
-        if keys:
-            herdr("agent", "send-keys", agent, *keys)
-        elif not ready or ready in screen.lower():
-            return
-        time.sleep(DIALOG_POLL)
-
-
-def answer_startup_dialogs(agent, kind, trusted):
-    """Answer the startup screens one by one (codex may offer an update, then ask for
-    trust). Anything else is the user's call: DialogError with the screen."""
+def answer_startup_dialogs(agent, trusted):
+    """Answer the trust dialog when `trusted()` allows it. Anything else is the user's
+    call: DialogError with the screen."""
     for _ in range(3):
         # The dialog can still be drawing when herdr reports the agent blocked.
         for _ in range(DIALOG_TRIES):
             screen = herdr_text("agent", "read", agent, "--source", "visible", "--lines", "40")
-            keys = startup_keys(screen, kind, trusted)
+            keys = startup_keys(screen, trusted)
             if keys:
                 break
             time.sleep(DIALOG_POLL)
@@ -290,8 +247,8 @@ class HerdrRuntime(object):
     def screen(self, name):
         return herdr_text("agent", "read", name, "--source", "visible", "--lines", "40")
 
-    def start(self, name, place, argv, prompt, trusted, registered=lambda: None, kind="claude"):
-        return start_agent(name, place, argv, prompt, trusted, registered, kind)
+    def start(self, name, place, argv, prompt, trusted, registered=lambda: None):
+        return start_agent(name, place, argv, prompt, trusted, registered)
 
     def prompt(self, name, text):
         """Type `text` into an idle agent. True when it took it, False when it surely
