@@ -1428,6 +1428,19 @@ def new_pane(state, role, key, cwd):
 
 
 def relaunch(state, role, key, name, record, folder):
+    """Start a dead agent again. It gets the mail queued while it was down with its start,
+    under deliver's lock (a wait delivering at the same time would mail it twice); if a
+    deliver holds the lock, the mail is left to that deliver."""
+    lock = "deliver-" + name
+    held = role != "orchestrator" and try_lock(lock)
+    try:
+        return start_again(state, role, key, name, record, folder, held)
+    finally:
+        if held:
+            unlock(lock)
+
+
+def start_again(state, role, key, name, record, folder, with_mail):
     mail = []
     if role == "orchestrator":
         agent, prompt, cwd = ORCH_NAME, "/oke:start", native_path(record.get("cwd") or oke_home())
@@ -1444,7 +1457,7 @@ def relaunch(state, role, key, name, record, folder):
                 " Also re-read your board.md, then continue."
         if role == "pm":
             prompt += pm_jobs_note(state, key)
-        mail = inbox_messages(name)  # queued while it was down: it gets them with its start
+        mail = fit_mail(inbox_messages(name)) if with_mail else []
         if mail:
             prompt += "\n\nOKe inbox: " + " | ".join(t for _, t in mail)
         kind, args = agent_command(kind, role, load_config(), oke_home(), plugin_root(), folder,
@@ -3301,6 +3314,7 @@ def deliver(agent):
         msgs = inbox_messages(agent)
         if not msgs:
             return None
+        msgs = fit_mail(msgs) or msgs[:1]  # the rest goes on the next delivery
         text = "OKe inbox: " + " | ".join(t for _, t in msgs)
         took = runtime().prompt(agent, text)
         if not took:
@@ -3313,6 +3327,20 @@ def deliver(agent):
         unlock(lock)
 
 
+MAIL_CHARS = 16000  # one delivery's text: a command line (Windows: 32k) must hold it
+
+
+def fit_mail(msgs):
+    """The oldest messages whose text fits in one delivery (none when the first is too long)."""
+    out, size = [], 0
+    for m in msgs:
+        size += len(m[1]) + 3
+        if size > MAIL_CHARS:
+            break
+        out.append(m)
+    return out
+
+
 def mark_read(agent, msgs):
     """Move delivered inbox messages to read/ (kept a week, for a look back)."""
     if not msgs:
@@ -3320,7 +3348,11 @@ def mark_read(agent, msgs):
     done = os.path.join(inbox_dir(agent), "read")
     os.makedirs(done, exist_ok=True)
     for path, _ in msgs:
-        replace_file(path, os.path.join(done, os.path.basename(path)))
+        try:
+            if os.path.exists(path):
+                replace_file(path, os.path.join(done, os.path.basename(path)))
+        except OSError:
+            pass  # moved already (a job cancel drops its mail): the delivery still happened
     for old in os.listdir(done):
         try:
             if os.path.getmtime(os.path.join(done, old)) < time.time() - 7 * 86400:

@@ -461,7 +461,7 @@ class OrcaRuntime(object):
         return self.as_agent(name, entry, show)
 
     def screen(self, name):
-        """The end of the worker's transcript (Orca has no screen read for a chat worker)."""
+        """The end of the worker's transcript (worker-read)."""
         entry = load_registry().get(name)
         if not entry:
             raise HerdrError("agent_not_found", name)
@@ -517,14 +517,19 @@ class OrcaRuntime(object):
             rebind(e, show)
             result = run_orca(args)
         if (result.get("terminal") or "").startswith("struct"):
-            # the user's Orca default agent surface is chat (measured: structworker_ handle)
+            # the user's Orca default agent surface is chat (measured: structworker_ handle). It
+            # already has its task: stop it, or name it so the user can (else two would work the job)
+            stopped = True
             for cmd in ("worker-stop", "worker-release"):
                 try:
-                    run_orca(["orchestration", cmd, "--dispatch", result["dispatchId"]])
-                except HerdrError as e:
-                    if e.code in FATAL:
-                        raise
-            raise HerdrError("orca_chat_default", CHAT_DEFAULT % name)
+                    mutate(["orchestration", cmd, "--dispatch", result["dispatchId"]], result)
+                except HerdrError:
+                    stopped = stopped and cmd != "worker-stop"
+            message = CHAT_DEFAULT % name
+            if not stopped:
+                message += " OKe could not stop that chat worker: close it in Orca (dispatch %s, %s)." % (
+                    result["dispatchId"], result.get("terminal"))
+            raise HerdrError("orca_chat_default", message)
         entry = {"dispatch": result["dispatchId"], "handle": result["terminal"], "cwd": place, "kind": kind,
                  # worker-start returns only after the agent's first hook (measured): it ran live
                  "live": result["dispatchId"]}

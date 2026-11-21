@@ -378,6 +378,26 @@ class TestOrcaRuntime(OrcaBase):
         self.assertIn(["orchestration", "worker-release"], cmds)
         self.assertNotIn("pm-toy-abc123", runtime_orca.load_registry())
 
+    def test_a_chat_worker_that_cannot_be_stopped_is_named(self):
+        # it already has its task: the user must close it, else two would work the job
+        for stop in (ERR("boom"), ERR("herdr_unavailable")):
+            self.fake({"orchestration worker-start": [OK(dict(STARTED, terminal="structworker_1"))],
+                       "orchestration worker-stop": [stop], "orchestration worker-release": [ERR("boom")]})
+            with self.assertRaises(oke.HerdrError) as c:
+                self.rt.start("pm-toy-abc123", self.repo, [], "go", lambda: False)
+            self.assertEqual(c.exception.code, "orca_chat_default")  # never a bare outage
+            self.assertIn("ctx_1", c.exception.message)
+            self.assertIn("structworker_1", c.exception.message)
+
+    def test_a_fenced_chat_worker_stop_rebinds(self):
+        self.fake({"orchestration worker-start": [OK(dict(STARTED, terminal="structworker_1", runId="run_3"))],
+                   "orchestration worker-stop": [ERR("consumer_fenced"), OK({})],
+                   "orchestration run-use": [OK({})], "orchestration worker-release": [OK({})]})
+        with self.assertRaises(oke.HerdrError) as c:
+            self.rt.start("pm-toy-abc123", self.repo, [], "go", lambda: False)
+        self.assertNotIn("could not stop", c.exception.message)
+        self.assertIn(["orchestration", "run-use"], [x[:2] for x in self.calls()])
+
     def test_oke_refuses_to_run_in_an_orca_chat_and_never_falls_to_bg(self):
         os.environ.pop("OKE_RUNTIME", None)
         os.environ["ORCA_CHAT_SCRATCH_DIR"] = self.tmp

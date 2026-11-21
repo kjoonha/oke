@@ -55,7 +55,7 @@ herdr pane, Orca 터미널 또는 일반 터미널에서 Claude Code 를 켜고 
 Orca 에서:
 
 - OKe 는 Orca 의 터미널 탭에서만 돈다. Orca chat 에서는 `/oke:start` 가 거절한다 ("OKe runs in an Orca terminal, not a chat"). chat 에는 mod 화면이 없다.
-- Orca 의 Agent Orchestration 설정이 켜져 있어야 하고, Orca 의 새 agent 탭 기본값이 Chat 이 아니라 CLI 여야 한다. OKe 는 PM, worker, reviewer 를 Orca worker 로 새 터미널 탭에서 띄운다 (탭 이름 `OKe PM: <repo>`, `OKe worker 1: <job>` ...). Orca 가 chat 으로 띄우면 OKe 가 그것을 멈추고 그 기본값을 바꾸라고 알린다. 첫 PM 을 띄울 때 알게 되므로 일이 시작되기 전이다.
+- Orca 의 Agent Orchestration 설정이 켜져 있어야 하고, Orca 의 새 agent 탭 기본값이 Chat 이 아니라 CLI 여야 한다. OKe 는 PM, worker, reviewer 를 Orca worker 로 새 터미널 탭에서 띄운다 (탭 이름 `OKe PM: <repo>`, `OKe worker 1: <job>` ...). Orca 가 chat 으로 띄우면 OKe 가 뜬 직후 그것을 멈추고 그 기본값을 바꾸라고 알린다 (멈추지 못했으면 Orca 에서 닫을 것을 알려 준다). 첫 PM 을 띄울 때 이것을 만난다.
 - agent 는 Orca 가 직접 띄우므로 OKe 의 실행 옵션이 닿지 않는다: OKe 플러그인을 Claude Code 에 설치해야 하고, `lean_launch` 는 효과가 없다.
 - agent 터미널을 닫으면 그 agent 에게 다음 메시지가 갈 때 Orca 가 다시 연다. 프로세스가 죽은 agent 는 `gone` 이고, orchestrator 가 다시 띄울지 묻는다 (resume / hold / cancel; autonomy `full` 은 아래 `autonomy`). resume 은 죽은 agent 의 transcript 를 읽는 새 Orca worker 를 띄우고, 그동안 쌓인 메시지도 같이 준다.
 - Orca 가 task 를 보냈는데 claude 가 뜨는 것을 못 봤으면 (`start_unknown`), 그 agent 를 읽을 때 화면 대신 안내가 나온다: 다시 띄우거나 (`oke close <handle>`, 그다음 `oke revive <name> --reset`) 기다린다. Orca 가 turn 을 보면 다시 working 이 된다.

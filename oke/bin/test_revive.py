@@ -257,6 +257,27 @@ class TestRevive(ReviveBase):
         self.assertIn("OKe inbox: pm: use the new plan", json.dumps(self.calls()))
         self.assertEqual(oke.inbox_messages("fix-a-w1"), [])
 
+    def test_mail_a_deliver_holds_is_left_to_it(self):
+        oke.queue_mail("fix-a-w1", "pm", "use the new plan")
+        self.assertTrue(oke.try_lock("deliver-fix-a-w1"))
+        try:
+            self.revive_scenario()
+            self.assertEqual(oke.revive("fix-a-w1"), "revived")
+        finally:
+            oke.unlock("deliver-fix-a-w1")
+        self.assertNotIn("use the new plan", json.dumps(self.calls()))
+        self.assertEqual(len(oke.inbox_messages("fix-a-w1")), 1)
+
+    def test_only_mail_that_fits_goes_with_the_start(self):
+        # a Windows command line holds about 32k characters
+        for i in range(3):
+            oke.queue_mail("fix-a-w1", "pm", ("m%d " % i) + "x" * 7000)
+        self.revive_scenario()
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")
+        self.assertIn("m1 x", json.dumps(self.calls()))
+        self.assertNotIn("m2 x", json.dumps(self.calls()))
+        self.assertEqual([t[:7] for _, t in oke.inbox_messages("fix-a-w1")], ["pm: m2 "])  # left to deliver
+
     def test_mail_stays_queued_when_the_revive_fails(self):
         oke.queue_mail("fix-a-w1", "pm", "use the new plan")
         original = oke.relaunch

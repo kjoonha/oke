@@ -918,7 +918,7 @@ async function openBoard($: any) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    // herdr pane, else Orca terminal or chat, else this Claude session (bg children)
+    // herdr pane, else Orca terminal, else this Claude session (bg children)
     // the process env has no session id (seen live): ask the session itself
     pane = (await $.env.get('HERDR_PANE_ID')) || (await $.env.get('ORCA_TERMINAL_HANDLE'))
       || `session:${await $.session.id()}`
