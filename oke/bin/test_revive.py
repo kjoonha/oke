@@ -239,6 +239,23 @@ class TestRevive(ReviveBase):
         self.revive_scenario()
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
 
+    def test_an_automatic_resume_is_never_repeated_without_a_report(self):
+        # autonomy full: a revive that failed or died at once goes to the user
+        self.revive_scenario()
+        self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")
+        self.assertTrue(self.child()["auto_revived"])
+        self.assertEqual(oke.revive("fix-a-w1", auto=True), "ask")
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")  # the user said resume
+        self.assertFalse(self.child()["auto_revived"])
+        self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")
+
+    def test_a_report_after_an_automatic_resume_allows_the_next(self):
+        self.revive_scenario()
+        self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")
+        self.write_file(os.path.join(self.child_dir, "report.md"), "type: waiting\nseq: 2\n---\n")
+        os.utime(os.path.join(self.child_dir, "report.md"), (1e9, 1e9))
+        self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")
+
     def test_new_report_resets_the_death_count(self):
         self.write_file(os.path.join(self.child_dir, "report.md"), "type: waiting\nseq: 2\n---\n")
         children = oke.read_children(self.key)

@@ -1472,10 +1472,12 @@ def relaunch(state, role, key, name, record, folder):
         raise
 
 
-def revive(name):
+def revive(name, auto=False):
     """Bring a dead OKe agent back in its own session. Returns revived, alive, busy
-    (another process is reviving it), not_needed, failed or unknown. Only an explicit
-    request revives: nothing in OKe restarts a dead agent by itself."""
+    (another process is reviving it), not_needed, failed, unknown, or ask: `auto` (an
+    orchestrator or PM resuming it unasked, autonomy full) after an automatic resume of
+    it that it never reported since. Only a request revives: nothing in OKe restarts
+    a dead agent by itself."""
     state = load_state()
     found = find_target(state, name)
     if found is None:
@@ -1484,12 +1486,12 @@ def revive(name):
     if not try_lock(lock):
         return "busy"
     try:
-        return revive_locked(found[1])
+        return revive_locked(found[1], auto)
     finally:
         unlock(lock)
 
 
-def revive_locked(name):
+def revive_locked(name, auto=False):
     state = load_state()  # again, under the lock: another watcher may have revived it
     found = find_target(state, name)
     if found is None:
@@ -1508,6 +1510,8 @@ def revive_locked(name):
     revives = record.get("revives", 0)
     if folder and mtime != record.get("report_mtime"):
         revives = 0  # it reported since the last revive (the board shows the count)
+    elif auto and record.get("auto_revived"):
+        return "ask"  # its last automatic resume did not hold: never twice in a row, the user decides
     if folder:
         try:
             os.remove(os.path.join(folder, "api-retry.json"))  # the dead process's retry
@@ -1515,7 +1519,8 @@ def revive_locked(name):
             pass
     # Counted before the start: a watcher killed during a slow start must not leave
     # the count unchanged and retry forever.
-    update_record(role, key, name, {"revives": revives + 1, "report_mtime": mtime, "gave_up": False})
+    update_record(role, key, name, {"revives": revives + 1, "report_mtime": mtime, "gave_up": False,
+                                    "auto_revived": auto})
     fields = {}
     try:
         info = relaunch(state, role, key, name, record, folder)
@@ -1545,7 +1550,7 @@ def cmd_revive(args):
         found = find_target(load_state(), args.agent)
         if found:
             update_record(found[0], found[2], found[1], {"revives": 0, "gave_up": False})
-    print(revive(args.agent))
+    print(revive(args.agent, args.auto))
     return 0
 
 
@@ -3479,6 +3484,7 @@ def build_parser():
     revive_p = sub.add_parser("revive")
     revive_p.add_argument("agent")
     revive_p.add_argument("--reset", action="store_true")
+    revive_p.add_argument("--auto", action="store_true")  # autonomy full: refuses a second one in a row
     revive_p.set_defaults(func=cmd_revive)
 
     resume_all = sub.add_parser("resume-all")

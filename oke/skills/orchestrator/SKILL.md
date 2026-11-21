@@ -51,7 +51,7 @@ Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`.
 
 The OKe mod in every agent does this without you:
 
-- OKe never restarts a dead agent by itself: a dead PM reaches you as `gone` from its wait, and you ask the user. A revive (`$OKE revive`) continues the agent in its own session. The board shows a dead agent of an open job in red ("stuck").
+- OKe never restarts a dead agent by itself: a dead PM reaches you as `gone` from its wait, and you ask the user (autonomy `full`: you resume it once without asking, see the `gone` row). A revive (`$OKE revive`) continues the agent in its own session. The board shows a dead agent of an open job in red ("stuck").
 - An agent whose turn ends on an API error that clears by itself (rate limit, overload, server error) resubmits the turn after 30 s, 1 m, 2 m, 4 m, then every 5 m, up to `api_retry_limit` (default 20) tries. Other API errors, and the last try, make a child or PM report `failed` with "API error" in the summary.
 - An agent that ends its turn without a report gets one nudge to continue (`idle_no_report`, below).
 - The user opens the board with `/oke-board` (type it in this pane; it is a command of the mod, not of the skill).
@@ -172,7 +172,7 @@ When it finishes, read the first line of its output. If the user speaks before i
 | `idle_no_report again <job>`, `bad_report again <job> ...` | The nudge did not help. Do not nudge again: the wait now leaves that job alone and `pending` lists it as `silent`. Wait again (for the other jobs), then run the queue |
 | `no_jobs` | The PM has no open job left. Do not start its wait again |
 | `peer_no_answer <job> <pm>` | `<pm>` was asked by job `<job>`'s PM about cross-repo impact (`oke peer ask`), was reminded once, and still went idle without answering. It is also the `peer` item of `$OKE pending`: handle it there. Then start this PM's wait again |
-| `gone` | The PM died. OKe does not restart an agent by itself. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / cancel (see "Giving up") / hold (`$OKE job hold <job>` for each of them, see "On hold"; with no open job left, do not start that PM's wait again) |
+| `gone` | The PM died. OKe does not restart an agent by itself. With autonomy `full`, first run `$OKE revive <pm> --auto`: on `revived` tell the user in one line ("<pm> died; resumed it") and wait again; on `not_needed` its jobs are held or done: do nothing. `ask` (its last automatic resume never reported, so it failed or died at once), `failed` or any other answer: ask as below. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / cancel (see "Giving up") / hold (`$OKE job hold <job>` for each of them, see "On hold"; with no open job left, do not start that PM's wait again) |
 | `superseded` | A newer wait replaced this one. Do nothing: do not run the queue and do not start a wait |
 | `{"deliver": {"to": ..., "text": ...}}` | The PM runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again. Not a result to show the user |
 | `deliver_failed` | Messages for the PM could not be typed in three times in a row. Tell the user and offer to go to the PM pane (`$OKE attach <pm>`); the messages stay in `$OKE_HOME/inbox/<pm>/`. Start the wait again after the user says the pane is free |
@@ -269,6 +269,7 @@ With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merg
 | Plan | ask | ask, even for a small job | approve without asking, keep the file |
 | Merge to the main branch | ask | ask | assign `kind: merge` without asking; conflicts still come to the user |
 | Dialog (`blocked`) | ask | ask | ask |
+| A PM or child reads `gone` | ask | ask | resume once without asking (`revive --auto`); ask when it goes `gone` again before it reported |
 
 ## Rules
 
