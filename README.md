@@ -124,6 +124,11 @@ Optional. Only the values you set override the defaults.
   - `disco` (default): blobs in headphones. Orchestrator purple, PM blue, worker green, reviewer orange.
   - `slime`: bouncing slimes. Orchestrator green, PM blue, worker pink, reviewer yellow.
   - `mushroom`: bouncing mushrooms. Orchestrator purple, PM blue, worker orange, reviewer green.
+  - `cute-dog` (floppy-eared puppy) and `cute-cat` (kitten): tails wag, ears twitch, they blink and curl up to sleep. Each role has its own coat.
+  - In the disco colours (orchestrator purple, PM blue, worker green, reviewer orange): `ghost`, `robot`, `frog`, `penguin`, `bunny`, `bear`, `duck`, `octopus`, `alien`, `cactus`, `jellyfish`, `fox`, `panda`, `hamster`, `owl`, `whale`, `dino`, `star`, `pixel-heart`, `coffee`, `onigiri`, `axolotl`, `bee`, `snail`, `chick`, `sakura`.
+  - Palette variants: `pastel` (bunnies), `candy` (hearts), `ocean` (whales), `autumn` (foxes), `midnight` (owls).
+  - Colour schemes, with role colours from the scheme's own palette: `tokyo-night`, `catppuccin` (mocha), `github` (dark), `dracula`, `nord`, `gruvbox`, `solarized`, `one-dark`, `monokai`, `rose-pine`, `everforest`, `kanagawa`, `ayu`, `material`, `synthwave-84`.
+  - An unknown name falls back to `disco`.
 - `autonomy`: `conservative` (the worker asks before every command), `balanced` (default) or `full`.
 - `agents`: the CLI that runs the worker and the reviewer: `claude`, `codex` or `opencode`. The orchestrator and PMs are always claude. Limits are listed under "안 되는 것" in `docs/superpowers/specs/2026-11-13-oke-slice4-design.md`.
 - `lean_launch`: start PMs, workers and reviewers without your plugins, hooks and MCP servers (`--setting-sources project,local --strict-mcp-config`). Only the herdr hooks and `env` from your `settings.json` are copied into `~/.oke/lean-settings.json`. This cuts the starting context from about 76k to 40k tokens. Each role also gets only its core tools (`--tools`, about 15k tokens at start). For each job, the PM turns on extra tools with the assignment header's `tools:`, `mcp:` and `plugins:` lines (`oke.py extras` lists them). Set it to `false` if the agents need all your personal settings.

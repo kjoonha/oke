@@ -72,7 +72,7 @@ def load_config():
         "max_review_rounds": 10,  # a job's reviews stop there and the PM asks the user; null: no limit
         # effortLevel per role ("low" .. "max"); a role left out keeps the user's own setting
         "effort": {},
-        "theme": "disco",  # the band's characters: disco, slime or mushroom
+        "theme": "disco",  # the band's characters: disco (default), slime, mushroom, cute-dog, cute-cat, ... (README lists all)
     }
     try:
         with io.open(os.path.join(home, "config.json"), encoding="utf-8") as f:

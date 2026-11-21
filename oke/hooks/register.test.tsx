@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { framesOf, orchestratorDenied, promptRole, workerDenied } from './register'
+import { THEME_NAMES, framesOf, orchestratorDenied, paletteOf, promptRole, workerDenied } from './register'
 
 type Run = { argv: readonly string[] }
 
@@ -620,7 +620,9 @@ test('the orchestrator notifies once when a new item waits on the person', async
 })
 
 test('each theme gives every role its own 12x8 character in every mood', () => {
-  for (const theme of ['disco', 'slime', 'mushroom']) {
+  expect(THEME_NAMES.length >= 50).toBe(true)
+  for (const theme of THEME_NAMES) {
+    const pal = paletteOf(theme)
     const seen = new Set<string>()
     for (const role of ['orchestrator', 'pm', 'worker', 'reviewer']) {
       const moods = framesOf(theme, role)
@@ -628,7 +630,10 @@ test('each theme gives every role its own 12x8 character in every mood', () => {
         expect(frames.length > 0).toBe(true)
         for (const f of frames) {
           expect(f.length).toBe(8)
-          for (const row of f) expect(/^[.a-zA-Z]{12}$/.test(row)).toBe(true)
+          for (const row of f) {
+            expect(/^[.a-zA-Z]{12}$/.test(row)).toBe(true)
+            expect([...row].filter(ch => ch !== '.' && pal[ch] === undefined).join('')).toBe('') // every pixel has a color
+          }
         }
       }
       seen.add(moods.conduct[0]!.join('/'))
@@ -636,4 +641,5 @@ test('each theme gives every role its own 12x8 character in every mood', () => {
     expect(seen.size).toBe(4)
   }
   expect(framesOf('nope', 'pm')).toBe(framesOf('disco', 'pm'))
+  expect(framesOf('constructor', 'pm')).toBe(framesOf('disco', 'pm'))
 })
