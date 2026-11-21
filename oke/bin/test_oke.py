@@ -888,10 +888,19 @@ class TestStatus(SpawnBase):
 
     def test_outside_herdr(self):
         os.environ.pop("HERDR_ENV", None)
-        self.fake({})
+        self.set_pm()
+        self.fake({})  # herdr unreachable: the state still shows, liveness unknown
         self.assertEqual(self.cli("status"), 0)
-        self.assertEqual(json.loads(self.out)["herdr"], {"inside": False, "missing": []})
-        self.assertEqual(self.calls(), [])
+        st = json.loads(self.out)
+        self.assertEqual(st["herdr"], {"inside": False, "missing": []})
+        self.assertEqual(st["repos"][self.key]["pm"], "unknown")
+
+    def test_outside_herdr_shows_state_and_never_claims(self):
+        os.environ.pop("HERDR_ENV", None)
+        self.set_pm()
+        st = self.status([AG(name="pm-toy", pane="w1:p3", session="s-pm", cwd=self.repo)], "--claim")
+        self.assertEqual((st["herdr"]["inside"], st["repos"][self.key]["pm"]), (False, "alive"))
+        self.assertIsNone(oke.load_state()["orchestrator"].get("pane"))
 
     def test_missing_commands_reported(self):
         s = help_ok()

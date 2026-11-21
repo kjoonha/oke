@@ -216,6 +216,44 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(self.rt.agent("fix-a-w1")["agent_status"], "working")
         self.assertFalse([c for c in self.calls() if "--full" in c])
 
+    def follow_up_scenario(self, sent, show2):
+        self.register("pm-toy", "ctx_1", "term_1", kind="claude", live="ctx_1")
+        # a settled dispatch can read live (its terminal kept): that must not move the mark
+        settled = {"stage": "settled", "state": "succeeded", "liveness": "live", "activity": "idle",
+                   "runId": "run_1"}
+        rows = {"workers": [{"dispatchId": "ctx_2", "resource": {"terminalHandle": "term_2", "ownerDispatchId": "ctx_2"}},
+                            {"dispatchId": "ctx_1", "resource": {"terminalHandle": "term_1", "ownerDispatchId": "ctx_1",
+                                                                 "releaseState": "released"}}]}
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(settled)],
+                   "orchestration worker-list": [OK({"workers": []}), OK(rows)],
+                   "orchestration send": [OK(sent)],
+                   "orchestration worker-show --dispatch ctx_2 --full": [
+                       OK({"dispatch": {"followUpOf": "ctx_1"}, "worker": {"agentTerminalHandle": "term_2"}}),
+                       OK(self.DROPPED)],
+                   "orchestration worker-show --dispatch ctx_2": [OK(show2)],
+                   "orchestration worker-keep-open": [OK({})]})
+        self.assertTrue(self.rt.prompt("pm-toy", "go"))
+
+    def test_a_follow_up_killed_right_after_the_mail_is_gone(self):
+        # measured live: mail reopened a closed PM; send answered state ready (Orca saw the
+        # turn start), the claude was killed 3 s later, before any look read it live
+        self.follow_up_scenario({"delivery": "reopened", "followUpOf": "ctx_1", "dispatchId": "ctx_2",
+                                 "state": "ready"}, self.KILLED)
+        self.assertEqual(runtime_orca.load_registry()["pm-toy"]["live"], "ctx_2")
+        self.assertEqual(self.rt.agents(), [])
+
+    def test_a_follow_up_whose_turn_start_orca_never_saw_is_not_gone(self):
+        # measured live: claude killed during the follow-up's startup; send answered
+        # outcome_unknown, the dispatch reads start_unknown/turn_start_unobserved with
+        # missing_status for good, the same as a slow start ("may still be starting")
+        self.follow_up_scenario({"delivery": "reopened", "dispatchId": "ctx_2", "state": "outcome_unknown"},
+                                dict(self.KILLED, state="start_unknown", stage="turn_start_unobserved",
+                                     terminalState="active"))
+        self.assertEqual(runtime_orca.load_registry()["pm-toy"]["live"], "ctx_1")
+        self.assertEqual([a["agent_status"] for a in self.rt.agents()], ["working"])
+        shows = [c[3] for c in self.calls() if "--full" in c and c[1] == "worker-show"]
+        self.assertEqual(shows, ["ctx_2"])  # only the follow-up search
+
     def test_a_dead_agent_in_another_unsettled_stage_is_gone(self):
         self.register(kind="claude", live="ctx_1")
         self.fake({"orchestration worker-show --dispatch ctx_1": [OK(dict(self.KILLED, stage="turn_ended"))],

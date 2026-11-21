@@ -211,7 +211,10 @@ def agent_ended(dispatch):
     good, and `--full` reads liveness reason missing_status with no evidence, 5 s after the
     kill; a live worker reads live/agent_status, one silent for 30 min reads stale_status
     (evidence kept), so neither matches. A starting agent reads missing_status too (a
-    follow-up for ~15 s, before its first hook): callers ask only after it read live."""
+    follow-up for ~15 s, before its first hook): callers ask only after it read live, or
+    Orca said it saw the turn start (worker-start, a mail answered `ready`). One killed
+    before its first hook reads start_unknown/turn_start_unobserved, like a slow start
+    (Orca: "may still be starting"), and takes mail: it stays working (measured)."""
     if dispatch in ENDED_SEEN:
         return True
     try:
@@ -228,6 +231,26 @@ def agent_ended(dispatch):
         ENDED_SEEN.add(dispatch)
         return True
     return False
+
+
+def mark_live(name, ours, live):
+    """Save `live` on registry row `name` while its dispatch is one of `ours` (best effort)."""
+    try:
+        if name:
+            update_registry(lambda r: (r.get(name) or {}).get("dispatch") in ours and r[name].update(live=live))
+    except HerdrError as e:
+        if e.code != "registry_locked":
+            raise  # else best effort: the next look saves it
+
+
+def sent_live(name, dispatch, result):
+    """After a mail that started a follow-up: Orca answers worker state `ready` only once it
+    saw claude's turn start, its first hook (measured: `outcome_unknown` when it never came),
+    as worker-start does. Mark the follow-up live so a death right after reads gone, also
+    when no look caught it live."""
+    nxt = (result or {}).get("dispatchId") if isinstance(result, dict) else None
+    if nxt and nxt != dispatch and result.get("state") == "ready":
+        mark_live(name, (dispatch, nxt), nxt)
 
 
 def transcript_of(dispatch, cwd):
@@ -290,15 +313,12 @@ class OrcaRuntime(object):
                 raise
             return None  # unknown dispatch: gone, so the watcher revives it
         dispatch = entry["dispatch"]
-        if isinstance(show, dict) and show.get("liveness") == "live" and entry.get("live") != dispatch:
+        # only an unsettled dispatch is ever checked: a settled one reading live (same terminal)
+        # must not overwrite the mark prompt() left for its follow-up
+        if isinstance(show, dict) and show.get("liveness") == "live" and entry.get("live") != dispatch \
+                and show.get("stage") != "settled":
             entry["live"] = dispatch  # once per dispatch: it started, so missing status means it died
-            try:
-                if name:
-                    update_registry(lambda r: (r.get(name) or {}).get("dispatch") == dispatch
-                                    and r[name].update(live=dispatch))
-            except HerdrError as e:
-                if e.code != "registry_locked":
-                    raise  # else best effort: the next look saves it
+            mark_live(name, (dispatch,), dispatch)
         # claude only: Orca records the agent process from claude's hooks (an entry from
         # before `kind` was stored may be codex: never read dead on absence)
         if isinstance(show, dict) and entry.get("kind") == "claude" and entry.get("live") == dispatch \
@@ -442,16 +462,16 @@ class OrcaRuntime(object):
             raise HerdrError("agent_not_found", name)
         show = self.show(entry, name)  # mail the current dispatch, not one a follow-up replaced
         try:
-            mutate(["orchestration", "send", "--to", "dispatch:" + entry["dispatch"],
-                    "--subject", "OKe", "--body", text], show)
+            sent_live(name, entry["dispatch"], mutate(["orchestration", "send", "--to", "dispatch:" + entry["dispatch"],
+                                                       "--subject", "OKe", "--body", text], show))
         except HerdrError as e:
             if NO_WORKER not in e.message and START_FAILED not in e.message:
                 raise
             old = entry["dispatch"]
             show = self.show(entry, name)
             if entry["dispatch"] != old and status_of(show):  # a follow-up started meanwhile: mail that one
-                mutate(["orchestration", "send", "--to", "dispatch:" + entry["dispatch"],
-                        "--subject", "OKe", "--body", text], show)
+                sent_live(name, entry["dispatch"], mutate(["orchestration", "send", "--to", "dispatch:" + entry["dispatch"],
+                                                           "--subject", "OKe", "--body", text], show))
                 return True
             # After the Orca app or the agent's claude died, Orca can no longer continue the
             # dispatch, though worker-show still reads it settled (seen live). The agent is
