@@ -116,6 +116,8 @@ Things you can say along the way:
 
 Optional. Only the values you set override the defaults.
 
+OKe keeps its files in `~/.oke`. To use another folder, set `OKE_HOME` in the `env` of `~/.claude/settings.json` (`"env": {"OKE_HOME": "D:/oke"}`): every agent OKe starts gets it there, including those Orca starts. A variable set only in your shell does not reach Orca's agents.
+
 ```json
 {
   "autonomy": "balanced",

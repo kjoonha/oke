@@ -66,6 +66,8 @@ Orca 에서:
 
 없어도 된다. 있으면 아래 값만 덮어쓴다.
 
+OKe 는 파일을 `~/.oke` 에 둔다. 다른 폴더를 쓰려면 `~/.claude/settings.json` 의 `env` 에 `OKE_HOME` 을 넣는다 (`"env": {"OKE_HOME": "D:/oke"}`). 그러면 Orca 가 띄우는 agent 까지 OKe 의 모든 agent 가 그 값을 받는다. 셸에서만 설정한 변수는 Orca 의 agent 에 닿지 않는다.
+
 ```json
 {
   "autonomy": "balanced",
