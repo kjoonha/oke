@@ -19,6 +19,8 @@ let tickRole = 'worker'
 let tickBoard: unknown = BOARD
 let answeredNow: string[] = []
 let autoCompact = true
+let okeState = true
+let draft = ''
 
 function answer(args: readonly string[]) {
   if (args[0] === 'tick') {
@@ -47,6 +49,8 @@ function engine(on: any, runs: Run[], prompts: string[]) {
   })
   on('turn.complete', () => ({ text: '' }))
   on('classic.StopFailure', () => ({}))
+  on('fs.exists', (_: any, e: any) => ({ value: okeState && String(e.path).endsWith('state.json') }))
+  on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }))
 }
 
 const TURN = { answer: '', durationMs: 1, isAborted: false, turnId: 't1' }
@@ -97,6 +101,53 @@ test('a permanent error is not resubmitted', async ($, on) => {
   await $.turn.complete({ ...TURN, reason: 'error' } as any)
   await clock.advance(600_000)
   expect(prompts.length).toBe(0)
+})
+
+test('a subagent API error is not the main loop one', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  const runs: Run[] = []
+  const prompts: string[] = []
+  engine(on, runs, prompts)
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.classic.StopFailure({ error: 'overloaded', agent_id: 'a1' } as any)
+  await $.turn.complete({ ...TURN, reason: 'error', agentId: 'a1' } as any)
+  await clock.advance(600_000)
+  expect(runs.some(r => r.argv.includes('--attempt'))).toBe(false)
+  expect(prompts.length).toBe(0)
+})
+
+test('a retry does not submit over a draft the person is typing', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  const prompts: string[] = []
+  engine(on, [], prompts)
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.complete({ ...TURN, reason: 'error' } as any)
+  draft = 'half a sentence'
+  try {
+    await clock.advance(60_000)
+  } finally {
+    draft = ''
+  }
+  expect(prompts.length).toBe(0)
+})
+
+test('without OKe state a plain session runs no python', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { USERPROFILE: 'C:/Users/u' })
+  const runs: Run[] = []
+  engine(on, runs, [])
+  okeState = false
+  try {
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await clock.advance(600_000)
+  } finally {
+    okeState = true
+  }
+  expect(runs.length).toBe(0)
 })
 
 test('outside herdr the session id is the place', async ($, on) => {

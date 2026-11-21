@@ -19,7 +19,7 @@ import runtime_bg
 import runtime_herdr
 import runtime_orca
 import wiki
-from runtime_herdr import DialogError, HerdrError, herdr, herdr_text, replace_file, session_of  # noqa: F401 (tests)
+from runtime_herdr import DialogError, HerdrError, herdr, herdr_text, replace_file, session_of, write_private  # noqa: F401 (tests)
 
 PHASES = ("intake", "planning", "awaiting_approval", "working", "reviewing",
           "awaiting_merge", "merging", "done", "failed")
@@ -57,7 +57,7 @@ def oke_home():
     home = os.environ.get("OKE_HOME") or os.path.join(os.path.expanduser("~"), ".oke")
     home = os.path.abspath(native_path(home))
     if not os.path.isdir(home):
-        os.makedirs(home)
+        os.makedirs(home, 0o700)  # agents' settings copies hold the user's env tokens
     return home
 
 
@@ -70,6 +70,7 @@ def load_config():
         "agents": {"worker": "claude", "reviewer": "claude"},  # which CLI runs each role
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
         "max_review_rounds": 10,  # a job's reviews stop there and the PM asks the user; null: no limit
+        "merge_ignore_untracked": [".omc/"],  # other tools' untracked folders never block a merge
         # effortLevel per role ("low" .. "max"); a role left out keeps the user's own setting
         "effort": {},
         "theme": "disco",  # the band's characters: disco (default), slime, mushroom, cute-dog, cute-cat, ... (README lists all)
@@ -489,7 +490,8 @@ def header_list(header, field):
 
 def write_lean_settings(folder, plugins=(), dirs=()):
     """Settings for a lean child: only the user's herdr hooks (herdr learns the session
-    id from them, revive needs it), env, and the plugins its assignment asks for.
+    id from them, revive needs it), PreToolUse guards, deny rules, env, and the plugins
+    its assignment asks for.
     Returns the file path, or None if unwritable."""
     user = user_json(os.path.join(claude_config_dir(), "settings.json"))
     hooks = {}
@@ -508,14 +510,24 @@ def write_lean_settings(folder, plugins=(), dirs=()):
             settings[name] = user[name]
     if plugins:
         settings["enabledPlugins"] = dict((p, True) for p in plugins)
+    # the user's deny rules and PreToolUse guards hold in a lean child too; `ask` rules
+    # are left out: under dontAsk they would refuse silently what the user only wanted to see
+    perms = user.get("permissions") if isinstance(user.get("permissions"), dict) else {}
+    deny = [r for r in perms.get("deny") or [] if isinstance(r, str)]
+    guards = [g for g in (user.get("hooks") or {}).get("PreToolUse") or [] if isinstance(g, dict)]
+    if guards:
+        hooks["PreToolUse"] = guards  # the herdr groups of this event are among them
+    if deny or dirs:
+        settings["permissions"] = {}
+    if deny:
+        settings["permissions"]["deny"] = deny
     if dirs:
         # `--add-dir` stops every new session at a trust dialog for a folder never
         # trusted (seen live with a fresh OKe home); this settings key does not
-        settings["permissions"] = {"additionalDirectories": list(dirs)}
+        settings["permissions"]["additionalDirectories"] = list(dirs)
     path = os.path.join(folder, "lean-settings.json")
     try:
-        with io.open(path, "w", encoding="utf-8") as f:
-            f.write(json.dumps(settings, indent=2, ensure_ascii=False))
+        write_private(path, json.dumps(settings, indent=2, ensure_ascii=False))
     except (IOError, OSError):
         return None
     return path
@@ -666,8 +678,7 @@ def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header
         if servers:
             path = os.path.join(folder, "mcp.json")
             try:
-                with io.open(path, "w", encoding="utf-8") as f:
-                    f.write(json.dumps({"mcpServers": servers}, indent=2, ensure_ascii=False))
+                write_private(path, json.dumps({"mcpServers": servers}, indent=2, ensure_ascii=False))
                 args += ["--mcp-config", path]
             except (IOError, OSError):
                 pass  # the child starts without them
@@ -1785,6 +1796,7 @@ def cmd_boundary(args):
 
 RETRYABLE_ERRORS = ("rate_limit", "overloaded", "server_error", "unknown", "")
 API_RETRY_LIMIT = 20
+UNKNOWN_RETRY_LIMIT = 2  # an error with no kind may be permanent: do not resubmit it for an hour
 
 
 def cmd_api_retry(args):
@@ -1803,7 +1815,8 @@ def cmd_api_retry(args):
     kind = args.error or ""
     if args.clear:
         out["action"] = "cleared"
-    elif kind in RETRYABLE_ERRORS and args.attempt <= limit:
+    elif kind in RETRYABLE_ERRORS and args.attempt <= (
+            min(limit, UNKNOWN_RETRY_LIMIT) if kind in ("unknown", "") else limit):
         out["action"], out["delay"] = "retry", 30 * 2 ** min(max(args.attempt, 1) - 1, 4)
         out["delay"] = min(out["delay"], 300)
         if marker:
@@ -1822,7 +1835,11 @@ def cmd_api_retry(args):
                 if seq is not None and not (header.get("seq") == seq and header.get("type") in FINAL_TYPES):
                     folders.append(pm_job_dir(job))
         else:
-            folders = [folder] if folder else []
+            # a final report the child already wrote stands: the error came after its work
+            seq = (read_header(os.path.join(folder, "assignment.md")) or {}).get("seq") if folder else None
+            header = (read_header(os.path.join(folder, "report.md")) or {}) if folder else {}
+            done = seq is not None and header.get("seq") == seq and header.get("type") in FINAL_TYPES
+            folders = [folder] if folder and not done else []
         for f_dir in folders:
             seq = (read_header(os.path.join(f_dir, "assignment.md")) or {}).get("seq")
             report = os.path.join(f_dir, "report.md")
@@ -2284,11 +2301,21 @@ BYPRODUCT = re.compile(r"^\?\? (.*/)?(__pycache__/|\.pytest_cache/|[^/]*\.py[co]
 ADD = ["add", "-u"]
 
 
+def byproduct(line):
+    """An untracked line of `git status --porcelain` that never blocks a merge: Python
+    caches, or a folder config `merge_ignore_untracked` names (another tool's state)."""
+    if not line.startswith("?? "):
+        return False
+    path = line[3:].strip('"')
+    return bool(BYPRODUCT.match(line)) or any(
+        path == p or path.startswith(p.rstrip("/") + "/") for p in load_config().get("merge_ignore_untracked") or [])
+
+
 def main_changes(main):
-    """(code, porcelain lines) of the main checkout, untracked Python caches left out: every
-    verify run leaves them (seen live), and they never block a merge."""
+    """(code, porcelain lines) of the main checkout, untracked byproducts left out: every
+    verify run leaves Python caches (seen live), and they never block a merge."""
     code, dirty = git_out(main, "status", "--porcelain")
-    return code, "\n".join(l for l in dirty.splitlines() if not BYPRODUCT.match(l))
+    return code, "\n".join(l for l in dirty.splitlines() if not byproduct(l))
 
 
 def pending_tree(main):
@@ -2344,7 +2371,7 @@ def commit_direct(job, info, main, review, reviewed):
         # the review passed on main as it is (the change was already there): recorded like
         # merge_job's already-in, so verify and done work
         new = [l[3:] for l in git_out(main, "status", "--porcelain")[1].splitlines()
-               if l.startswith("?? ") and not BYPRODUCT.match(l)]
+               if l.startswith("?? ") and not byproduct(l)]
         if new:  # the job's new files, unstaged, would never be committed
             return fail("untracked files %s: if they are the job's, `git add` them, get a new tree "
                         "review, then merge" % ", ".join(new))
@@ -2859,6 +2886,13 @@ def job_locked(args):
             if not os.path.isdir(os.path.dirname(dst)):
                 os.makedirs(os.path.dirname(dst))
             shutil.move(src, dst)
+            # the children's settings copies hold the user's env tokens: no need to keep them
+            for name in ("lean-settings.json", "bg-settings.json", "mcp.json"):
+                for path in glob.glob(os.path.join(glob.escape(dst), "**", name), recursive=True):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
         del state["jobs"][args.slug]
         save_state(state)
         if key:  # a later job of the same name must not inherit its agents

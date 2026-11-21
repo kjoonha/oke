@@ -5,6 +5,7 @@ below are the plumbing they share. Agent records keep herdr's shape: name, pane_
 agent_status, agent_session, terminal_id.
 """
 import json
+import io
 import os
 import subprocess
 import time
@@ -22,6 +23,15 @@ def replace_file(src, dst):
             if attempt == 19:
                 raise
             time.sleep(0.05)
+
+
+def write_private(path, text):
+    """Write a file only its owner can read: it may hold the user's env tokens.
+    Windows ignores the mode; the user's profile folder already guards it there."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.chmod(path, 0o600)  # an older file kept its wider mode
+    with io.open(fd, "w", encoding="utf-8") as f:
+        f.write(text)
 
 
 class HerdrError(Exception):
