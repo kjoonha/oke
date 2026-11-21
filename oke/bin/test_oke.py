@@ -688,9 +688,9 @@ class TestSpawn(SpawnBase):
             lean = json.load(f)
         self.assertEqual(lean["hooks"], {"SessionStart": [herdr_group]})
         self.assertEqual(lean["autoCompactWindow"], 400000)
-        # effort follows the user's session settings, as OMC's agents inherit it
-        self.assertEqual(lean["effortLevel"], "high")
-        self.assertEqual(lean["modelSettings"], {"claude-opus-5-5": {"effortLevel": "medium"}})
+        # the user's effort does not reach children: a user's max would run them all at max
+        self.assertNotIn("effortLevel", lean)
+        self.assertNotIn("modelSettings", lean)
         self.assertEqual(args[args.index("--model") + 1], "opus")
         picked = oke.launch_args("worker", c, self.home, "/p", header={"model": "sonnet"})
         self.assertEqual(picked[picked.index("--model") + 1], "sonnet")  # the job's assignment chose it

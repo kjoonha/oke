@@ -71,7 +71,7 @@ def load_config():
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
         "max_review_rounds": 10,  # a job's reviews stop there and the PM asks the user; null: no limit
         "merge_ignore_untracked": [".omc/"],  # other tools' untracked folders never block a merge
-        # effortLevel per role ("low" .. "max"); a role left out keeps the user's own setting
+        # effortLevel per role ("low" .. "max"); a lean child of a role left out uses the default
         "effort": {},
         "theme": "disco",  # the band's characters: disco (default), slime, mushroom, cute-dog, cute-cat, ... (README lists all)
     }
@@ -504,10 +504,10 @@ def write_lean_settings(folder, plugins=(), dirs=()):
     env.pop("CLAUDE_CODE_PLUGIN_DIRS", None)  # the user's own mods would load in every child
     env["OKE_HOME"] = oke_home()  # the skills say $OKE_HOME; a herdr pane does not inherit it
     settings = {"hooks": hooks, "env": env}
-    # the user's compaction and effort settings hold in children too
-    for name in ("autoCompactWindow", "effortLevel", "modelSettings"):
-        if name in user:
-            settings[name] = user[name]
+    # the user's compaction setting holds in children too; effort does not (a user's max
+    # would run every child at max): config `effort` sets it per role
+    if "autoCompactWindow" in user:
+        settings["autoCompactWindow"] = user["autoCompactWindow"]
     if plugins:
         settings["enabledPlugins"] = dict((p, True) for p in plugins)
     # the user's deny rules and PreToolUse guards hold in a lean child too; `ask` rules
