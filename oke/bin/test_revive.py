@@ -239,6 +239,82 @@ class TestRevive(ReviveBase):
         self.revive_scenario()
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
 
+    def test_an_automatic_resume_is_never_repeated_without_a_report(self):
+        # autonomy full: a revive that failed or died at once goes to the user
+        self.revive_scenario()
+        self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")
+        self.assertTrue(self.child()["auto_revived"])
+        self.assertEqual(oke.revive("fix-a-w1", auto=True), "ask")
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")  # the user said resume
+        self.assertFalse(self.child()["auto_revived"])
+        self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")
+
+    def test_a_revived_agent_gets_the_mail_queued_while_it_was_down(self):
+        # seen in an e2e: the mail stayed in the inbox and the PM worked from the older assignment
+        oke.queue_mail("fix-a-w1", "pm", "use the new plan")
+        self.revive_scenario()
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")
+        self.assertIn("OKe inbox: pm: use the new plan", json.dumps(self.calls()))
+        self.assertEqual(oke.inbox_messages("fix-a-w1"), [])
+
+    def test_mail_a_deliver_holds_is_left_to_it(self):
+        oke.queue_mail("fix-a-w1", "pm", "use the new plan")
+        self.assertTrue(oke.try_lock("deliver-fix-a-w1"))
+        try:
+            self.revive_scenario()
+            self.assertEqual(oke.revive("fix-a-w1"), "revived")
+        finally:
+            oke.unlock("deliver-fix-a-w1")
+        self.assertNotIn("use the new plan", json.dumps(self.calls()))
+        self.assertEqual(len(oke.inbox_messages("fix-a-w1")), 1)
+
+    def test_only_mail_that_fits_goes_with_the_start(self):
+        # a Windows command line holds about 32k characters
+        for i in range(3):
+            oke.queue_mail("fix-a-w1", "pm", ("m%d " % i) + "x" * 7000)
+        self.revive_scenario()
+        self.assertEqual(oke.revive("fix-a-w1"), "revived")
+        self.assertIn("m1 x", json.dumps(self.calls()))
+        self.assertNotIn("m2 x", json.dumps(self.calls()))
+        self.assertEqual([t[:7] for _, t in oke.inbox_messages("fix-a-w1")], ["pm: m2 "])  # left to deliver
+
+    def test_mail_stays_queued_when_the_revive_fails(self):
+        oke.queue_mail("fix-a-w1", "pm", "use the new plan")
+        original = oke.relaunch
+
+        def broken(*a):
+            raise runtime_herdr.HerdrError("agent_not_ready", "no")
+        self.revive_scenario()
+        self.assertEqual(len(oke.inbox_messages("fix-a-w1")), 1)
+        oke.relaunch = broken
+        try:
+            self.assertEqual(oke.revive("fix-a-w1"), "failed")
+        finally:
+            oke.relaunch = original
+        self.assertEqual(len(oke.inbox_messages("fix-a-w1")), 1)
+
+    def test_an_automatic_resume_lost_to_an_outage_does_not_count(self):
+        original = oke.relaunch
+
+        def down(*a):
+            raise runtime_herdr.HerdrError("herdr_unavailable", "down")
+        oke.relaunch = down
+        try:
+            self.revive_scenario()
+            with self.assertRaises(runtime_herdr.HerdrError):
+                oke.revive("fix-a-w1", auto=True)
+        finally:
+            oke.relaunch = original
+        self.assertFalse(self.child().get("auto_revived"))
+        self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")  # not refused as a second one
+
+    def test_a_report_after_an_automatic_resume_allows_the_next(self):
+        self.revive_scenario()
+        self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")
+        self.write_file(os.path.join(self.child_dir, "report.md"), "type: waiting\nseq: 2\n---\n")
+        os.utime(os.path.join(self.child_dir, "report.md"), (1e9, 1e9))
+        self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")
+
     def test_new_report_resets_the_death_count(self):
         self.write_file(os.path.join(self.child_dir, "report.md"), "type: waiting\nseq: 2\n---\n")
         children = oke.read_children(self.key)

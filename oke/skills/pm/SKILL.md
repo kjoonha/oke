@@ -168,7 +168,7 @@ When a child's wait finishes, act on its first line:
 | `report blocked` | Children do not use this type. Treat it as `report question` |
 | `idle_no_report` | Once: `$OKE send <child> "continue"` (its turn stopped short: it picks up where it was), then wait again. Second time: report `failed` for that job |
 | `bad_report` | Once: `$OKE send <child> "Rewrite your report.md in the format your skill gives."`, then wait again. Second time: report `failed` for that job |
-| `gone` | If `$OKE status` shows the job held, ignore it: the hold closed the child. Otherwise the child died; OKe does not restart it by itself. Report `question` for that job: name the child and ask whether to revive it or give the job up. On `kind: answer` "revive": `$OKE revive <child> --reset`, then wait again |
+| `gone` | If `$OKE status` shows the job held, ignore it: the hold closed the child. Otherwise the child died; OKe does not restart it by itself. If `autonomy` in `$OKE_HOME/config.json` is `full` (read the file now), first run `$OKE revive <child> --auto`: on `revived` write it under that job on your board ("<child> died; resumed it") and wait again; on `alive` or `busy` wait again; on `not_needed` its job is held or done: do nothing. `ask` (its last automatic resume never reported, so it failed or died at once), `failed` or any other answer: report as below. Report `question` for that job: name the child and ask whether to revive it or give the job up. On `kind: answer` "revive": `$OKE revive <child> --reset`, then wait again |
 | `superseded` | A newer wait on that child replaced this one. Do nothing |
 | `cancelled` | The user gave that job up. Do nothing for it: no report, no new wait |
 | `{"deliver": {"to": ..., "text": ...}}` | The child runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again |
@@ -300,4 +300,4 @@ Report `done` with what changed.
 
 ## Autonomy
 
-`autonomy` in `$OKE_HOME/config.json`: `conservative` sends every worker question upward; `balanced` and `full` let you answer what the plan, code or wiki settles.
+`autonomy` in `$OKE_HOME/config.json` (read it at each decision; the user may change it): `conservative` sends every worker question upward; `balanced` and `full` let you answer what the plan, code or wiki settles. `full` also resumes a dead child once without asking (the `gone` row).

@@ -61,7 +61,7 @@ Agents talk through files under `$OKE_HOME` (default `~/.oke`), so a crash loses
 - Python 3.6 or later (standard library only) and git
 - One place to run the agents:
   - herdr 0.9.5 or later (agents run in herdr panes), or
-  - Orca (agents run as Orca orchestration workers; tested with 1.4.261), or
+  - Orca (agents run as Orca orchestration workers, each in its own Orca terminal; tested with 1.4.261), or
   - neither: agents run as background `claude --bg` sessions.
 - Optional: codex or opencode, to use as the worker or reviewer
 
@@ -96,6 +96,16 @@ This is the same place a marketplace from GitHub lives. The plugin is read from 
 
 Start Claude Code in a herdr pane, an Orca terminal or a plain terminal, and run `/oke:start`. That session becomes the orchestrator. Tell it what you want done. If the session was cut off, run `/oke:resume`.
 
+In Orca:
+
+- OKe runs only in an Orca terminal tab. `/oke:start` in an Orca chat refuses ("OKe runs in an Orca terminal, not a chat"); a chat draws no mod pane.
+- Orca's Agent Orchestration setting must be on, and Orca's default for new agent tabs must be CLI, not Chat. OKe starts each PM, worker and reviewer as an Orca worker in a new terminal tab (titled `OKe PM: <repo>`, `OKe worker 1: <job>`, ...); if Orca starts it as a chat instead, OKe stops it right after it started and says to change that default (or, if it could not stop it, which one to close in Orca). The first PM start is where you meet this.
+- Orca starts the agents itself, so OKe's launch flags do not reach them: install the OKe plugin in Claude Code, and `lean_launch` has no effect there.
+- A closed agent terminal is reopened by Orca with the next message to that agent. An agent whose process died reads `gone`, and the orchestrator asks whether to resume it (resume, hold or cancel; with autonomy `full` see `autonomy` below). A resume starts a new Orca worker that reads the dead one's transcript, and gets the messages queued for it meanwhile.
+- If Orca sent an agent its task but never saw claude start (`start_unknown`), reading that agent shows a note instead of its screen: revive it (`oke close <handle>`, then `oke revive <name> --reset`) or wait; it turns back to working once Orca sees its turn.
+
+`oke status` (and `oke board`) work from any terminal: they read the runtime the orchestrator chose. Outside that runtime's terminals (for example a plain shell while OKe runs in herdr or Orca) they only report; nothing can be started from there.
+
 Things you can say along the way:
 
 - `hold <job>`: set a job aside. Its agents are closed; its worktree and branch stay.
@@ -129,7 +139,7 @@ Optional. Only the values you set override the defaults.
   - Palette variants: `pastel` (bunnies), `candy` (hearts), `ocean` (whales), `autumn` (foxes), `midnight` (owls).
   - Colour schemes, with role colours from the scheme's own palette: `tokyo-night`, `catppuccin` (mocha), `github` (dark), `dracula`, `nord`, `gruvbox`, `solarized`, `one-dark`, `monokai`, `rose-pine`, `everforest`, `kanagawa`, `ayu`, `material`, `synthwave-84`.
   - An unknown name falls back to `disco`.
-- `autonomy`: `conservative` (the worker asks before every command), `balanced` (default) or `full`.
+- `autonomy`: `conservative` (the worker asks before every command), `balanced` (default) or `full`. With `full` the orchestrator approves plans and merges without asking, and a PM or child that died (`gone`) is resumed once without asking (`oke revive <name> --auto`); you are told in one line (a PM notes a resumed child on its board). If it dies again before it reported anything, you are asked (resume, hold or cancel). Held jobs are never resumed. `conservative` and `balanced` always ask.
 - `agents`: the CLI that runs the worker and the reviewer: `claude`, `codex` or `opencode`. The orchestrator and PMs are always claude. Limits are listed under "안 되는 것" in `docs/superpowers/specs/2026-11-13-oke-slice4-design.md`.
 - `lean_launch`: start PMs, workers and reviewers without your plugins, hooks and MCP servers (`--setting-sources project,local --strict-mcp-config`). Only the herdr hooks and `env` from your `settings.json` are copied into `~/.oke/lean-settings.json`. This cuts the starting context from about 76k to 40k tokens. Each role also gets only its core tools (`--tools`, about 15k tokens at start). For each job, the PM turns on extra tools with the assignment header's `tools:`, `mcp:` and `plugins:` lines (`oke.py extras` lists them). Set it to `false` if the agents need all your personal settings.
 - `effort`: the effort level (`low` to `max`) per role (`pm`, `worker`, `reviewer`). A role left out keeps the `effortLevel` of your own settings. Claude agents only.

@@ -226,7 +226,7 @@ class TestIdentityInBg(BgBase):
 
 
 class TestBoardAndScreen(BgBase):
-    def test_board_text_and_html(self):
+    def test_board_text(self):
         os.environ["OKE_RUNTIME"] = "bg"
         self.job("fix-a", "working")
         oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
@@ -236,9 +236,6 @@ class TestBoardAndScreen(BgBase):
         self.assertEqual(self.cli("board"), 0, self.err)
         self.assertIn("job fix-a: working", self.out)
         self.assertIn("    worker fix-a-w1: working", self.out)
-        self.assertEqual(self.cli("board", "--html"), 0, self.err)
-        self.assertIn("<li", self.out)
-        self.assertIn("fix-a-w1", self.out)
 
     def test_screen_strips_terminal_escapes(self):
         log = "\x1b[38;2;1;2;3mhello\x1b[K\n\x1b[mhello\nworld \x1b]0;t\x07\n"

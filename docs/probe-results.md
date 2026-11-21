@@ -84,3 +84,10 @@ Orca 재시작 (`taskkill //F //IM Orca.exe` 후 Explorer 로 시작; herdr 는 
 - `taskkill //IM Orca.exe` 는 pty daemon (`daemon-host-profiles\...\Orca.exe`) 도 죽이고, 터미널 안의 claude 도 모두 죽는다 (두 pid 모두 사라짐). 그래서 이 방식의 재시작 뒤 살아남는 agent 는 없다; `restoredUnconfirmed` 행도 보이지 않았다. 재시작 뒤 터미널 목록은 비어 있고 예전 handle 은 `terminal show` 에서 `terminal_handle_stale`.
 - 일하던 worker: 재시작 2 초 뒤부터 `abandoned / terminal_missing` ("no longer live after orchestration recovery"), `--full` `missing_status`. OKe: gone (기존 처리).
 - settled worker: `succeeded / settled / unverifiable`, `terminalState retained`, `--full` `missing_status` (터미널을 닫은 쉬는 PM 과 같은 모양). OKe: idle. OKe 메일 (새 coordinator 터미널, run-use rebind) 은 약 190 초 막힌 뒤 follow-up 이 `failed / terminal_create` "The worker's conversation is open somewhere Orca cannot reach" 로 끝나 START_FAILED 로 거절됐고, OKe 는 release 후 gone 으로 보았다 (기존 처리). 메일 전에는 idle 로 보이지만 할 일이 없는 agent 라 다음 메일에서 드러난다. 바꾼 것 없음.
+
+# Orca: chat 과 worker 의 제약 (2026-11-21, Orca 1.4.261)
+
+- Orca chat: 새 agent 탭 기본값 (설정 `agentDefaultSurface`) 이 chat 이면 `worker-start --agent claude` 가 chat worker (`structworker_` handle, Agent SDK, 화면 없음, mod 안 보임) 를 띄운다. OKe 는 그 handle 을 보면 그 worker 를 stop, release 하고 실패를 알린다. UI 나 `orca agent launch --surface chat` 으로 연 chat 에는 `ORCA_TERMINAL_HANDLE` 이 없고 `ORCA_CHAT_SCRATCH_DIR` 가 있다. OKe 는 이것으로 chat 을 알아보고 `oke status` 에서 거절한다.
+- worker 는 `worker-start --terminal` 도 `--on` 도 못 쓴다: `invalid_argument: A worker starts helpers in a new agent on this host; omit --on and --terminal` (orcad-server.js 가 worker caller 에게 거절). PM 은 Orca worker 이므로 자식을 `worker-start --agent <kind>` 로만 띄울 수 있다.
+- 터미널이 닫힌 settled worker 에 메일을 보내면 Orca 가 새 터미널에서 다시 연다 (`delivery reopened`, `claude --plugin-dir ...orca-agent-view --effort medium --resume <session>`). `--agent` 로 띄운 agent 는 처음부터 OKe 의 실행 옵션 없이 돈다.
+- fence: coordinator A 가 Run R 을 만들고 B 가 `run-use R` 하면, A 의 `worker-start` 는 fence 되지 않고 새 Run 을 만든다 (`runCreated true`). A 의 R 쪽 worker 로의 send 만 `consumer_fenced` (mutate 가 처리).

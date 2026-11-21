@@ -313,10 +313,11 @@ RUNTIMES = {"herdr": runtime_herdr.HerdrRuntime, "bg": runtime_bg.BgRuntime, "or
 
 
 def default_runtime():
-    """herdr inside a herdr pane, orca inside an Orca terminal or chat, else bg."""
+    """herdr inside a herdr pane, orca inside Orca, else bg. An Orca chat counts as Orca
+    (never bg), though OKe refuses to run there (cmd_status)."""
     if os.environ.get("HERDR_ENV") == "1":
         return "herdr"
-    return "orca" if os.environ.get("ORCA_TERMINAL_HANDLE") else "bg"
+    return "orca" if os.environ.get("ORCA_TERMINAL_HANDLE") or runtime_orca.in_chat() else "bg"
 _runtimes = {}
 
 
@@ -1427,6 +1428,20 @@ def new_pane(state, role, key, cwd):
 
 
 def relaunch(state, role, key, name, record, folder):
+    """Start a dead agent again. It gets the mail queued while it was down with its start,
+    under deliver's lock (a wait delivering at the same time would mail it twice); if a
+    deliver holds the lock, the mail is left to that deliver."""
+    lock = "deliver-" + name
+    held = role != "orchestrator" and try_lock(lock)
+    try:
+        return start_again(state, role, key, name, record, folder, held)
+    finally:
+        if held:
+            unlock(lock)
+
+
+def start_again(state, role, key, name, record, folder, with_mail):
+    mail = []
     if role == "orchestrator":
         agent, prompt, cwd = ORCH_NAME, "/oke:start", native_path(record.get("cwd") or oke_home())
         args = strip_resume(record["argv"])
@@ -1442,6 +1457,9 @@ def relaunch(state, role, key, name, record, folder):
                 " Also re-read your board.md, then continue."
         if role == "pm":
             prompt += pm_jobs_note(state, key)
+        mail = fit_mail(inbox_messages(name)) if with_mail else []
+        if mail:
+            prompt += "\n\nOKe inbox: " + " | ".join(t for _, t in mail)
         kind, args = agent_command(kind, role, load_config(), oke_home(), plugin_root(), folder,
                                    record.get("session"))
     if role == "orchestrator" and record.get("session"):
@@ -1461,8 +1479,8 @@ def relaunch(state, role, key, name, record, folder):
     pane = new_pane(state, role, key, cwd)
     # The folder was trusted when the agent first started; a trust dialog now is unexpected.
     try:
-        return runtime().start(agent, pane, args, prompt, lambda: False,
-                           kind=kind if role != "orchestrator" else "claude")
+        info = runtime().start(agent, pane, args, prompt, lambda: False,
+                               kind=kind if role != "orchestrator" else "claude")
     except (HerdrError, DialogError):
         # herdr keeps the name of a start that failed; with the pane closed it is
         # gone again, so the next watcher round does not read it as alive.
@@ -1471,12 +1489,16 @@ def relaunch(state, role, key, name, record, folder):
         except HerdrError:
             pass
         raise
+    mark_read(agent, mail)
+    return info
 
 
-def revive(name):
+def revive(name, auto=False):
     """Bring a dead OKe agent back in its own session. Returns revived, alive, busy
-    (another process is reviving it), not_needed, failed or unknown. Only an explicit
-    request revives: nothing in OKe restarts a dead agent by itself."""
+    (another process is reviving it), not_needed, failed, unknown, or ask: `auto` (an
+    orchestrator or PM resuming it unasked, autonomy full) after an automatic resume of
+    it that it never reported since. Only a request revives: nothing in OKe restarts
+    a dead agent by itself."""
     state = load_state()
     found = find_target(state, name)
     if found is None:
@@ -1485,12 +1507,12 @@ def revive(name):
     if not try_lock(lock):
         return "busy"
     try:
-        return revive_locked(found[1])
+        return revive_locked(found[1], auto)
     finally:
         unlock(lock)
 
 
-def revive_locked(name):
+def revive_locked(name, auto=False):
     state = load_state()  # again, under the lock: another watcher may have revived it
     found = find_target(state, name)
     if found is None:
@@ -1509,6 +1531,8 @@ def revive_locked(name):
     revives = record.get("revives", 0)
     if folder and mtime != record.get("report_mtime"):
         revives = 0  # it reported since the last revive (the board shows the count)
+    elif auto and record.get("auto_revived"):
+        return "ask"  # its last automatic resume did not hold: never twice in a row, the user decides
     if folder:
         try:
             os.remove(os.path.join(folder, "api-retry.json"))  # the dead process's retry
@@ -1516,14 +1540,15 @@ def revive_locked(name):
             pass
     # Counted before the start: a watcher killed during a slow start must not leave
     # the count unchanged and retry forever.
-    update_record(role, key, name, {"revives": revives + 1, "report_mtime": mtime, "gave_up": False})
+    update_record(role, key, name, {"revives": revives + 1, "report_mtime": mtime, "gave_up": False,
+                                    "auto_revived": auto})
     fields = {}
     try:
         info = relaunch(state, role, key, name, record, folder)
     except (HerdrError, DialogError) as e:
         if isinstance(e, HerdrError) and e.code == "herdr_unavailable":
             # herdr was down, the agent did not crash again: do not count this try
-            update_record(role, key, name, {"revives": revives})
+            update_record(role, key, name, {"revives": revives, "auto_revived": record.get("auto_revived", False)})
             raise
         log_event("revive_failed %s: %s" % (name, (str(e).strip().splitlines() or [""])[0]))
         return "failed"
@@ -1546,7 +1571,7 @@ def cmd_revive(args):
         found = find_target(load_state(), args.agent)
         if found:
             update_record(found[0], found[2], found[1], {"revives": 0, "gave_up": False})
-    print(revive(args.agent))
+    print(revive(args.agent, args.auto))
     return 0
 
 
@@ -1652,7 +1677,7 @@ TODO_MARKS = {"completed": "v", "in_progress": ">", "pending": "o"}
 
 
 def board_lines(tree):
-    """The board as (depth, text) lines: one renderer-neutral list for --text and --html."""
+    """The board as (depth, text) lines."""
     out = []
 
     def agent(n, depth):
@@ -1679,15 +1704,9 @@ def board_lines(tree):
 
 
 def cmd_board(args):
-    """The board for hosts that cannot draw the mod's pane (Orca chat, SDK hosts)."""
+    """The board for hosts that cannot draw the mod's pane (SDK hosts)."""
     lines = board_lines(board_tree(load_state(), list_agents()))
-    if not args.html:
-        print("\n".join("  " * d + t for d, t in lines))
-        return 0
-    import html
-    items = "".join('<li style="margin-left:%dem">%s</li>' % (d * 1.5, html.escape(t)) for d, t in lines)
-    print('<div style="font-family:monospace"><h3>OKe board</h3><ul style="list-style:none;padding:0">%s</ul></div>'
-          % items)
+    print("\n".join("  " * d + t for d, t in lines))
     return 0
 
 
@@ -1843,6 +1862,8 @@ def cmd_status(args):
     # herdr calls are slow (seconds each): make them before taking the lock, so
     # spawn and the waits do not time out on it. The agent list may then be a few
     # seconds old: an agent that just started can show as dead until the next status.
+    if runtime_orca.in_chat():
+        return fail(runtime_orca.CHAT_REFUSAL)  # /oke:start's first command: no screen, no mod there
     if args.claim and not os.environ.get("OKE_RUNTIME"):
         # one runtime per OKe home, chosen by where the orchestrator starts
         want = default_runtime()
@@ -3293,26 +3314,51 @@ def deliver(agent):
         msgs = inbox_messages(agent)
         if not msgs:
             return None
+        msgs = fit_mail(msgs) or msgs[:1]  # the rest goes on the next delivery
         text = "OKe inbox: " + " | ".join(t for _, t in msgs)
         took = runtime().prompt(agent, text)
         if not took:
             return False
-        done = os.path.join(inbox_dir(agent), "read")
-        if not os.path.isdir(done):
-            os.makedirs(done, exist_ok=True)
         # shortcut: with ask_caller the mail counts as read once handed out; a caller
         # compacted before its SendMessage loses it (the file stays in read/)
-        for path, _ in msgs:
-            replace_file(path, os.path.join(done, os.path.basename(path)))
-        for old in os.listdir(done):  # read mail is kept a week, for a look back
-            try:
-                if os.path.getmtime(os.path.join(done, old)) < time.time() - 7 * 86400:
-                    os.remove(os.path.join(done, old))
-            except OSError:
-                pass
+        mark_read(agent, msgs)
         return text if took == "ask_caller" else True
     finally:
         unlock(lock)
+
+
+MAIL_CHARS = 16000  # one delivery's text: a command line (Windows: 32k) must hold it
+
+
+def fit_mail(msgs):
+    """The oldest messages whose text fits in one delivery (none when the first is too long)."""
+    out, size = [], 0
+    for m in msgs:
+        size += len(m[1]) + 3
+        if size > MAIL_CHARS:
+            break
+        out.append(m)
+    return out
+
+
+def mark_read(agent, msgs):
+    """Move delivered inbox messages to read/ (kept a week, for a look back)."""
+    if not msgs:
+        return
+    done = os.path.join(inbox_dir(agent), "read")
+    os.makedirs(done, exist_ok=True)
+    for path, _ in msgs:
+        try:
+            if os.path.exists(path):
+                replace_file(path, os.path.join(done, os.path.basename(path)))
+        except OSError:
+            pass  # moved already (a job cancel drops its mail): the delivery still happened
+    for old in os.listdir(done):
+        try:
+            if os.path.getmtime(os.path.join(done, old)) < time.time() - 7 * 86400:
+                os.remove(os.path.join(done, old))
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------- pending
@@ -3484,6 +3530,7 @@ def build_parser():
     revive_p = sub.add_parser("revive")
     revive_p.add_argument("agent")
     revive_p.add_argument("--reset", action="store_true")
+    revive_p.add_argument("--auto", action="store_true")  # autonomy full: refuses a second one in a row
     revive_p.set_defaults(func=cmd_revive)
 
     resume_all = sub.add_parser("resume-all")
@@ -3540,8 +3587,7 @@ def build_parser():
             p.add_argument("--remove", metavar="ID")
             p.add_argument("--job", dest="remove_job", help="with --remove: the job the worktree is for")
 
-    board = sub.add_parser("board", help="the board as text or HTML, for hosts without the mod pane")
-    board.add_argument("--html", action="store_true")
+    board = sub.add_parser("board", help="the board as text, for hosts without the mod pane")
     board.set_defaults(func=cmd_board)
 
     send = sub.add_parser("send")

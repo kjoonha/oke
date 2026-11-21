@@ -17,7 +17,7 @@
 ## 필요한 것
 
 - Claude Code 2.1.322 이상 (mod 를 지원하는 버전)
-- herdr 0.9.5 이상 (`herdr agent start / prompt / wait` 가 있어야 한다)
+- herdr 0.9.5 이상 (`herdr agent start / prompt / wait` 가 있어야 한다), 또는 Orca (agent 마다 Orca 터미널 하나; 1.4.261 에서 확인), 또는 둘 다 없으면 `claude --bg` 백그라운드 세션
 - Python 3.6 이상 (표준 라이브러리만 쓴다), git
 - 선택: codex 또는 opencode (worker / reviewer 로 쓸 때)
 
@@ -50,7 +50,17 @@ GitHub 으로 받은 marketplace 와 같은 자리다. 플러그인은 이 폴�
 
 ## 쓰기
 
-herdr pane 에서 Claude Code 를 켜고 `/oke:start`. 그 세션이 orchestrator 가 된다. 하고 싶은 일을 말하면 된다. 세션이 끊겼으면 `/oke:resume`.
+herdr pane, Orca 터미널 또는 일반 터미널에서 Claude Code 를 켜고 `/oke:start`. 그 세션이 orchestrator 가 된다. 하고 싶은 일을 말하면 된다. 세션이 끊겼으면 `/oke:resume`.
+
+Orca 에서:
+
+- OKe 는 Orca 의 터미널 탭에서만 돈다. Orca chat 에서는 `/oke:start` 가 거절한다 ("OKe runs in an Orca terminal, not a chat"). chat 에는 mod 화면이 없다.
+- Orca 의 Agent Orchestration 설정이 켜져 있어야 하고, Orca 의 새 agent 탭 기본값이 Chat 이 아니라 CLI 여야 한다. OKe 는 PM, worker, reviewer 를 Orca worker 로 새 터미널 탭에서 띄운다 (탭 이름 `OKe PM: <repo>`, `OKe worker 1: <job>` ...). Orca 가 chat 으로 띄우면 OKe 가 뜬 직후 그것을 멈추고 그 기본값을 바꾸라고 알린다 (멈추지 못했으면 Orca 에서 닫을 것을 알려 준다). 첫 PM 을 띄울 때 이것을 만난다.
+- agent 는 Orca 가 직접 띄우므로 OKe 의 실행 옵션이 닿지 않는다: OKe 플러그인을 Claude Code 에 설치해야 하고, `lean_launch` 는 효과가 없다.
+- agent 터미널을 닫으면 그 agent 에게 다음 메시지가 갈 때 Orca 가 다시 연다. 프로세스가 죽은 agent 는 `gone` 이고, orchestrator 가 다시 띄울지 묻는다 (resume / hold / cancel; autonomy `full` 은 아래 `autonomy`). resume 은 죽은 agent 의 transcript 를 읽는 새 Orca worker 를 띄우고, 그동안 쌓인 메시지도 같이 준다.
+- Orca 가 task 를 보냈는데 claude 가 뜨는 것을 못 봤으면 (`start_unknown`), 그 agent 를 읽을 때 화면 대신 안내가 나온다: 다시 띄우거나 (`oke close <handle>`, 그다음 `oke revive <name> --reset`) 기다린다. Orca 가 turn 을 보면 다시 working 이 된다.
+
+`oke status` (와 `oke board`) 는 어느 터미널에서나 된다: orchestrator 가 고른 runtime 을 읽는다. 그 runtime 의 터미널 밖 (예: OKe 가 herdr 나 Orca 에서 도는데 일반 셸) 에서는 보여 주기만 하고 아무것도 띄우지 못한다.
 
 ## 설정: `~/.oke/config.json`
 
@@ -79,7 +89,7 @@ herdr pane 에서 Claude Code 를 켜고 `/oke:start`. 그 세션이 orchestrato
   - 컬러 스킴 (역할 색을 그 스킴의 팔레트에서 가져온다): `tokyo-night`, `catppuccin` (mocha), `github` (dark), `dracula`, `nord`, `gruvbox`, `solarized`, `one-dark`, `monokai`, `rose-pine`, `everforest`, `kanagawa`, `ayu`, `material`, `synthwave-84`.
   - 모르는 이름이면 `disco`.
 
-- `autonomy`: `conservative` (worker 가 명령마다 승인을 묻는다), `balanced` (기본), `full`.
+- `autonomy`: `conservative` (worker 가 명령마다 승인을 묻는다), `balanced` (기본), `full`. `full` 이면 orchestrator 가 계획과 merge 를 묻지 않고 승인하고, 죽은 (`gone`) PM 이나 자식을 한 번은 묻지 않고 다시 띄운다 (`oke revive <name> --auto`); 한 줄로 알려 준다 (PM 은 다시 띄운 자식을 자기 board 에 적는다). 그 뒤 아무 보고 없이 또 죽으면 묻는다 (resume / hold / cancel). hold 한 job 은 다시 띄우지 않는다. `conservative` 와 `balanced` 는 늘 묻는다.
 - `agents`: worker / reviewer 를 띄울 CLI. `claude`, `codex`, `opencode`. orchestrator 와 PM 은 늘 claude 다. 제약은 `docs/superpowers/specs/2026-11-13-oke-slice4-design.md` 의 "안 되는 것".
 - `lean_launch`: PM / worker / reviewer 를 사용자 plugin, hook, MCP 서버 없이 띄운다 (`--setting-sources project,local --strict-mcp-config`). 사용자 `settings.json` 에서 herdr hook 과 `env` 만 `~/.oke/lean-settings.json` 으로 옮긴다. 시작 context 가 약 76k 에서 40k token 으로 준다. 도구도 역할별 핵심 도구만 켠다 (`--tools`, 시작 context 약 15k token). PM 이 job 마다 assignment header 의 `tools:`, `mcp:`, `plugins:` 로 필요한 것만 더 켠다 (`oke.py extras` 가 목록을 보여준다). 자식에게 개인 설정 전부가 필요하면 `false`.
 

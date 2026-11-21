@@ -19,7 +19,7 @@ def ERR(code, message=None):
             "exit": 1}
 
 
-STARTED = {"dispatchId": "ctx_1", "terminal": "structworker_1", "state": "ready"}
+STARTED = {"dispatchId": "ctx_1", "terminal": "termw_1", "state": "ready"}
 WORKING = {"liveness": "live", "activity": "working", "terminalState": "retained"}
 
 
@@ -33,7 +33,7 @@ class OrcaBase(SpawnBase):
         self.rt = runtime_orca.OrcaRuntime()
         runtime_orca.ENDED_SEEN.clear()
 
-    def register(self, name="fix-a-w1", dispatch="ctx_1", handle="structworker_1", **more):
+    def register(self, name="fix-a-w1", dispatch="ctx_1", handle="termw_1", **more):
         reg = runtime_orca.load_registry()
         reg[name] = dict({"dispatch": dispatch, "handle": handle, "cwd": self.repo}, **more)
         runtime_orca.save_registry(reg)
@@ -72,14 +72,14 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(argv[argv.index("--worktree") + 1], "path:" + self.repo.replace("\\", "/"))
         spec = argv[argv.index("--spec") + 1]
         self.assertTrue(spec.endswith("go") and "worker_done" in spec)
-        self.assertEqual((info["pane_id"], info["agent_session"]), ("structworker_1", {"value": "ctx_1"}))
+        self.assertEqual((info["pane_id"], info["agent_session"]), ("termw_1", {"value": "ctx_1"}))
         self.assertEqual(seen, [1])
         self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["dispatch"], "ctx_1")
 
     def test_the_tab_says_who_is_there(self):
         self.fake({"orchestration worker-start": [OK(STARTED)], "terminal rename": [OK({})]})
         self.rt.start("pm-toy-6b0484", self.repo, [], "go", lambda: False)
-        self.assertEqual(self.calls()[1], ["terminal", "rename", "--terminal", "structworker_1",
+        self.assertEqual(self.calls()[1], ["terminal", "rename", "--terminal", "termw_1",
                                            "--title", "OKe PM: toy", "--json"])
         t = runtime_orca.title_of
         self.assertEqual((t("fix-a-w1"), t("fix-a-rv"), t("odd")),
@@ -99,7 +99,7 @@ class TestOrcaRuntime(OrcaBase):
 
     def test_agents_drop_gone_workers(self):
         self.register()
-        self.register("pm-toy", "ctx_2", "structworker_2")
+        self.register("pm-toy", "ctx_2", "termw_2")
         self.fake({"orchestration worker-show --dispatch ctx_1": [OK(WORKING)],
                    "orchestration worker-show --dispatch ctx_2": [OK(dict(WORKING, liveness="lost"))]})
         self.assertEqual([(a["name"], a["agent_status"]) for a in self.rt.agents()], [("fix-a-w1", "working")])
@@ -108,10 +108,10 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(c.exception.code, "agent_not_found")
 
     def test_a_follow_up_dispatch_takes_over_the_entry(self):
-        self.register("pm-toy", "ctx_1", "structworker_1")
+        self.register("pm-toy", "ctx_1", "termw_1")
         settled = {"stage": "settled", "liveness": "unverifiable", "runId": "run_1"}
-        rows = {"workers": [{"resource": {"terminalHandle": "structworker_9", "ownerDispatchId": "ctx_8"}},
-                            {"resource": {"terminalHandle": "structworker_1", "ownerDispatchId": "ctx_2"}}]}
+        rows = {"workers": [{"resource": {"terminalHandle": "termw_9", "ownerDispatchId": "ctx_8"}},
+                            {"resource": {"terminalHandle": "termw_1", "ownerDispatchId": "ctx_2"}}]}
         self.fake({"orchestration worker-show --dispatch ctx_1": [OK(settled)],
                    "orchestration worker-show --dispatch ctx_2": [OK(WORKING)],
                    "orchestration worker-list": [OK(rows)],
@@ -365,6 +365,49 @@ class TestOrcaRuntime(OrcaBase):
         self.rt.start("fix-a-w1", self.repo, [], "go", lambda: False, kind="codex")
         self.assertEqual(runtime_orca.load_registry()["fix-a-w1"]["kind"], "codex")
 
+    def test_a_chat_default_is_refused_and_its_worker_stopped(self):
+        # measured: with Orca's default agent surface chat, worker-start gives a structworker_ handle
+        self.fake({"orchestration worker-start": [OK(dict(STARTED, terminal="structworker_1"))],
+                   "orchestration worker-stop": [OK({})], "orchestration worker-release": [OK({})]})
+        with self.assertRaises(oke.HerdrError) as c:
+            self.rt.start("pm-toy-abc123", self.repo, [], "go", lambda: False)
+        self.assertEqual(c.exception.code, "orca_chat_default")
+        self.assertIn("CLI", c.exception.message)
+        cmds = [x[:2] for x in self.calls()]
+        self.assertIn(["orchestration", "worker-stop"], cmds)
+        self.assertIn(["orchestration", "worker-release"], cmds)
+        self.assertNotIn("pm-toy-abc123", runtime_orca.load_registry())
+
+    def test_a_chat_worker_that_cannot_be_stopped_is_named(self):
+        # it already has its task: the user must close it, else two would work the job
+        for stop in (ERR("boom"), ERR("herdr_unavailable")):
+            self.fake({"orchestration worker-start": [OK(dict(STARTED, terminal="structworker_1"))],
+                       "orchestration worker-stop": [stop], "orchestration worker-release": [ERR("boom")]})
+            with self.assertRaises(oke.HerdrError) as c:
+                self.rt.start("pm-toy-abc123", self.repo, [], "go", lambda: False)
+            self.assertEqual(c.exception.code, "orca_chat_default")  # never a bare outage
+            self.assertIn("ctx_1", c.exception.message)
+            self.assertIn("structworker_1", c.exception.message)
+
+    def test_a_fenced_chat_worker_stop_rebinds(self):
+        self.fake({"orchestration worker-start": [OK(dict(STARTED, terminal="structworker_1", runId="run_3"))],
+                   "orchestration worker-stop": [ERR("consumer_fenced"), OK({})],
+                   "orchestration run-use": [OK({})], "orchestration worker-release": [OK({})]})
+        with self.assertRaises(oke.HerdrError) as c:
+            self.rt.start("pm-toy-abc123", self.repo, [], "go", lambda: False)
+        self.assertNotIn("could not stop", c.exception.message)
+        self.assertIn(["orchestration", "run-use"], [x[:2] for x in self.calls()])
+
+    def test_oke_refuses_to_run_in_an_orca_chat_and_never_falls_to_bg(self):
+        os.environ.pop("OKE_RUNTIME", None)
+        os.environ["ORCA_CHAT_SCRATCH_DIR"] = self.tmp
+        self.assertEqual(oke.default_runtime(), "orca")
+        self.assertEqual(self.cli("status", "--claim"), 1)
+        self.assertIn("not a chat", self.err)
+        os.environ.pop("ORCA_CHAT_SCRATCH_DIR")
+        os.environ["ORCA_TERMINAL_HANDLE"] = "structworker_7"
+        self.assertTrue(runtime_orca.in_chat())
+
     def test_a_worker_killed_before_the_first_look_is_gone(self):
         # measured: worker-start returns only after the agent's first hook
         self.fake({"orchestration worker-start": [OK(STARTED)],
@@ -388,7 +431,7 @@ class TestOrcaRuntime(OrcaBase):
 
     def test_a_live_or_settled_worker_needs_no_full_read(self):
         self.register(kind="claude", live="ctx_1")
-        self.register("pm-toy", "ctx_2", "structworker_2", kind="claude", live="ctx_2")
+        self.register("pm-toy", "ctx_2", "termw_2", kind="claude", live="ctx_2")
         self.fake({"orchestration worker-show --dispatch ctx_1": [OK(WORKING)],
                    "orchestration worker-show --dispatch ctx_2": [OK(
                        {"stage": "settled", "state": "succeeded", "liveness": "unverifiable"})]})
@@ -545,7 +588,7 @@ class TestOrcaRuntime(OrcaBase):
         self.fake({"orchestration worker-stop": [ERR("consumer_fenced"), OK({})],
                    "orchestration run-use": [OK({})],
                    "orchestration worker-show": [OK(dict(WORKING, runId="run_7"))]})
-        self.rt.close("structworker_1")
+        self.rt.close("termw_1")
         self.assertEqual([c[1] for c in self.calls()][-2:], ["run-use", "worker-stop"])
         self.assertEqual(runtime_orca.load_registry(), {})
 
@@ -557,7 +600,7 @@ class TestOrcaRuntime(OrcaBase):
                    "orchestration run-use": [OK({})],
                    "orchestration worker-show": [OK(dict(WORKING, runId="run_7"))],
                    "terminal rename": [OK({})]})
-        self.rt.close("structworker_1")
+        self.rt.close("termw_1")
         self.assertEqual(runtime_orca.load_registry(), {})
         n = len(self.calls())
         self.rt.start("fix-a-w1", self.repo, ["--resume", "ctx_1"], "go", lambda: False)
@@ -611,7 +654,7 @@ class TestOrcaRuntime(OrcaBase):
                                                        "processAction": "none"})],
                    "orchestration worker-release": [OK({"state": "released"})],
                    "orchestration worker-show": [OK(WORKING)]})
-        self.rt.close("structworker_1")
+        self.rt.close("termw_1")
         self.assertEqual([c[1] for c in self.calls()][-2:], ["worker-stop", "worker-release"])
         self.assertEqual(self.calls()[-1][2:4], ["--dispatch", "ctx_1"])
         self.assertEqual(runtime_orca.load_registry(), {})
@@ -620,7 +663,7 @@ class TestOrcaRuntime(OrcaBase):
         self.register()
         self.fake({"orchestration worker-stop": [OK({"state": "stopped", "processAction": "closed_agent_terminal"})],
                    "orchestration worker-show": [OK(WORKING)]})
-        self.rt.close("structworker_1")
+        self.rt.close("termw_1")
         self.assertNotIn("worker-release", [c[1] for c in self.calls()])
 
     def test_close_of_an_unknown_place_says_so(self):
@@ -633,7 +676,7 @@ class TestOrcaRuntime(OrcaBase):
     def test_close_stops_and_forgets(self):
         self.register()
         self.fake({"orchestration worker-stop": [ERR("already_settled")]})
-        self.rt.close("structworker_1")
+        self.rt.close("termw_1")
         self.assertEqual(runtime_orca.load_registry(), {})
         self.rt.close(self.repo)  # a folder: nothing started there
 

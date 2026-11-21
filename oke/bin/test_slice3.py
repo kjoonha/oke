@@ -137,6 +137,18 @@ class TestDeliver(InboxBase):
         self.assertEqual(self.texts("fix-a-w1"), [])
         self.assertEqual(len(os.listdir(os.path.join(oke.inbox_dir("fix-a-w1"), "read"))), 2)
 
+    def test_a_delivery_takes_only_what_fits_in_one_command_line(self):
+        for i in range(3):
+            oke.queue_mail("fix-a-w1", "user", ("m%d " % i) + "x" * 7000)
+        oke.queue_mail("fix-a-w1", "user", "y" * 20000)
+        self.fake({"agent prompt": [J({"type": "agent_prompted"})]})
+        oke.deliver("fix-a-w1")
+        self.assertEqual(len(self.texts("fix-a-w1")), 2)  # m2 and the long one wait
+        oke.deliver("fix-a-w1")
+        self.assertEqual(len(self.texts("fix-a-w1")), 1)
+        oke.deliver("fix-a-w1")  # one too long alone still goes, by itself
+        self.assertEqual(self.texts("fix-a-w1"), [])
+
     def test_a_failed_prompt_keeps_the_messages(self):
         self.fake({})
         self.cli("send", "fix-a-w1", "one")

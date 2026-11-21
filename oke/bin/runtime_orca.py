@@ -40,6 +40,20 @@ TASK_NOTE = ("This task is an OKe role. It asks you to use subagents and to star
              "write a report.md, also send worker_done once, with the report's type as "
              "subject.\n\n")
 
+CHAT_REFUSAL = ("OKe runs in an Orca terminal, not a chat: open a terminal tab in Orca and run "
+                "/oke:start there.")
+CHAT_DEFAULT = ("OKe needs Orca's default for new agent tabs to be CLI (a terminal), not Chat: Orca "
+                "started %s as a chat, which shows no OKe screen. Change that default in Orca's "
+                "settings, then try again.")
+
+
+def in_chat():
+    """True in an Orca chat: Orca sets ORCA_CHAT_SCRATCH_DIR there, and a chat worker's
+    handle is a structured one (structworker_...). It has no ORCA_TERMINAL_HANDLE when
+    opened from the UI, so without this check OKe would pick the bg runtime there."""
+    return bool(os.environ.get("ORCA_CHAT_SCRATCH_DIR")) or \
+        (os.environ.get("ORCA_TERMINAL_HANDLE") or "").startswith("struct")
+
 
 def orca_argv():
     """The Orca CLI, chosen the way Orca's own orchestration skill does. On Linux a bare
@@ -447,7 +461,7 @@ class OrcaRuntime(object):
         return self.as_agent(name, entry, show)
 
     def screen(self, name):
-        """The end of the worker's transcript (Orca has no screen read for a chat worker)."""
+        """The end of the worker's transcript (worker-read)."""
         entry = load_registry().get(name)
         if not entry:
             raise HerdrError("agent_not_found", name)
@@ -502,6 +516,20 @@ class OrcaRuntime(object):
                 show = None
             rebind(e, show)
             result = run_orca(args)
+        if (result.get("terminal") or "").startswith("struct"):
+            # the user's Orca default agent surface is chat (measured: structworker_ handle). It
+            # already has its task: stop it, or name it so the user can (else two would work the job)
+            stopped = True
+            for cmd in ("worker-stop", "worker-release"):
+                try:
+                    mutate(["orchestration", cmd, "--dispatch", result["dispatchId"]], result)
+                except HerdrError:
+                    stopped = stopped and cmd != "worker-stop"
+            message = CHAT_DEFAULT % name
+            if not stopped:
+                message += " OKe could not stop that chat worker: close it in Orca (dispatch %s, %s)." % (
+                    result["dispatchId"], result.get("terminal"))
+            raise HerdrError("orca_chat_default", message)
         entry = {"dispatch": result["dispatchId"], "handle": result["terminal"], "cwd": place, "kind": kind,
                  # worker-start returns only after the agent's first hook (measured): it ran live
                  "live": result["dispatchId"]}

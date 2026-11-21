@@ -33,7 +33,7 @@ Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`.
 
 ## Start
 
-1. Run `$OKE status`.
+1. Run `$OKE status`. If it fails with "OKe runs in an Orca terminal, not a chat", tell the user exactly that and stop.
 2. `herdr.inside` false: say OKe cannot start its agents here, stop. (Outside herdr OKe runs them as background sessions, or as Orca workers inside Orca, and this is true.)
 3. `herdr.missing` not empty: name the missing herdr commands, stop (only in a herdr pane).
 4. `orchestrator_conflict` set: say which pane already runs the orchestrator, stop.
@@ -51,11 +51,11 @@ Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`.
 
 The OKe mod in every agent does this without you:
 
-- OKe never restarts a dead agent by itself: a dead PM reaches you as `gone` from its wait, and you ask the user. A revive (`$OKE revive`) continues the agent in its own session. The board shows a dead agent of an open job in red ("stuck").
+- OKe never restarts a dead agent by itself: a dead PM reaches you as `gone` from its wait, and you ask the user (autonomy `full`: you resume it without asking, but never twice in a row without a report from it in between; see the `gone` row). A revive (`$OKE revive`) continues the agent in its own session. The board shows a dead agent of an open job in red ("stuck").
 - An agent whose turn ends on an API error that clears by itself (rate limit, overload, server error) resubmits the turn after 30 s, 1 m, 2 m, 4 m, then every 5 m, up to `api_retry_limit` (default 20) tries. Other API errors, and the last try, make a child or PM report `failed` with "API error" in the summary.
 - An agent that ends its turn without a report gets one nudge to continue (`idle_no_report`, below).
 - The user opens the board with `/oke-board` (type it in this pane; it is a command of the mod, not of the skill).
-- A host that draws no mod pane (Orca's chat, other SDK hosts) has no `/oke-board`. There, when the user asks for the board or a job changes phase, run `$OKE board` and put its text in your reply. In Orca's chat (`ORCA_CHAT_SCRATCH_DIR` is set) you may instead write `$OKE board --html` to a file in that folder with a shell redirect (`> <folder>/oke-board.html`) and show it as an Orca visual.
+- A host that draws no mod pane (an SDK host) has no `/oke-board`. There, when the user asks for the board or a job changes phase, run `$OKE board` and put its text in your reply.
 
 ## Intake
 
@@ -172,7 +172,7 @@ When it finishes, read the first line of its output. If the user speaks before i
 | `idle_no_report again <job>`, `bad_report again <job> ...` | The nudge did not help. Do not nudge again: the wait now leaves that job alone and `pending` lists it as `silent`. Wait again (for the other jobs), then run the queue |
 | `no_jobs` | The PM has no open job left. Do not start its wait again |
 | `peer_no_answer <job> <pm>` | `<pm>` was asked by job `<job>`'s PM about cross-repo impact (`oke peer ask`), was reminded once, and still went idle without answering. It is also the `peer` item of `$OKE pending`: handle it there. Then start this PM's wait again |
-| `gone` | The PM died. OKe does not restart an agent by itself. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / cancel (see "Giving up") / hold (`$OKE job hold <job>` for each of them, see "On hold"; with no open job left, do not start that PM's wait again) |
+| `gone` | The PM died. OKe does not restart an agent by itself. If `autonomy` in `$OKE_HOME/config.json` is `full` (read the file now), first run `$OKE revive <pm> --auto`: on `revived` tell the user in one line ("<pm> died; resumed it") and wait again; on `alive` or `busy` (it runs, or another process revives it) wait again; on `not_needed` its jobs are held or done: do nothing. `ask` (its last automatic resume never reported, so it failed or died at once), `failed` or any other answer: ask as below. Ask once for all its open jobs: resume (`$OKE revive <pm> --reset`, then wait) / cancel (see "Giving up") / hold (`$OKE job hold <job>` for each of them, see "On hold"; with no open job left, do not start that PM's wait again) |
 | `superseded` | A newer wait replaced this one. Do nothing: do not run the queue and do not start a wait |
 | `{"deliver": {"to": ..., "text": ...}}` | The PM runs as a background session and OKe cannot type into it. Call `SendMessage` with `to` and `text` exactly as given, then start the same wait again. Not a result to show the user |
 | `deliver_failed` | Messages for the PM could not be typed in three times in a row. Tell the user and offer to go to the PM pane (`$OKE attach <pm>`); the messages stay in `$OKE_HOME/inbox/<pm>/`. Start the wait again after the user says the pane is free |
@@ -260,7 +260,7 @@ Curation: when `job archive` prints a `curate:` line, or the user asks to clean 
 
 ## Autonomy
 
-Read `autonomy` from `$OKE_HOME/config.json` (default `balanced`). `agents` there picks the CLI for workers and reviewers: `{"worker": "claude", "reviewer": "claude"}` by default; `codex` and `opencode` work too. If the user asks for one in a job, write it into `intake.md` (`## 원하는 결과`); the PM then puts `kind:` into that child's assignment. The PM is always claude.
+Read `autonomy` from `$OKE_HOME/config.json` (default `balanced`) at each decision it governs, not once: the user may change it while OKe runs. `agents` there picks the CLI for workers and reviewers: `{"worker": "claude", "reviewer": "claude"}` by default; `codex` and `opencode` work too. If the user asks for one in a job, write it into `intake.md` (`## 원하는 결과`); the PM then puts `kind:` into that child's assignment. The PM is always claude.
 
 With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merge`) as always, then the next phase at once. `job phase` refuses a skipped step.
 
@@ -269,12 +269,13 @@ With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merg
 | Plan | ask | ask, even for a small job | approve without asking, keep the file |
 | Merge to the main branch | ask | ask | assign `kind: merge` without asking; conflicts still come to the user |
 | Dialog (`blocked`) | ask | ask | ask |
+| A PM or child reads `gone` | ask | ask | resume once without asking (`revive --auto`); ask when it goes `gone` again before it reported |
 
 ## Rules
 
 - Write a decision or a user instruction into the assignment or intake file the moment you get it. Your context can be compacted; the files cannot.
 - After compaction, run `$OKE status` and the queue, and start a wait for each PM with open jobs (a held job is not open).
 - `$OKE attach <agent>` prints `"attached": false` and a `hint` when OKe cannot show the agent itself (background sessions, Orca workers): give the user that hint. `$OKE keys` fails there too: for a dialog, offer only that command.
-- Inside Orca, Orca also wakes you with its own messages from your PMs (`worker_done`, `escalation`). They only wake you: read the PM's report.md and handle it as the wait would, then start the wait again. Never answer them with `orca orchestration` commands. OKe needs Orca's Agent Orchestration setting on, and the OKe plugin installed in Claude Code (Orca starts the agents itself, without OKe's `--plugin-dir`).
+- Inside Orca, Orca also wakes you with its own messages from your PMs (`worker_done`, `escalation`). They only wake you: read the PM's report.md and handle it as the wait would, then start the wait again. Never answer them with `orca orchestration` commands. OKe needs Orca's Agent Orchestration setting on, Orca's default for new agent tabs set to CLI (a terminal, not Chat), and the OKe plugin installed in Claude Code (Orca starts the agents itself, without OKe's `--plugin-dir`). A spawn or revive that fails with "OKe needs Orca's default for new agent tabs to be CLI": tell the user exactly that and stop until they changed it.
 - OKe blocks git commands that lose or publish work (`push`, `reset --hard`, `clean`, forced checkouts, branch deletes) in your session too. When the user wants one, tell them to run it themselves.
 - Do not send text starting with `/` through `$OKE send` from Git Bash; it is rewritten into a Windows path.
