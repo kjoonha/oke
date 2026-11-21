@@ -606,6 +606,30 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(self.calls()[0], ["terminal", "close", "--terminal", "term_left", "--json"])
         self.assertEqual(os.listdir(folder), [])  # no marker, no launch file left
 
+    def test_the_marker_holds_the_terminal_until_the_row_is_saved(self):
+        self.fake(launched(**{"orchestration worker-start": [ERR("boom")]}))
+        with self.assertRaises(oke.HerdrError):
+            self.rt.start("fix-a-w1", self.repo, [], "go", lambda: False)
+        marker = os.path.join(self.home, "orca-launch", "fix-a-w1.terminal")
+        with io.open(marker, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "termw_1")
+        self.fake(launched())
+        self.rt.start("fix-a-w1", self.repo, [], "go", lambda: False)
+        self.assertEqual(self.calls()[0], ["terminal", "close", "--terminal", "termw_1", "--json"])
+        self.assertFalse(os.path.exists(marker))
+
+    def test_a_marker_that_cannot_be_written_closes_the_new_terminal(self):
+        os.makedirs(os.path.join(self.home, "orca-launch", "fix-a-w1.terminal"))  # a folder: open fails
+        self.fake(launched())
+        with self.assertRaises(OSError):
+            self.rt.start("fix-a-w1", self.repo, [], "go", lambda: False)
+        self.assertEqual([c[:2] for c in self.calls()], [["terminal", "create"], ["terminal", "close"]])
+
+    def test_a_terminal_only_not_writable_is_not_closed(self):
+        self.register()
+        self.fake({"terminal show": [OK({"terminal": {"connected": True, "writable": False}})]})
+        self.assertFalse(self.rt.terminal_gone(runtime_orca.load_registry()["fix-a-w1"]))
+
     def test_each_launch_has_its_own_file(self):
         env = {"OKE_HOME": self.home}
         a = runtime_orca.launch_command("fix-a-w1", ["claude"], env)[1]

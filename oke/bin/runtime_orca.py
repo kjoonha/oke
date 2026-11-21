@@ -583,8 +583,12 @@ class OrcaRuntime(object):
             args += ["--shell", "powershell.exe"]  # see shell_line
         try:
             handle = run_orca(args)["terminal"]["handle"]
-            with io.open(marker, "w", encoding="utf-8") as f:
-                f.write(handle)
+            try:
+                with io.open(marker, "w", encoding="utf-8") as f:
+                    f.write(handle)
+            except BaseException:
+                self.close_terminal(handle)  # untracked otherwise
+                raise
             return self.ready(name, handle, trusted, kind)
         finally:
             try:  # the shell read it once the agent is up; a failed start closed the terminal
@@ -669,7 +673,7 @@ class OrcaRuntime(object):
             if e.code == "terminal_handle_stale":
                 return True
             raise
-        return t.get("connected") is False or t.get("writable") is False
+        return t.get("connected") is False and t.get("writable") is False  # only both was measured closed
 
     def prompt(self, name, text):
         """Orca mail to the worker: a working one gets it when its turn ends, a finished
