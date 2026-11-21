@@ -1527,7 +1527,7 @@ def revive_locked(name, auto=False):
     except (HerdrError, DialogError) as e:
         if isinstance(e, HerdrError) and e.code == "herdr_unavailable":
             # herdr was down, the agent did not crash again: do not count this try
-            update_record(role, key, name, {"revives": revives})
+            update_record(role, key, name, {"revives": revives, "auto_revived": record.get("auto_revived", False)})
             raise
         log_event("revive_failed %s: %s" % (name, (str(e).strip().splitlines() or [""])[0]))
         return "failed"

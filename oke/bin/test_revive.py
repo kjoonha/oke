@@ -249,6 +249,21 @@ class TestRevive(ReviveBase):
         self.assertFalse(self.child()["auto_revived"])
         self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")
 
+    def test_an_automatic_resume_lost_to_an_outage_does_not_count(self):
+        original = oke.relaunch
+
+        def down(*a):
+            raise runtime_herdr.HerdrError("herdr_unavailable", "down")
+        oke.relaunch = down
+        try:
+            self.revive_scenario()
+            with self.assertRaises(runtime_herdr.HerdrError):
+                oke.revive("fix-a-w1", auto=True)
+        finally:
+            oke.relaunch = original
+        self.assertFalse(self.child().get("auto_revived"))
+        self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")  # not refused as a second one
+
     def test_a_report_after_an_automatic_resume_allows_the_next(self):
         self.revive_scenario()
         self.assertEqual(oke.revive("fix-a-w1", auto=True), "revived")
