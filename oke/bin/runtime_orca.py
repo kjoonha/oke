@@ -214,7 +214,7 @@ def agent_ended(dispatch):
     follow-up for ~15 s, before its first hook): callers ask only after it read live, or
     Orca said it saw the turn start (worker-start, a mail answered `ready`). One killed
     before its first hook reads start_unknown/turn_start_unobserved, like a slow start
-    (Orca: "may still be starting"), and takes mail: it stays working (measured)."""
+    (Orca: "may still be starting"), and takes mail: show() reads it blocked, never gone."""
     if dispatch in ENDED_SEEN:
         return True
     try:
@@ -231,6 +231,20 @@ def agent_ended(dispatch):
         ENDED_SEEN.add(dispatch)
         return True
     return False
+
+
+def start_unknown(show):
+    """Orca's own verdict after its 30 s wait for a (follow-up) start: it typed the task but
+    never saw claude's turn start. The claude may have died or may still be starting
+    (measured both ways look the same; Orca moves it to ready if the turn comes)."""
+    return show.get("state") == "start_unknown" and show.get("stage") == "turn_start_unobserved"
+
+
+STARTUP_NOTE = ("OKe: {name} may have failed to start. Orca typed its task but never saw claude's "
+                "turn start (Orca: start_unknown / turn_start_unobserved): its claude may have died, "
+                "or may still be starting. This is no dialog: send it no key. To revive it: "
+                "`$OKE close {handle}`, then `$OKE revive {name} --reset`. To wait: leave it; it "
+                "turns back to working once Orca sees its turn.\n")
 
 
 def mark_live(name, ours, live):
@@ -325,7 +339,9 @@ class OrcaRuntime(object):
                 and show.get("stage") != "settled" and show.get("liveness") == "unverifiable" \
                 and status_of(show) and agent_ended(dispatch):
             show = dict(show, liveness="exited")
-        nxt = self.follow_up(show, entry, name) if show and show.get("stage") == "settled" else None
+        if isinstance(show, dict) and entry.get("kind") == "claude" and start_unknown(show) and status_of(show):
+            show = dict(show, activity="waiting")  # blocked: the user decides, nothing reads it dead
+        nxt =self.follow_up(show, entry, name) if show and show.get("stage") == "settled" else None
         if not nxt:
             return show
         entry.setdefault("origin", entry["dispatch"])
@@ -401,6 +417,15 @@ class OrcaRuntime(object):
         entry = load_registry().get(name)
         if not entry:
             raise HerdrError("agent_not_found", name)
+        if entry.get("kind") == "claude":
+            try:
+                show = run_orca(["orchestration", "worker-show", "--dispatch", entry["dispatch"]])
+            except HerdrError as e:
+                if e.code in FATAL:
+                    raise
+                show = {}
+            if isinstance(show, dict) and start_unknown(show):
+                return STARTUP_NOTE.format(name=name, handle=entry["handle"])
         result = run_orca(["orchestration", "worker-read", "--dispatch", entry["dispatch"]])
         lines = []
         for m in ((result.get("transcript") or {}).get("messages") or [])[-10:]:

@@ -250,9 +250,34 @@ class TestOrcaRuntime(OrcaBase):
                                 dict(self.KILLED, state="start_unknown", stage="turn_start_unobserved",
                                      terminalState="active"))
         self.assertEqual(runtime_orca.load_registry()["pm-toy"]["live"], "ctx_1")
-        self.assertEqual([a["agent_status"] for a in self.rt.agents()], ["working"])
+        # blocked: the user is asked (revive or wait), nothing reads it dead
+        self.assertEqual([a["agent_status"] for a in self.rt.agents()], ["blocked"])
         shows = [c[3] for c in self.calls() if "--full" in c and c[1] == "worker-show"]
         self.assertEqual(shows, ["ctx_2"])  # only the follow-up search
+        note = self.rt.screen("pm-toy")
+        self.assertIn("pm-toy may have failed to start", note)
+        self.assertIn("`$OKE close term_1`, then `$OKE revive pm-toy --reset`", note)
+        self.assertFalse([c for c in self.calls() if c[1] == "worker-read"])
+
+    UNSEEN = {"state": "start_unknown", "stage": "turn_start_unobserved", "liveness": "unverifiable",
+              "terminalState": "active", "attention": ["unverifiable"]}
+
+    def test_a_start_orca_never_saw_is_blocked_until_its_turn_comes(self):
+        self.register(kind="claude")
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(self.UNSEEN), OK(self.UNSEEN), OK(WORKING)],
+                   "orchestration worker-read": [OK({"transcript": {"messages": []}})]})
+        self.assertEqual(self.rt.agent("fix-a-w1")["agent_status"], "blocked")
+        self.assertIn("may have failed to start", self.rt.screen("fix-a-w1"))
+        # a slow start: Orca moves start_unknown to ready when the turn comes
+        self.assertEqual(self.rt.agent("fix-a-w1")["agent_status"], "working")
+        self.assertEqual(self.rt.screen("fix-a-w1"), "\n")  # the transcript again
+        self.assertFalse([c for c in self.calls() if "--full" in c])
+
+    def test_start_unknown_is_only_blocked_for_claude(self):
+        self.register(kind="codex")
+        self.register("w-old", "ctx_2", "s2")  # before `kind` was stored
+        self.fake({"orchestration worker-show": [OK(self.UNSEEN)]})
+        self.assertEqual([a["agent_status"] for a in self.rt.agents()], ["working", "working"])
 
     def test_a_dead_agent_in_another_unsettled_stage_is_gone(self):
         self.register(kind="claude", live="ctx_1")
