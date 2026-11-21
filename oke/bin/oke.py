@@ -919,9 +919,15 @@ def check_once(agent, report, seq):
         return "cancelled"  # the user gave the job up: nothing about its children matters
     header = read_header(report)
     current = header is not None and header.get("seq") == seq
+    look = None
+    if not (current and header.get("type") in FINAL_TYPES):
+        look = look_at(agent, os.path.dirname(report))
+        if look and look.startswith("blocked"):
+            # a report written while we looked beats the blocked read before it (check_pm_once)
+            header = read_header(report)
+            current = header is not None and header.get("seq") == seq
     if current and header.get("type") in FINAL_TYPES:
         return "report %s" % header["type"]
-    look = look_at(agent, os.path.dirname(report))
     if look != "idle":
         return look
     if current and header.get("type") == "waiting":
@@ -1036,13 +1042,22 @@ def check_pm_once(agent, key):
     state = load_state()
     if not open_jobs(state, key) and not inbox_messages(agent):
         return "no_jobs"  # nothing left to watch or deliver (a cancel goes in first)
-    jobs = []
-    for name in sorted(open_jobs(state, key)):
-        seq, header, mtime = pm_job_report(name)
-        if seq is not None:
-            jobs.append((name, seq, header, mtime))
-    fresh = [j for j in jobs if j[2].get("seq") == j[1] and j[2].get("type") in FINAL_TYPES
-             and state["jobs"][j[0]].get("seen") != seen_mark(j[2])]
+    def reports():
+        jobs = []
+        for name in sorted(open_jobs(state, key)):
+            seq, header, mtime = pm_job_report(name)
+            if seq is not None:
+                jobs.append((name, seq, header, mtime))
+        return jobs, [j for j in jobs if j[2].get("seq") == j[1] and j[2].get("type") in FINAL_TYPES
+                      and state["jobs"][j[0]].get("seen") != seen_mark(j[2])]
+    jobs, fresh = reports()
+    look = None
+    if not fresh:
+        look = look_at(agent, pm_dir(key))
+        if look and look.startswith("blocked"):
+            # a report written while we looked beats the blocked read before it (an Orca PM
+            # slow to start reads blocked, then writes its report): read the reports again
+            jobs, fresh = reports()
     if fresh:
         name, seq, header, _ = min(fresh, key=lambda j: j[3] or 0)
         with locked():
@@ -1054,7 +1069,6 @@ def check_pm_once(agent, key):
             if header["type"] in ("done", "failed"):
                 end_peer_talk(name)  # the plan (or the job) is settled: nobody waits for answers now
         return "report %s %s" % (header["type"], name)
-    look = look_at(agent, pm_dir(key))
     if look != "idle":
         return look
     for name, seq, header, _ in jobs:
@@ -1837,9 +1851,15 @@ def cmd_status(args):
             if current.get("runtime") != want:
                 current["runtime"] = want
                 save_state(current)
-    herdr_info = None
     if runtime().inside():
         herdr_info = (runtime().missing(), list_agents())
+    else:
+        # outside the runtime's terminals nothing can be claimed or started, but the
+        # state still answers (as `oke board` does); liveness unknown if unreachable
+        try:
+            herdr_info = ([], list_agents())
+        except HerdrError:
+            herdr_info = ([], None)
     with locked():
         return status_locked(args, herdr_info)
 
@@ -1871,11 +1891,10 @@ def status_locked(args, herdr_info):
     jobs_dir = os.path.join(home, "jobs")
     if os.path.isdir(jobs_dir):
         result["orphan_job_dirs"] = sorted(d for d in os.listdir(jobs_dir) if d not in state["jobs"])
-    if not result["herdr"]["inside"]:
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
 
     result["herdr"]["missing"], agents = herdr_info
+    dead = "dead" if agents is not None else "unknown"
+    agents = agents or []
     names = set(a.get("name") for a in agents if a.get("name"))
     changed = False
 
@@ -1891,7 +1910,7 @@ def status_locked(args, herdr_info):
             if session_of(found) and session_of(found) != record.get("session"):
                 record["session"] = session_of(found)
                 changed = True
-        result["repos"][key] = {"pm": "alive" if found else "dead",
+        result["repos"][key] = {"pm": "alive" if found else dead,
                                 "agent": record.get("agent"), "pane": record.get("pane"),
                                 "session": record.get("session"),
                                 "pm_dir": pm_dir(key).replace("\\", "/")}
@@ -1899,7 +1918,7 @@ def status_locked(args, herdr_info):
     for name, job in state["jobs"].items():
         key = job.get("repo")
         children = read_children(key) if key else {}
-        job_agents = dict((a, "alive" if a in names else "dead")
+        job_agents = dict((a, "alive" if a in names else dead)
                           for a, rec in children.items() if rec.get("job") == name)
         if job.get("held") and job.get("phase") not in DONE_PHASES:
             cls = "held"
@@ -1908,7 +1927,7 @@ def status_locked(args, herdr_info):
         elif result["repos"].get(key, {}).get("pm") == "alive":
             cls = "alive"
         else:
-            cls = "disconnected"
+            cls = "disconnected" if dead == "dead" else "unknown"
         result["jobs"][name] = {"phase": job.get("phase"), "class": cls, "agents": job_agents,
                                 "pm_seq": pm_job_report(name)[0],
                                 "pm_job_dir": pm_job_dir(name).replace("\\", "/"),
@@ -1931,7 +1950,7 @@ def status_locked(args, herdr_info):
     if args.claim:
         if result["orchestrator_conflict"]:
             code = fail("another orchestrator is alive in pane %s" % recorded)
-        elif here:
+        elif here and result["herdr"]["inside"]:
             state["orchestrator"]["pane"] = here
             state["orchestrator"].update(own_launch(here, agents))
             if not any(a.get("pane_id") == here and a.get("name") == ORCH_NAME for a in agents):

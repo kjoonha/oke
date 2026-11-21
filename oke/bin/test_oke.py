@@ -820,6 +820,19 @@ class TestWait(Base):
         self.assertEqual(out.splitlines()[0], "blocked")
         self.assertIn("Do you want to create r.md?", out)
 
+    def test_a_report_written_while_the_child_read_blocked_comes_first(self):
+        r = self.path("report.md")
+        original = oke.look_at
+
+        def blocked_then_report(*a, **kw):
+            self.report("type: done\nseq: 2\n---\n")
+            return "blocked\nOKe: a may have failed to start"
+        oke.look_at = blocked_then_report
+        try:
+            self.assertEqual(oke.check_once("a", r, 2), "report done")
+        finally:
+            oke.look_at = original
+
     def test_gone(self):
         self.fake({"agent get": [E("agent_not_found")]})
         self.assertEqual(oke.check_once("a", self.path("none.md"), 2), "gone")
@@ -888,10 +901,19 @@ class TestStatus(SpawnBase):
 
     def test_outside_herdr(self):
         os.environ.pop("HERDR_ENV", None)
-        self.fake({})
+        self.set_pm()
+        self.fake({})  # herdr unreachable: the state still shows, liveness unknown
         self.assertEqual(self.cli("status"), 0)
-        self.assertEqual(json.loads(self.out)["herdr"], {"inside": False, "missing": []})
-        self.assertEqual(self.calls(), [])
+        st = json.loads(self.out)
+        self.assertEqual(st["herdr"], {"inside": False, "missing": []})
+        self.assertEqual(st["repos"][self.key]["pm"], "unknown")
+
+    def test_outside_herdr_shows_state_and_never_claims(self):
+        os.environ.pop("HERDR_ENV", None)
+        self.set_pm()
+        st = self.status([AG(name="pm-toy", pane="w1:p3", session="s-pm", cwd=self.repo)], "--claim")
+        self.assertEqual((st["herdr"]["inside"], st["repos"][self.key]["pm"]), (False, "alive"))
+        self.assertIsNone(oke.load_state()["orchestrator"].get("pane"))
 
     def test_missing_commands_reported(self):
         s = help_ok()

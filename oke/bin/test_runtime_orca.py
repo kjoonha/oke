@@ -216,6 +216,113 @@ class TestOrcaRuntime(OrcaBase):
         self.assertEqual(self.rt.agent("fix-a-w1")["agent_status"], "working")
         self.assertFalse([c for c in self.calls() if "--full" in c])
 
+    def follow_up_scenario(self, sent, show2):
+        self.register("pm-toy", "ctx_1", "term_1", kind="claude", live="ctx_1")
+        # a settled dispatch can read live (its terminal kept): that must not move the mark
+        settled = {"stage": "settled", "state": "succeeded", "liveness": "live", "activity": "idle",
+                   "runId": "run_1"}
+        rows = {"workers": [{"dispatchId": "ctx_2", "resource": {"terminalHandle": "term_2", "ownerDispatchId": "ctx_2"}},
+                            {"dispatchId": "ctx_1", "resource": {"terminalHandle": "term_1", "ownerDispatchId": "ctx_1",
+                                                                 "releaseState": "released"}}]}
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(settled)],
+                   "orchestration worker-list": [OK({"workers": []}), OK(rows)],
+                   "orchestration send": [OK(sent)],
+                   "orchestration worker-show --dispatch ctx_2 --full": [
+                       OK({"dispatch": {"followUpOf": "ctx_1"}, "worker": {"agentTerminalHandle": "term_2"}}),
+                       OK(self.DROPPED)],
+                   "orchestration worker-show --dispatch ctx_2": [OK(show2)],
+                   "orchestration worker-keep-open": [OK({})]})
+        self.assertTrue(self.rt.prompt("pm-toy", "go"))
+
+    def test_a_follow_up_killed_right_after_the_mail_is_gone(self):
+        # measured live: mail reopened a closed PM; send answered state ready (Orca saw the
+        # turn start), the claude was killed 3 s later, before any look read it live
+        self.follow_up_scenario({"delivery": "reopened", "followUpOf": "ctx_1", "dispatchId": "ctx_2",
+                                 "state": "ready"}, self.KILLED)
+        entry = runtime_orca.load_registry()["pm-toy"]
+        # e2e: the row moves to the follow-up and its new terminal at once, not on a later look
+        self.assertEqual((entry["live"], entry["dispatch"], entry["terminal"], entry["handle"], entry["origin"]),
+                         ("ctx_2", "ctx_2", "term_2", "term_1", "ctx_1"))
+        self.assertIn(["orchestration", "worker-keep-open", "--dispatch", "ctx_2", "--json"], self.calls())
+        self.assertEqual(self.rt.agents(), [])
+
+    def test_a_follow_up_whose_turn_start_orca_never_saw_is_not_gone(self):
+        # measured live: claude killed during the follow-up's startup; send answered
+        # outcome_unknown, the dispatch reads start_unknown/turn_start_unobserved with
+        # missing_status for good, the same as a slow start ("may still be starting")
+        self.follow_up_scenario({"delivery": "reopened", "dispatchId": "ctx_2", "state": "outcome_unknown"},
+                                dict(self.KILLED, state="start_unknown", stage="turn_start_unobserved",
+                                     terminalState="active"))
+        entry = runtime_orca.load_registry()["pm-toy"]
+        self.assertEqual((entry["live"], entry["dispatch"], entry["terminal"]), ("ctx_1", "ctx_2", "term_2"))
+        # blocked: the user is asked (revive or wait), nothing reads it dead
+        self.assertEqual([a["agent_status"] for a in self.rt.agents()], ["blocked"])
+        shows = [c[3] for c in self.calls() if "--full" in c and c[1] == "worker-show"]
+        self.assertEqual(shows, ["ctx_2"])  # only the follow-up search
+        note = self.rt.screen("pm-toy")
+        self.assertIn("pm-toy may have failed to start", note)
+        self.assertIn("`$OKE close term_1`, then `$OKE revive pm-toy --reset`", note)
+        self.assertFalse([c for c in self.calls() if c[1] == "worker-read"])
+
+    UNSEEN = {"state": "start_unknown", "stage": "turn_start_unobserved", "liveness": "unverifiable",
+              "terminalState": "active", "attention": ["unverifiable"]}
+
+    def test_a_start_orca_never_saw_is_blocked_until_its_turn_comes(self):
+        self.register(kind="claude")
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(self.UNSEEN), OK(self.UNSEEN), OK(WORKING)],
+                   "orchestration worker-read": [OK({"transcript": {"messages": []}})]})
+        self.assertEqual(self.rt.agent("fix-a-w1")["agent_status"], "blocked")
+        self.assertIn("may have failed to start", self.rt.screen("fix-a-w1"))
+        # a slow start: Orca moves start_unknown to ready when the turn comes
+        self.assertEqual(self.rt.agent("fix-a-w1")["agent_status"], "working")
+        self.assertEqual(self.rt.screen("fix-a-w1"), "\n")  # the transcript again
+        self.assertFalse([c for c in self.calls() if "--full" in c])
+
+    def test_a_dispatch_seen_live_and_killed_in_start_unknown_is_gone(self):
+        # its live mark is this very dispatch: it started, and Orca dropped its status row
+        # because the process is gone (a live claude keeps the row): gone, not blocked
+        self.register(kind="claude", live="ctx_1")
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(self.UNSEEN)],
+                   "orchestration worker-show --dispatch ctx_1 --full": [OK(self.DROPPED)]})
+        self.assertEqual(self.rt.agents(), [])
+
+    def test_a_dispatch_seen_live_in_start_unknown_with_its_status_row_is_blocked(self):
+        self.register(kind="claude", live="ctx_1")
+        self.fake({"orchestration worker-show --dispatch ctx_1": [OK(self.UNSEEN)],
+                   "orchestration worker-show --dispatch ctx_1 --full": [OK({"projection": {
+                       "liveness": {"verdict": "unverifiable", "reason": "stale_status"},
+                       "evidence": {"liveStatus": "stale", "lastObservedAt": 1795232230069}}})]})
+        self.assertEqual([a["agent_status"] for a in self.rt.agents()], ["blocked"])
+
+    def test_a_mail_answered_by_a_revived_agent_keeps_its_new_row(self):
+        self.register("pm-toy", "ctx_5", "term_5", kind="claude")  # a revive replaced the row
+        self.fake({"orchestration worker-show --dispatch ctx_2 --full": [OK({"worker": {"agentTerminalHandle": "term_2"}})],
+                   "orchestration worker-keep-open": [OK({})]})
+        self.rt.sent({"dispatch": "ctx_1", "handle": "term_1"}, "pm-toy", {"dispatchId": "ctx_2", "state": "ready"})
+        self.assertEqual(runtime_orca.load_registry()["pm-toy"]["dispatch"], "ctx_5")
+
+    def test_a_follow_up_whose_terminal_cannot_be_read_stays_for_a_look_but_is_live(self):
+        self.register("pm-toy", "ctx_1", "term_1", kind="claude")
+        self.fake({"orchestration worker-show --dispatch ctx_2 --full": [ERR("orca_failed")]})
+        self.rt.sent(runtime_orca.load_registry()["pm-toy"], "pm-toy", {"dispatchId": "ctx_2", "state": "ready"})
+        entry = runtime_orca.load_registry()["pm-toy"]
+        # the row stays (follow_up moves it with the real terminal); the live mark is kept
+        self.assertEqual((entry["dispatch"], entry.get("terminal"), entry["live"]), ("ctx_1", None, "ctx_2"))
+
+    def test_a_failed_keep_open_keeps_the_move_and_live_mark(self):
+        self.register("pm-toy", "ctx_1", "term_1", kind="claude")
+        self.fake({"orchestration worker-show --dispatch ctx_2 --full": [OK({"worker": {"agentTerminalHandle": "term_2"}})],
+                   "orchestration worker-keep-open": [ERR("herdr_unavailable")]})
+        self.rt.sent(runtime_orca.load_registry()["pm-toy"], "pm-toy", {"dispatchId": "ctx_2", "state": "ready"})
+        entry = runtime_orca.load_registry()["pm-toy"]
+        self.assertEqual((entry["dispatch"], entry["terminal"], entry["live"]), ("ctx_2", "term_2", "ctx_2"))
+
+    def test_start_unknown_is_only_blocked_for_claude(self):
+        self.register(kind="codex")
+        self.register("w-old", "ctx_2", "s2")  # before `kind` was stored
+        self.fake({"orchestration worker-show": [OK(self.UNSEEN)]})
+        self.assertEqual([a["agent_status"] for a in self.rt.agents()], ["working", "working"])
+
     def test_a_dead_agent_in_another_unsettled_stage_is_gone(self):
         self.register(kind="claude", live="ctx_1")
         self.fake({"orchestration worker-show --dispatch ctx_1": [OK(dict(self.KILLED, stage="turn_ended"))],
