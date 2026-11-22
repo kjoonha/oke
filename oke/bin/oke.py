@@ -2591,6 +2591,7 @@ CODE_FRAME = re.compile(r"^>?\s*\d+\s*\|")  # jest/babel source excerpts: line n
 PASSING = re.compile(u"\\.\\.\\. (?:ok$|skipped\\b)|^✔|^PASS\\s|^ok\\s+\\S+\\s+(?:<v>|\\(cached\\))"
                      u"|^--- (?:PASS|SKIP):|^=== (?:RUN|PAUSE|CONT|NAME)\\b|^\\?\\s+\\S+\\s+\\[no test files\\]",
                      re.I)
+FAIL_STATUS = re.compile(r"\bFAIL(?:ED|URE)?\b")  # a status word, not a test named TestParseError
 
 
 def cwd_pattern(cwd):
@@ -2622,8 +2623,10 @@ def signature_lines(output, cwd=None):
         for pattern, repl in VOLATILE:
             line = pattern.sub(repl, line)
         line = " ".join(line.split())
-        if not line or len(line) > 500 or any(p.search(line) for p in NOISE) or PROGRESS.match(line) \
-                or ((PASSING.search(line) or CODE_FRAME.match(line)) and not FAILURE_WORD.search(line)):
+        failing = FAILURE_WORD.search(line)
+        if not line or len(line) > 500 or any(p.search(line) for p in NOISE) \
+                or ((PROGRESS.match(line) or CODE_FRAME.match(line)) and not failing) \
+                or (PASSING.search(line) and not FAIL_STATUS.search(line)):
             continue
         if not FAILURE_WORD.search(line) and any(p.search(line) for p in NOISE_UNLESS_FAILURE):
             continue

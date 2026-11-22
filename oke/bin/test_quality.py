@@ -86,6 +86,12 @@ class TestSignatures(unittest.TestCase):
             self.assertEqual(oke.signature_lines("FAIL old\n" + line), ["FAIL old"], line)
         self.assertEqual(len(oke.signature_lines("not ok 3 -\nnot ok 4 -")), 2)
         self.assertIn("PASS a.sh FAILED", oke.signature_lines("PASS a.sh FAILED"))
+        for line in ("--- PASS: TestParseError (0.00s)", "=== RUN   TestParseError", "PASS src/utils/errors.test.js",
+                     "test_error (tests.test_a.TestA) ... ok", "test_raises_ValueError (t.T) ... skipped 'no net'",
+                     u"✔ reports failure to caller (3ms)"):
+            self.assertEqual(oke.signature_lines("FAIL old\n" + line), ["FAIL old"], line)
+        line = "FAILED tests/test_io.py::test_read - OSError: cannot open data.py ."
+        self.assertEqual(oke.signature_lines(line), [line])
 
     def test_unnamed_tap_failures_and_result_tables_stay_apart(self):
         self.assertEqual(len(oke.signature_lines("not ok 3\nnot ok 7")), 2)
