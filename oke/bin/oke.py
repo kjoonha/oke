@@ -2582,6 +2582,10 @@ COUNTS = [
     # TAP numbers move when tests are added; an unnamed `not ok 3` keeps its number to stay apart
     (re.compile(r"^((?:not )?ok) \d+(?=\s+(?:-\s*)?[^\s-])", re.I), r"\1 <n>"),
     (re.compile(r"^(>?\s*)\d+(\s*\|)"), r"\1<n>\2"),  # a code frame kept for its failure word
+    # pytest -v progress percentages and xdist worker ids move with added tests and scheduling
+    (re.compile(r"\s*\[\s*\d+%\]\s*$"), ""),
+    (re.compile(r"^\[gw\d+\]\s*(?:\[\s*\d+%\]\s*)?"), ""),
+    (re.compile(r"\b(gw\d+) \[\d+\]"), r"\1 [<n>]"),
 ]
 # shortcut: pytest --tb=line with -rN prints no per-test line, so two failures with the same message in
 # one file share a signature; the default short summary (FAILED file::test) keeps them apart.
