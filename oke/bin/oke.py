@@ -3104,8 +3104,10 @@ def cmd_check(args):
     base = read_baseline(args.job)
     if base is None:
         if read_baseline(args.job, any_version=True) is not None:
-            fail("the baseline of %s was recorded by an older OKe, which read failures differently: "
-                 "run `oke baseline %s` again" % (args.job, args.job))
+            merged = merge_state(args.job)[0] in ("unverified", "verified")
+            fail("the baseline of %s was recorded by an older OKe, which read failures differently: %s"
+                 % (args.job, "`oke job verify %s` reads its log again" % args.job if merged
+                    else "run `oke baseline %s` again" % args.job))
         else:
             fail("job %s has no baseline: run `oke baseline %s` before the work starts" % (args.job, args.job))
         return 2
