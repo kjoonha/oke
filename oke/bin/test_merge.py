@@ -474,17 +474,53 @@ class TestLedgerAndVerify(MergeBase):
                                "exit": 1, "unrunnable": False, "signatures": baseline})
         return self.git_out(self.repo, "rev-parse", "HEAD").strip()
 
+    def test_moved_main_asks_the_pm_and_changes_nothing(self):
+        self.moved_main("exit 1", [])  # would fail if it ran
+        merged = self.merge()
+        self.assertEqual(self.cli("job", "verify", "fix-a"), 4, self.err)
+        out = json.loads(self.out)
+        self.assertEqual((out["result"], out["changed"]), ("changed_since_check", ["b.txt"]))
+        self.assertEqual(self.ledger()["merge"], "unverified")
+        self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), merged)
+
+    def test_pm_may_skip_with_a_reason_recorded(self):
+        self.moved_main("exit 1", [])
+        self.merge()
+        self.assertEqual(self.cli("job", "verify", "fix-a", "--skip", "  "), 1)
+        self.assertEqual(self.cli("job", "verify", "fix-a", "--skip", "b.txt is a note", "--run"), 1)
+        self.assertEqual(self.cli("job", "verify", "fix-a", "--skip", "b.txt is a note no test reads"), 0, self.err)
+        row = self.ledger()["rows"][-1]
+        self.assertEqual((row["by"], row["result"]), ("pm", "pass"))
+        self.assertIn("skipped by PM: b.txt is a note no test reads", row["detail"])
+        self.assertIn("changed: b.txt", row["detail"])
+        self.assertEqual(self.ledger()["merge"], "verified")
+
+    def test_changed_files_are_measured_from_the_reviewed_commit(self):
+        self.moved_main("exit 1", [])
+        self.merge()
+        tip = self.tip()
+        self.checked("tree:" + self.git_out(self.repo, "rev-parse", "HEAD~1^{tree}").strip())  # a later, other check
+        self.assertEqual(self.cli("job", "verify", "fix-a"), 4, self.err)
+        self.assertEqual(json.loads(self.out)["checked"], tip)
+
+    def test_skip_needs_a_passing_check_under_the_current_plan(self):
+        self.merge()
+        self.set_plan("true && true")  # the plan changed after the check
+        self.assertEqual(self.cli("job", "verify", "fix-a", "--skip", "docs only"), 1)
+        self.assertIn("--run", self.err)
+        self.assertEqual(self.ledger()["merge"], "unverified")
+
     def test_moved_main_runs_and_old_failures_pass(self):
         self.moved_main('echo "FAILED old"; exit 1', ["FAILED old"])
         merged = self.merge()
-        self.assertEqual(self.cli("job", "verify", "fix-a"), 0, self.err)
+        self.assertEqual(self.cli("job", "verify", "fix-a", "--run"), 0, self.err)
         self.assertNotIn("skipped", json.loads(self.out))
         self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), merged)
 
     def test_moved_main_new_failure_rolls_back(self):
         pre = self.moved_main('echo "FAILED old"; echo "FAILED new"; exit 1', ["FAILED old"])
         self.merge()
-        self.assertEqual(self.cli("job", "verify", "fix-a"), 3)
+        self.assertEqual(self.cli("job", "verify", "fix-a", "--run"), 3)
         out = json.loads(self.out)
         self.assertEqual((out["new"], out["rolled_back_to"]), (["FAILED new"], pre))
         self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD").strip(), pre)

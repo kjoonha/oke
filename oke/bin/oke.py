@@ -2104,9 +2104,11 @@ def cmd_job(args):
         # closes its agents, drops its queued mail but not the hold notice job_locked queued
         return cancel_children(args.slug, info.get("repo"))
     if args.action == "verify":
-        if args.command and args.accept:
-            return fail("give the 검증 명령 or --accept \"<why>\", not both")
-        return verify_job(args.slug, args.command, args.accept)  # can take hours
+        if len([x for x in (args.command, args.accept, args.skip, args.run) if x]) > 1:
+            return fail("give at most one of: the 검증 명령, --accept, --skip, --run")
+        if args.skip is not None and not args.skip.strip():
+            return fail("--skip needs the reason")
+        return verify_job(args.slug, args.command, args.accept, args.skip, args.run)  # can take hours
     key = left = None
     if args.action in ("archive", "unhold"):
         key = (load_state()["jobs"].get(args.slug) or {}).get("repo")
@@ -2901,7 +2903,30 @@ def same_tree_check(job, main, merged, rev):
     return None
 
 
-def verify_job(job, command, accept=None):
+def changed_since_check(job, main, merged, rev):
+    """(target, tree, files) of the last passing `oke check` under `rev`, with the files the merged
+    commit changes against its tree: what other merges brought in meanwhile. None without one."""
+    last = {}  # target -> (position, its latest check row)
+    reviewed = None
+    for i, r in enumerate(ledger_rows(job)):
+        if r["check"] == "check":
+            last[r["commit"]] = (i, r)
+        elif r["check"] == "review" and r["result"] == "pass":
+            reviewed = r["commit"]
+    passing = sorted((i, t) for t, (i, r) in last.items()
+                     if r["result"] == "pass" and r["detail"].split()[:1] == [rev])
+    if not passing:
+        return None
+    # the reviewed commit is what was merged; a later check of other edits would list the job's own files
+    target = reviewed if reviewed in [t for _, t in passing] else passing[-1][1]
+    tree = target[len("tree:"):] if target.startswith("tree:") else git_out(main, "rev-parse", target + "^{tree}")[1]
+    code, out = git_out(main, "diff", "--name-only", tree, merged + "^{tree}")
+    if code != 0 or not tree:
+        return None
+    return target, tree, [f for f in out.splitlines() if f]
+
+
+def verify_job(job, command, accept=None, skip=None, run=False):
     """Run the 검증 명령 on the merged main checkout. A failure undoes the merge, but never
     anybody else's work: only while HEAD is still the merge, and with `reset --keep`,
     which keeps local edits and refuses when they would be lost.
@@ -2914,12 +2939,12 @@ def verify_job(job, command, accept=None):
     while not try_lock(lock):
         time.sleep(5)
     try:
-        return verify_locked(job, command, accept, info, lock)
+        return verify_locked(job, command, accept, info, lock, skip, run)
     finally:
         unlock(lock)
 
 
-def verify_locked(job, command, accept, info, lock):
+def verify_locked(job, command, accept, info, lock, skip=None, run=False):
     status, row = merge_state(job)
     if status == "verified":
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "already": True}))
@@ -2953,6 +2978,27 @@ def verify_locked(job, command, accept, info, lock):
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "skipped": True,
                           "same_tree_as": same}))
         return 0
+    since = None if run else changed_since_check(job, main, row["commit"], rev)
+    if skip and not since:
+        return fail("nothing to skip: no passing `oke check` under the current plan; run `oke job verify %s --run`"
+                    % job)
+    if since and skip:
+        # the PM judged that what other merges brought in cannot change the check's result
+        target, _, files = since
+        shown = ", ".join(files[:20]) + (" (+%d more)" % (len(files) - 20) if len(files) > 20 else "")
+        ledger_add(job, "pm", row["commit"], "verify", "pass",
+                   "skipped by PM: %s (checked %s; changed: %s)" % (" ".join(skip.split()), target, shown))
+        tell_after_waiters(load_state(), job, AFTER_VERIFIED, ("merging",))
+        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "skipped": True,
+                          "skipped_by": "pm", "checked": target, "changed": files}))
+        return 0
+    if since:
+        # the code differs from what `oke check` passed on only by other merges: the PM decides
+        target, tree, files = since
+        code, stat = git_out(main, "diff", "--shortstat", tree, row["commit"] + "^{tree}")
+        print(json.dumps({"result": "changed_since_check", "job": job, "commit": row["commit"],
+                          "checked": target, "changed": files, "stat": stat}, ensure_ascii=False))
+        return 4
     n = len([r for r in ledger_rows(job) if r["check"] == "verify"]) + 1
     log = os.path.join(oke_home(), "jobs", job, "verify-%d.log" % n)
     base = read_baseline(job)
@@ -3923,6 +3969,10 @@ def build_parser():
     verify.add_argument("slug")
     verify.add_argument("command", nargs="?", help="the plan's 검증 명령, as one quoted string")
     verify.add_argument("--accept", help="the user accepts the merge without (another) check: why")
+    verify.add_argument("--skip", help="the PM judged that the files other merges changed since the "
+                                       "check cannot change its result: why")
+    verify.add_argument("--run", action="store_true", help="run the 검증 명령 even though other merges "
+                                                          "changed the code since the check")
     job.set_defaults(func=cmd_job)
 
     wk = sub.add_parser("wiki", help="read and write a wiki: capped pages, read before write, a log line per job")
