@@ -70,7 +70,20 @@ class TestSignatures(unittest.TestCase):
             self.assertEqual(b, oke.signature_lines("FAIL old\n" + after), before)
         self.assertIn("not ok <n> - old", oke.signature_lines("not ok 3 - old"))
 
+    def test_passing_lines_of_more_runners_are_noise(self):
+        for line in ("test_a.py ..F. [ 50%]", "test tests::new_one ... ok", "test_new (mod.T) ... ok",
+                     u"✔ new passing mocha test", "PASS src/new.test.js", "ok github.com/x/newpkg 0.01s",
+                     "ok github.com/x/newpkg (cached)", "--- PASS: TestNew (0.00s)", "=== RUN TestNew"):
+            self.assertEqual(oke.signature_lines("FAIL old\n" + line), ["FAIL old"], line)
+
+    def test_unnamed_tap_failures_and_result_tables_stay_apart(self):
+        self.assertEqual(len(oke.signature_lines("not ok 3\nnot ok 7")), 2)
+        self.assertEqual(oke.signature_lines("12 | test_login | FAILED"), ["12 | test_login | FAILED"])
+
     def test_cwd_edge_cases(self):
+        self.assertEqual(oke.signature_lines("rootdir: /home/u/wt, configfile: pytest.ini failed", "/home/u/wt"),
+                         ["rootdir: <cwd>, configfile: pytest.ini failed"])
+        self.assertEqual(oke.signature_lines("Error in /home/u/wt.bak/x", "/home/u/wt"), ["Error in /home/u/wt.bak/x"])
         self.assertEqual(oke.signature_lines("Generic: boom failed", "/"), ["Generic: boom failed"])
         self.assertEqual(oke.signature_lines("basic: x failed", "c:/"), ["basic: x failed"])
         self.assertEqual(oke.signature_lines("Error in C:\\w\\wt2\\a.py", "C:\\w\\wt"), ["Error in C:\\w\\wt2\\a.py"])
