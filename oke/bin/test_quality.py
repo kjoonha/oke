@@ -31,7 +31,7 @@ class TestSignatures(unittest.TestCase):
 
     def test_failure_words_keep_log_and_summary_lines(self):
         out = "INFO validation failed\nTests 1 failed | 3 passed\nTests 4 passed\n"
-        self.assertEqual(oke.signature_lines(out), ["INFO validation failed", "Tests 1 failed | 3 passed"])
+        self.assertEqual(oke.signature_lines(out), ["INFO validation failed", "Tests <n> failed | <n> passed"])
 
     def test_temp_paths_hex_and_node_pid_normalized(self):
         a = "Error in /tmp/abc123/x deadbeef01 (node:4242) [DEP0040] DeprecationWarning: p\n"
@@ -45,6 +45,22 @@ class TestSignatures(unittest.TestCase):
         a = "FAILED t.py::x - assert <Obj at 0x7f3a2bc1d0e0> in /tmp/pytest-of-me/pytest-12/t0/f\n"
         b = "FAILED t.py::x - assert <Obj at 0x7f00000a1b2c> in /tmp/pytest-of-me/pytest-13/t0/f\n"
         self.assertEqual(oke.signature_lines(a), oke.signature_lines(b))
+
+    def test_added_test_does_not_change_old_failure_signatures(self):
+        # seen live: a job adding one test made every old unittest failure look new
+        before = ('FAIL: test_known_bug (t.T.test_known_bug)\n'
+                  'File "/w/test_calc.py", line 14, in test_known_bug\nRan 3 tests in 0.001s\n'
+                  'FAILED (failures=1)\nt.py:14: AssertionError\n===== 1 failed, 2 passed in 0.1s =====\n')
+        after = before.replace("line 14", "line 19").replace("Ran 3", "Ran 4").replace("t.py:14", "t.py:19") \
+            .replace("2 passed", "3 passed")
+        self.assertEqual(oke.signature_lines(before), oke.signature_lines(after))
+        self.assertIn("FAIL: test_known_bug (t.T.test_known_bug)", oke.signature_lines(after))
+
+    def test_run_directory_is_normalized(self):
+        # the baseline may run in a temporary checkout, the check in the worktree, verify in main
+        a = 'File "C:\\work\\wt-a\\test_calc.py", line 3, in x\nFAIL: x (t.x)\n'
+        b = 'File "c:\\work\\wt-b\\test_calc.py", line 3, in x\nFAIL: x (t.x)\n'
+        self.assertEqual(oke.signature_lines(a, "C:\\work\\wt-a"), oke.signature_lines(b, "C:/work/wt-b"))
 
     def test_cap_and_long_lines(self):
         self.assertEqual(len(oke.signature_lines("\n".join("E%d boom" % i for i in range(300)))), 200)

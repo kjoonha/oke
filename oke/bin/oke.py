@@ -2570,10 +2570,25 @@ NOISE_UNLESS_FAILURE = [re.compile(p, re.I) for p in (
     r"^(?:\[[^\]]*\]\s*)*(?:<v>\s+)?(?:TRACE|DEBUG|INFO|NOTICE)\b", r"^\[(?:TRACE|DEBUG|INFO|NOTICE)\]",
     r"^(?:Test Files|Tests)\b", r"^(running|collecting|compiling|building|passing|tap\s+version|%|\s*at\s)")]
 PASSING_TAP = re.compile(r"^ok\s+\d+\s+", re.I)
+# Numbers that move when a job adds code or tests, not when a failure changes: source line numbers
+# and summary counts. Each failing test still has its own line, so a new failure stays visible.
+COUNTS = [
+    (re.compile(r"\bline \d+"), "line <n>"),
+    (re.compile(r"(\.[A-Za-z]\w*):\d+(?::\d+)?\b"), r"\1:<n>"),
+    (re.compile(r"\b\d+(?= (?:tests?|passed|failed|errors?|failures?|skipped|warnings?|deselected"
+                r"|xfailed|xpassed|todo|pending)\b)", re.I), "<n>"),
+    (re.compile(r"\b((?:failures|errors|skipped|expected failures|unexpected successes)=)\d+", re.I), r"\1<n>"),
+]
 
 
-def signature_lines(output):
-    """The failure signatures of one failing run's output: sorted, de-duplicated, capped."""
+def signature_lines(output, cwd=None):
+    """The failure signatures of one failing run's output: sorted, de-duplicated, capped.
+    cwd: the folder the command ran in; its path becomes <cwd>, so runs in other checkouts compare."""
+    if cwd:
+        variants = {cwd, cwd.replace("\\", "/"), cwd.replace("/", "\\")}
+        here = re.compile("|".join(re.escape(v.rstrip("/\\")) for v in sorted(variants, key=len, reverse=True)),
+                          re.I if os.name == "nt" or re.match(r"[A-Za-z]:", cwd) else 0)
+        output = here.sub("<cwd>", output)
     seen = []
     for raw in ANSI.sub("", output).splitlines():
         line = raw.strip()
@@ -2586,6 +2601,8 @@ def signature_lines(output):
             continue
         if PASSING_TAP.search(line) and "not ok" not in line:
             continue
+        for pattern, repl in COUNTS:
+            line = pattern.sub(repl, line)
         if line not in seen:
             seen.append(line)
             if len(seen) >= MAX_SIGNATURES:
@@ -2613,7 +2630,7 @@ def run_signatures(command, cwd, log, lock):
     if code == 0 or unrunnable:
         return {"exit": code, "unrunnable": unrunnable, "signatures": []}
     with io.open(log, encoding="utf-8", errors="replace") as f:
-        return {"exit": code, "unrunnable": False, "signatures": signature_lines(f.read())}
+        return {"exit": code, "unrunnable": False, "signatures": signature_lines(f.read(), cwd)}
 
 
 BASELINE_HISTORY = 20
@@ -3093,7 +3110,7 @@ def job_locked(args):
         if direct:
             state["jobs"][args.slug]["direct"] = True
         save_state(state)
-        print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key,
+        print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key, "path": os.path.dirname(key),
                           "size": "research" if args.research else None, "direct": direct,
                           "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
                           "pm_dir": pm_dir(key).replace("\\", "/"),

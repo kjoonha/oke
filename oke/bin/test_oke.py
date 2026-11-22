@@ -263,6 +263,8 @@ class TestState(Base):
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 0)
         info = json.loads(self.out)
         self.assertEqual(info["repo"], oke.repo_key(repo))
+        # seen live: an orchestrator used `repo` (the .git folder) as the PM's cwd
+        self.assertEqual(oke.normalize_path(info["path"]), oke.normalize_path(repo))
         self.assertTrue(info["job_dir"].endswith("/jobs/fix-a"))
         self.assertRegex(info["pm_dir"], r"/repos/r-[0-9a-f]{6}/pm$")
         self.assertRegex(info["pm_agent"], r"^pm-r-[0-9a-f]{6}$")
