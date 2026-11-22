@@ -2580,15 +2580,17 @@ COUNTS = [
     (re.compile(r"\b((?:failures|errors|skipped|expected failures|unexpected successes)=)\d+", re.I), r"\1<n>"),
     (re.compile(r"^(Tests?\b.*)\(\d+\)$"), r"\1(<n>)"),  # vitest "Tests  1 failed | 5 passed (6)"
     # TAP numbers move when tests are added; an unnamed `not ok 3` keeps its number to stay apart
-    (re.compile(r"^((?:not )?ok) \d+(?=\s+-?\s*\S)", re.I), r"\1 <n>"),
+    (re.compile(r"^((?:not )?ok) \d+(?=\s+(?:-\s*)?[^\s-])", re.I), r"\1 <n>"),
+    (re.compile(r"^(>?\s*)\d+(\s*\|)"), r"\1<n>\2"),  # a code frame kept for its failure word
 ]
 # shortcut: pytest --tb=line with -rN prints no per-test line, so two failures with the same message in
 # one file share a signature; the default short summary (FAILED file::test) keeps them apart.
-PROGRESS = re.compile(r"^(?:\S+\.py\s+)?[.sxXFE]+\s*(?:\[\s*\d+%\])?$")  # failures are also listed by name
+PROGRESS = re.compile(r"^(?:.+\.py\s+)?[.sxXFE]+\s*(?:\[\s*\d+%\])?$")  # failures are also listed by name
 CODE_FRAME = re.compile(r"^>?\s*\d+\s*\|")  # jest/babel source excerpts: line numbers move
 # lines a passing test prints, which an added test adds: cargo/unittest -v, mocha, jest, go test
-PASSING = re.compile(u"\\.\\.\\. ok$|^✔|^PASS\\s|^ok\\s+\\S+\\s+(?:<v>|\\(cached\\))|^--- PASS:"
-                     u"|^=== (?:RUN|PAUSE|CONT)\\b", re.I)
+PASSING = re.compile(u"\\.\\.\\. (?:ok$|skipped\\b)|^✔|^PASS\\s|^ok\\s+\\S+\\s+(?:<v>|\\(cached\\))"
+                     u"|^--- (?:PASS|SKIP):|^=== (?:RUN|PAUSE|CONT|NAME)\\b|^\\?\\s+\\S+\\s+\\[no test files\\]",
+                     re.I)
 
 
 def cwd_pattern(cwd):
@@ -2621,7 +2623,7 @@ def signature_lines(output, cwd=None):
             line = pattern.sub(repl, line)
         line = " ".join(line.split())
         if not line or len(line) > 500 or any(p.search(line) for p in NOISE) or PROGRESS.match(line) \
-                or PASSING.search(line) or (CODE_FRAME.match(line) and not FAILURE_WORD.search(line)):
+                or ((PASSING.search(line) or CODE_FRAME.match(line)) and not FAILURE_WORD.search(line)):
             continue
         if not FAILURE_WORD.search(line) and any(p.search(line) for p in NOISE_UNLESS_FAILURE):
             continue

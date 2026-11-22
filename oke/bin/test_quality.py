@@ -76,9 +76,20 @@ class TestSignatures(unittest.TestCase):
                      "ok github.com/x/newpkg (cached)", "--- PASS: TestNew (0.00s)", "=== RUN TestNew"):
             self.assertEqual(oke.signature_lines("FAIL old\n" + line), ["FAIL old"], line)
 
+    def test_more_moving_lines(self):
+        pairs = [("> 11 |     expect(fn()).toThrow(TypeError);", "> 14 |     expect(fn()).toThrow(TypeError);"),
+                 ("my tests/test_a.py ..F. [ 50%]", "my tests/test_a.py ..F.. [ 60%]")]
+        for before, after in pairs:
+            self.assertEqual(oke.signature_lines("FAIL old\n" + before), oke.signature_lines("FAIL old\n" + after))
+        for line in ("test_x (m.T) ... skipped 'slow'", "--- SKIP: TestY (0.00s)", "=== NAME TestX",
+                     "?   example.com/p [no test files]"):
+            self.assertEqual(oke.signature_lines("FAIL old\n" + line), ["FAIL old"], line)
+        self.assertEqual(len(oke.signature_lines("not ok 3 -\nnot ok 4 -")), 2)
+        self.assertIn("PASS a.sh FAILED", oke.signature_lines("PASS a.sh FAILED"))
+
     def test_unnamed_tap_failures_and_result_tables_stay_apart(self):
         self.assertEqual(len(oke.signature_lines("not ok 3\nnot ok 7")), 2)
-        self.assertEqual(oke.signature_lines("12 | test_login | FAILED"), ["12 | test_login | FAILED"])
+        self.assertEqual(oke.signature_lines("12 | test_login | FAILED"), ["<n> | test_login | FAILED"])
 
     def test_cwd_edge_cases(self):
         self.assertEqual(oke.signature_lines("rootdir: /home/u/wt, configfile: pytest.ini failed", "/home/u/wt"),
