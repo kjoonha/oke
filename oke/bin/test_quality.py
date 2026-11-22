@@ -27,7 +27,7 @@ class TestSignatures(unittest.TestCase):
         out = (u"\x1b[31mresult mismatch at step 4\x1b[0m\n\u2713 adds\nok 1 - x\n1..3\n# pass 2\n# fail 0\n"
                u"INFO starting\nnpm warn deprecated\n.....\n12 passed in 0.5s\n  at foo (a.js:1:1)\n"
                u"12| const x = 1\nnot ok 2 - y\n")
-        self.assertEqual(oke.signature_lines(out), ["not ok 2 - y", "result mismatch at step 4"])
+        self.assertEqual(oke.signature_lines(out), ["not ok <n> - y", "result mismatch at step 4"])
 
     def test_failure_words_keep_log_and_summary_lines(self):
         out = "INFO validation failed\nTests 1 failed | 3 passed\nTests 4 passed\n"
@@ -55,6 +55,25 @@ class TestSignatures(unittest.TestCase):
             .replace("2 passed", "3 passed")
         self.assertEqual(oke.signature_lines(before), oke.signature_lines(after))
         self.assertIn("FAIL: test_known_bug (t.T.test_known_bug)", oke.signature_lines(after))
+
+    def test_other_runners_counts_do_not_move_with_added_passing_tests(self):
+        pairs = [("Tests: 1 failed, 5 passed, 6 total", "Tests: 1 failed, 6 passed, 7 total"),
+                 ("Test Suites: 1 failed, 2 passed, 3 total", "Test Suites: 1 failed, 3 passed, 4 total"),
+                 ("Tests  1 failed | 5 passed (6)", "Tests  1 failed | 6 passed (7)"),
+                 ("5 passing (12ms)\n1 failing", "6 passing (14ms)\n1 failing"),
+                 ("collected 6 items", "collected 7 items"),
+                 ("..F.. [100%]", "..F... [100%]"),
+                 ("not ok 3 - old", "not ok 4 - old"),
+                 ("> 12 | expect(x).toBe(1)\n  13 | });", "> 14 | expect(x).toBe(1)\n  15 | });")]
+        for before, after in pairs:
+            b = oke.signature_lines("FAIL old\n" + before)
+            self.assertEqual(b, oke.signature_lines("FAIL old\n" + after), before)
+        self.assertIn("not ok <n> - old", oke.signature_lines("not ok 3 - old"))
+
+    def test_cwd_edge_cases(self):
+        self.assertEqual(oke.signature_lines("Generic: boom failed", "/"), ["Generic: boom failed"])
+        self.assertEqual(oke.signature_lines("basic: x failed", "c:/"), ["basic: x failed"])
+        self.assertEqual(oke.signature_lines("Error in C:\\w\\wt2\\a.py", "C:\\w\\wt"), ["Error in C:\\w\\wt2\\a.py"])
 
     def test_run_directory_is_normalized(self):
         # the baseline may run in a temporary checkout, the check in the worktree, verify in main

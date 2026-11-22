@@ -1990,7 +1990,7 @@ def status_locked(args, herdr_info):
                                 "pm_seq": pm_job_report(name)[0],
                                 "pm_job_dir": pm_job_dir(name).replace("\\", "/"),
                                 "size": job.get("size"), "direct": bool(job.get("direct")),
-                                "held": job.get("held")}
+                                "held": job.get("held"), "base": job.get("base")}
 
     here = runtime().whoami()
     recorded = state["orchestrator"].get("pane")
@@ -2576,18 +2576,39 @@ COUNTS = [
     (re.compile(r"\bline \d+"), "line <n>"),
     (re.compile(r"(\.[A-Za-z]\w*):\d+(?::\d+)?\b"), r"\1:<n>"),
     (re.compile(r"\b\d+(?= (?:tests?|passed|failed|errors?|failures?|skipped|warnings?|deselected"
-                r"|xfailed|xpassed|todo|pending)\b)", re.I), "<n>"),
+                r"|xfailed|xpassed|todo|pending|total|items?|passing|failing)\b)", re.I), "<n>"),
     (re.compile(r"\b((?:failures|errors|skipped|expected failures|unexpected successes)=)\d+", re.I), r"\1<n>"),
+    (re.compile(r"^(Tests?\b.*)\(\d+\)$"), r"\1(<n>)"),  # vitest "Tests  1 failed | 5 passed (6)"
+    (re.compile(r"^((?:not )?ok) \d+\b", re.I), r"\1 <n>"),  # TAP numbers move when tests are added
 ]
+# shortcut: pytest --tb=line with -rN prints no per-test line, so two failures with the same message in
+# one file share a signature; the default short summary (FAILED file::test) keeps them apart.
+PROGRESS = re.compile(r"^[.sxXFE]+\s*(?:\[\s*\d+%\])?$")  # failures are also listed by name
+CODE_FRAME = re.compile(r"^>?\s*\d+\s*\|")  # jest/babel source excerpts: line numbers move
+
+
+def cwd_pattern(cwd):
+    """The run folder in the forms an output may print it: both slashes, resolved, Git Bash /c/..."""
+    forms = set()
+    for base in {cwd, os.path.realpath(cwd)}:
+        base = base.rstrip("/\\")
+        forms.update({base, base.replace("\\", "/"), base.replace("/", "\\")})
+        m = re.match(r"([A-Za-z]):[\\/](.*)", base)
+        if m:
+            forms.add("/" + m.group(1).lower() + "/" + m.group(2).replace("\\", "/"))
+    forms = [f for f in forms if len(f) >= 3]  # "/" or "c:" would match inside ordinary words
+    if not forms:
+        return None
+    flags = re.I if os.name == "nt" or re.match(r"[A-Za-z]:", cwd) else 0
+    return re.compile("(?:%s)(?![^\\s\\\\/\"':)])" % "|".join(
+        re.escape(f) for f in sorted(forms, key=len, reverse=True)), flags)
 
 
 def signature_lines(output, cwd=None):
     """The failure signatures of one failing run's output: sorted, de-duplicated, capped.
     cwd: the folder the command ran in; its path becomes <cwd>, so runs in other checkouts compare."""
-    if cwd:
-        variants = {cwd, cwd.replace("\\", "/"), cwd.replace("/", "\\")}
-        here = re.compile("|".join(re.escape(v.rstrip("/\\")) for v in sorted(variants, key=len, reverse=True)),
-                          re.I if os.name == "nt" or re.match(r"[A-Za-z]:", cwd) else 0)
+    here = cwd_pattern(cwd) if cwd else None
+    if here:
         output = here.sub("<cwd>", output)
     seen = []
     for raw in ANSI.sub("", output).splitlines():
@@ -2595,7 +2616,8 @@ def signature_lines(output, cwd=None):
         for pattern, repl in VOLATILE:
             line = pattern.sub(repl, line)
         line = " ".join(line.split())
-        if not line or len(line) > 500 or any(p.search(line) for p in NOISE):
+        if not line or len(line) > 500 or any(p.search(line) for p in NOISE) or PROGRESS.match(line) \
+                or CODE_FRAME.match(line):
             continue
         if not FAILURE_WORD.search(line) and any(p.search(line) for p in NOISE_UNLESS_FAILURE):
             continue

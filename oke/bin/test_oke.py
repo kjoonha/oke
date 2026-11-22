@@ -265,6 +265,10 @@ class TestState(Base):
         self.assertEqual(info["repo"], oke.repo_key(repo))
         # seen live: an orchestrator used `repo` (the .git folder) as the PM's cwd
         self.assertEqual(oke.normalize_path(info["path"]), oke.normalize_path(repo))
+        # seen live: a PM guessed `main` as the reviewer's base on a `master` repository
+        branch = subprocess.check_output(["git", "-C", repo, "symbolic-ref", "--short", "HEAD"]).decode().strip()
+        self.assertEqual(self.cli("status"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["jobs"]["fix-a"]["base"], branch)
         self.assertTrue(info["job_dir"].endswith("/jobs/fix-a"))
         self.assertRegex(info["pm_dir"], r"/repos/r-[0-9a-f]{6}/pm$")
         self.assertRegex(info["pm_agent"], r"^pm-r-[0-9a-f]{6}$")
