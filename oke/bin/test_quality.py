@@ -93,6 +93,10 @@ class TestSignatures(unittest.TestCase):
         self.assertEqual(oke.signature_lines("FAIL old\ntests/test_errors.py ....F [ 50%]"),
                          oke.signature_lines("FAIL old\ntests/test_errors.py .....F [ 50%]"))
         self.assertEqual(oke.signature_lines("tests/test_exceptions.py ... [100%]"), [])
+        for line in ("." * 87 + " 88/120", "..i.F", "[gw0] [ 50%] PASSED tests/a.py::t",
+                     "[gw1] [ 60%] SKIPPED tests/a.py::u"):
+            self.assertEqual(oke.signature_lines("FAIL old\n" + line), ["FAIL old"], line)
+        self.assertIn("[gw0] [ 50%] FAILED tests/a.py::t", oke.signature_lines("[gw0] [ 50%] FAILED tests/a.py::t"))
         line = "FAILED tests/test_io.py::test_read - OSError: cannot open data.py ."
         self.assertEqual(oke.signature_lines(line), [line])
 

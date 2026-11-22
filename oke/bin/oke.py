@@ -2586,11 +2586,12 @@ COUNTS = [
 # shortcut: pytest --tb=line with -rN prints no per-test line, so two failures with the same message in
 # one file share a signature; the default short summary (FAILED file::test) keeps them apart.
 # the file part has no ":" or " - ", so a failure line (`FAILED a.py::t - ... x.py .`) never matches
-PROGRESS = re.compile(r"^(?:(?:(?! - )[^:])+\.py\s+)?[.sxXFE]+\s*(?:\[\s*\d+%\])?$")  # failures are also listed by name
+PROGRESS = re.compile(r"^(?:(?:(?! - )[^:])+\.py\s+)?[.sxXFEi]+\s*(?:\[\s*\d+%\]|\d+/\d+)?$")  # failures are also listed by name
 CODE_FRAME = re.compile(r"^>?\s*\d+\s*\|")  # jest/babel source excerpts: line numbers move
 # lines a passing test prints, which an added test adds: cargo/unittest -v, mocha, jest, go test
 PASSING = re.compile(u"\\.\\.\\. (?:ok$|skipped\\b)|^✔|^PASS\\s|^ok\\s+\\S+\\s+(?:<v>|\\(cached\\))"
-                     u"|^--- (?:PASS|SKIP):|^=== (?:RUN|PAUSE|CONT|NAME)\\b|^\\?\\s+\\S+\\s+\\[no test files\\]",
+                     u"|^--- (?:PASS|SKIP):|^=== (?:RUN|PAUSE|CONT|NAME)\\b|^\\?\\s+\\S+\\s+\\[no test files\\]"
+                     u"|^(?:\\[gw\\d+\\]\\s*)?(?:\\[\\s*\\d+%\\]\\s*)?(?:PASSED|SKIPPED|XFAIL|XPASS)\\s",
                      re.I)
 FAIL_STATUS = re.compile(r"\bFAIL(?:ED|URE)?\b")  # a status word, not a test named TestParseError
 
