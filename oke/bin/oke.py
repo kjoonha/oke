@@ -298,6 +298,16 @@ def repo_key(path):
     return normalize_path(os.path.realpath(common))
 
 
+def repo_dir(key):
+    """The working folder of the repository whose git common dir is `key`; None for a bare one."""
+    code, top = git_out(key, "rev-parse", "--show-toplevel")  # a submodule's git dir names it in core.worktree
+    if code == 0:
+        return normalize_path(top)
+    if git_out(key, "rev-parse", "--is-bare-repository")[1] == "true":
+        return None
+    return os.path.dirname(key)  # <checkout>/.git, or a direct job's folder
+
+
 def slug(text, limit=24):
     s = re.sub(r"[^a-z0-9-]", "-", text.lower())
     s = re.sub(r"-+", "-", s).strip("-")
@@ -644,7 +654,7 @@ def cmd_rt(args):
                 # cannot delete a folder a shell sits in (half deleted, then "Permission denied")
                 close_children(job, info["repo"])
                 runtime_bg.git_worktree_remove(native_path(info["worktree"]["path"]),
-                                               native_path(os.path.dirname(info["repo"])))
+                                               native_path(repo_dir(info["repo"])))
             out = {"removed": args.remove}
         else:
             if not args.job or not args.repo:
@@ -2097,7 +2107,7 @@ def cmd_job(args):
         info = load_state()["jobs"].get(args.slug)
         if not info:
             return fail("unknown job: %s" % args.slug)
-        tree = pending_tree(native_path(os.path.dirname(info["repo"])))
+        tree = pending_tree(native_path(repo_dir(info["repo"])))
         if not tree:
             return fail("git could not read the main checkout of %s" % args.slug)
         print(json.dumps({"job": args.slug, "tree": tree}))
@@ -2276,7 +2286,7 @@ def merge_job(job):
     if worker and worker[0] > review[0]:
         return fail("the worker reported after the last review (a rebase or a fix): give the reviewer "
                     "a new instruction to review it, then merge")
-    main = native_path(os.path.dirname(info["repo"]))
+    main = native_path(repo_dir(info["repo"]))
     # The review counts only for the commit its assignment named, and only once the
     # report answers that assignment: commits added after it were never reviewed.
     review_asg = read_header(os.path.join(os.path.dirname(review[1]), "assignment.md")) or {}
@@ -2797,6 +2807,7 @@ def run_signatures(command, cwd, log, lock):
 
 
 BASELINE_HISTORY = 20
+BASELINE_VERSION = 2  # bump whenever signature_lines changes what a failure line reduces to
 
 
 def plan_section(job, name):
@@ -2833,7 +2844,7 @@ def check_dir(info):
             return cwd, "tree:" + tree if tree else None
         code, head = git_out(cwd, "rev-parse", "HEAD")
         return cwd, head if code == 0 else None
-    main = native_path(os.path.dirname(info["repo"]))
+    main = native_path(repo_dir(info["repo"]))
     tree = pending_tree(main)
     return main, "tree:" + tree if tree else None
 
@@ -2864,7 +2875,7 @@ def untracked_work(cwd):
 def base_point(info, cwd):
     """The commit the job's work starts from: in a worktree, where its branch leaves the
     base branch; without one, the main checkout's HEAD."""
-    main = native_path(os.path.dirname(info["repo"]))
+    main = native_path(repo_dir(info["repo"]))
     code, head = git_out(main, "rev-parse", "HEAD")
     if not (info.get("worktree") or {}).get("path"):
         return head if code == 0 else None
@@ -2900,12 +2911,14 @@ def run_at(cwd, commit, where, run):
         drop()
 
 
-def read_baseline(job):
+def read_baseline(job, any_version=False):
+    """The job's baseline; None without one, or (unless any_version) recorded by another version."""
     try:
         with io.open(os.path.join(oke_home(), "jobs", job, "baseline.json"), encoding="utf-8") as f:
-            return json.load(f)
+            base = json.load(f)
     except (IOError, OSError, ValueError):
         return None
+    return base if any_version or base.get("version") == BASELINE_VERSION else None
 
 
 def cmd_baseline(args):
@@ -2933,25 +2946,29 @@ def cmd_baseline(args):
             if now is None:
                 fail("cannot check out %s for the baseline of %s" % (point[:12], args.job))
                 return 2
+        if now["unrunnable"]:  # the previous baseline stays
+            fail(u"the 검증 명령 could not run (exit %d, see %s): fix the command in plan.md, then "
+                 u"`oke baseline %s` again" % (now["exit"], log.replace("\\", "/"), args.job))
+            return 2
         target = point
         path = os.path.join(job_dir, "baseline.json")
         old = read_baseline(args.job)
-        if old is not None:
+        if read_baseline(args.job, any_version=True) is not None:
             history = os.path.join(job_dir, "baseline.history")
             if not os.path.isdir(history):
                 os.makedirs(history)
-            os.rename(path, os.path.join(history, time.strftime("%Y%m%dT%H%M%S") + ".json"))
+            stamp = time.strftime("%Y%m%dT%H%M%S")
+            name, n = stamp + ".json", 1
+            while os.path.exists(os.path.join(history, name)):  # same second: "_" sorts after "."
+                name, n = "%s_%03d.json" % (stamp, n), n + 1
+            os.rename(path, os.path.join(history, name))
             for stale in sorted(os.listdir(history))[:-BASELINE_HISTORY]:
                 os.remove(os.path.join(history, stale))
-        base = dict(now, version=1, recorded_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        base = dict(now, version=BASELINE_VERSION, recorded_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
                     criteria_rev=criteria_rev(args.job), commit=target)
         write_json_atomic(path, base)
     finally:
         unlock(lock)
-    if now["unrunnable"]:
-        fail(u"the 검증 명령 could not run (exit %d, see %s): fix the command in plan.md, then "
-             u"`oke baseline %s` again" % (now["exit"], log.replace("\\", "/"), args.job))
-        return 2
     before = set((old or {}).get("signatures") or [])
     print(json.dumps({"result": "recorded", "exit": now["exit"], "signatures": len(now["signatures"]),
                       "added": len(set(now["signatures"]) - before),
@@ -2975,7 +2992,11 @@ def cmd_check(args):
     rev = criteria_rev(args.job)
     base = read_baseline(args.job)
     if base is None:
-        fail("job %s has no baseline: run `oke baseline %s` before the work starts" % (args.job, args.job))
+        if read_baseline(args.job, any_version=True) is not None:
+            fail("the baseline of %s was recorded by an older OKe, which read failures differently: "
+                 "run `oke baseline %s` again" % (args.job, args.job))
+        else:
+            fail("job %s has no baseline: run `oke baseline %s` before the work starts" % (args.job, args.job))
         return 2
     if base.get("criteria_rev") != rev:
         fail(u"the 검증 명령 or the criteria of %s changed since the baseline: run `oke baseline %s` again"
@@ -3081,7 +3102,7 @@ def verify_locked(job, command, accept, info, lock, skip=None, run=False):
         tell_after_waiters(load_state(), job, AFTER_VERIFIED, ("merging",))
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "accepted": True}))
         return 0
-    main = native_path(os.path.dirname(info["repo"]))
+    main = native_path(repo_dir(info["repo"]))
     if git_out(main, "rev-parse", "HEAD")[1] != row["commit"]:
         return fail("the main checkout moved past the merge of %s (%s): ask the user; if they accept "
                     "the merge as it is, `oke job verify %s --accept \"<why>\"`" % (job, row["commit"][:12], job))
@@ -3302,6 +3323,9 @@ def job_locked(args):
         except ValueError as e:
             return fail(str(e))
         direct = not os.path.exists(key)
+        path = repo_dir(key)
+        if path is None:
+            return fail("%s is a bare repository (no working folder): give a checkout's folder" % args.repo)
         busy = [n for n, j in state["jobs"].items()  # research changes nothing: never in the way
                 if direct and not args.research and j.get("repo") == key and j.get("size") != "research"
                 and j.get("phase") not in DONE_PHASES]
@@ -3314,7 +3338,7 @@ def job_locked(args):
             return fail("branch oke/%s already exists (an earlier job): pick another job name" % args.slug)
         os.makedirs(job_dir)
         # the branch the main checkout is on now: `job merge` merges only into it
-        base = None if direct else git_out(native_path(os.path.dirname(key)), "symbolic-ref", "-q", "--short", "HEAD")[1]
+        base = None if direct else git_out(native_path(path), "symbolic-ref", "-q", "--short", "HEAD")[1]
         state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None,
                                     "phase_at": time.time(), "created": time.time(), "base": base or None}
         if args.research:
@@ -3322,7 +3346,7 @@ def job_locked(args):
         if direct:
             state["jobs"][args.slug]["direct"] = True
         save_state(state)
-        print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key, "path": os.path.dirname(key),
+        print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key, "path": path,
                           "size": "research" if args.research else None, "direct": direct,
                           "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
                           "pm_dir": pm_dir(key).replace("\\", "/"),
