@@ -2,6 +2,8 @@
 import io
 import json
 import os
+import subprocess
+import sys
 import time
 import unittest
 
@@ -209,13 +211,6 @@ class TestRevive(ReviveBase):
         self.revive_scenario()
         self.assertEqual(oke.revive("fix-a-w1"), "busy")
         self.assertEqual(self.calls(), [])
-
-    def test_stale_lock_is_taken_over(self):
-        self.assertTrue(oke.try_lock("revive-fix-a-w1"))
-        old = time.time() - oke.LOCK_STALE - 5
-        os.utime(oke.lock_path("revive-fix-a-w1"), (old, old))
-        self.revive_scenario()
-        self.assertEqual(oke.revive("fix-a-w1"), "revived")
 
     def test_lock_released_after_revive(self):
         self.revive_scenario()
@@ -778,6 +773,33 @@ class TestLock(ReviveBase):
         self.assertFalse(oke.try_lock("x"))
         oke.unlock("x")
         self.assertTrue(oke.try_lock("x"))
+
+    def hold_in_child(self, name):
+        code = ("import sys, time; sys.path.insert(0, %r); import oke; "
+                "print(oke.try_lock(%r), flush=True); time.sleep(60)") % (os.path.dirname(oke.__file__), name)
+        p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, universal_newlines=True)
+        self.addCleanup(lambda: (p.kill(), p.wait(), p.stdout.close()))
+        self.assertEqual(p.stdout.readline().strip(), "True")
+        return p
+
+    def test_another_process_holds_the_lock_until_it_dies(self):
+        p = self.hold_in_child("x")
+        self.assertFalse(oke.try_lock("x"))
+        oke.unlock("x")  # not ours: it stays with the child
+        self.assertFalse(oke.try_lock("x"))
+        with self.assertRaises(oke.StateError):
+            with oke.locked("x", timeout=0.2):
+                pass
+        p.kill()
+        p.wait()
+        self.assertTrue(oke.try_lock("x"))  # the OS freed it with the process
+        oke.unlock("x")
+
+    def test_a_lock_held_for_long_is_never_taken_over(self):
+        self.hold_in_child("x")
+        old = time.time() - 3600
+        os.utime(oke.lock_path("x"), (old, old))
+        self.assertFalse(oke.try_lock("x"))
 
 
 if __name__ == "__main__":

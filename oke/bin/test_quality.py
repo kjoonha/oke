@@ -146,8 +146,8 @@ class TestSignatures(unittest.TestCase):
         os.environ["OKE_HOME"] = d
         try:
             log = os.path.join(d, "x.log")
-            self.assertEqual(oke.run_signatures("echo TypeError: fine", d, log, "t"), entry(0))
-            self.assertEqual(oke.run_signatures("echo boom; exit 3", d, log, "t"), entry(3, ["boom"]))
+            self.assertEqual(oke.run_signatures("echo TypeError: fine", d, log), entry(0))
+            self.assertEqual(oke.run_signatures("echo boom; exit 3", d, log), entry(3, ["boom"]))
         finally:
             if old is None:
                 os.environ.pop("OKE_HOME")

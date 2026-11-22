@@ -183,48 +183,41 @@ def save_state(state):
     write_json_atomic(state_path(), dict((k, v) for k, v in state.items() if k != "_recovered"))
 
 
-# A lock older than this is left over from a crashed holder. A revive takes about a
-# minute; this is not a rule about whether an agent is alive.
-LOCK_STALE = 300
-
-
 def lock_path(name):
     return os.path.join(oke_home(), "locks", name)
 
 
-_lock_tokens = {}
+_lock_fds = {}  # path -> fd of each lock this process holds
 
 
 def try_lock(name):
+    """An OS lock on $OKE_HOME/locks/<name>: the OS frees it when the holder dies,
+    however long it held it. False when held, by another process or by this one."""
     path = lock_path(name)
+    if path in _lock_fds:
+        return False  # no nesting
     if not os.path.isdir(os.path.dirname(path)):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-    for _ in range(2):
-        try:
-            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            _lock_tokens[name] = "%d-%.6f" % (os.getpid(), time.time())
-            os.write(fd, _lock_tokens[name].encode())
-            os.close(fd)
-            return True
-        except OSError:
-            try:
-                if time.time() - os.path.getmtime(path) <= LOCK_STALE:
-                    return False
-                os.remove(path)
-            except OSError:
-                pass  # the holder just released it: try again
-    return False
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)  # byte 0 (fd is at offset 0); past EOF is allowed
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        os.close(fd)
+        return False
+    _lock_fds[path] = fd
+    return True
 
 
 def unlock(name):
-    """Only our own lock: one we held past LOCK_STALE may be another process's by now."""
-    try:
-        with io.open(lock_path(name), encoding="utf-8") as f:
-            mine = f.read() == _lock_tokens.pop(name, None)
-        if mine:
-            os.remove(lock_path(name))
-    except (IOError, OSError):
-        pass
+    """Only our own lock; the file stays."""
+    fd = _lock_fds.pop(lock_path(name), None)
+    if fd is not None:
+        os.close(fd)  # closing the fd releases the lock (flock and msvcrt alike)
 
 
 class locked(object):
@@ -2646,25 +2639,13 @@ def find_bash():
     return None
 
 
-VERIFY_LOCK_TOUCH = 60  # seconds: keeps the lock fresh during a check of any length
-
-
-def run_check(command, cwd, log, lock):
-    """Exit code of `command` in bash (else the platform shell), output to `log`. No time
-    limit; the lock's mtime is refreshed so it never looks stale while the check runs."""
+def run_check(command, cwd, log):
+    """Exit code of `command` in bash (else the platform shell), output to `log`. No time limit."""
     bash = find_bash()
     argv = [bash, "-c", command] if bash else command
     with io.open(log, "wb") as f:
-        p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=f,
-                             stderr=subprocess.STDOUT, shell=bash is None)
-        while True:
-            try:
-                return p.wait(timeout=VERIFY_LOCK_TOUCH)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.utime(lock_path(lock), None)
-                except OSError:
-                    pass
+        return subprocess.call(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=f,
+                               stderr=subprocess.STDOUT, shell=bash is None)
 
 
 # Failure signatures: a port of oh-my-claudecode's feedback baseline (signatureLines,
@@ -2786,9 +2767,9 @@ def diff_baseline(before, now):
     return new, sorted(old - set(now["signatures"]))
 
 
-def run_signatures(command, cwd, log, lock):
+def run_signatures(command, cwd, log):
     """Run the command (no time limit) and reduce its run to exit code and signatures."""
-    code = run_check(command, cwd, log, lock)
+    code = run_check(command, cwd, log)
     unrunnable = code in (126, 127)
     if code == 0 or unrunnable:
         return {"exit": code, "unrunnable": unrunnable, "signatures": []}
@@ -2924,12 +2905,12 @@ def cmd_baseline(args):
     try:
         log = os.path.join(job_dir, "baseline.log")
         if untouched(info, cwd, point):
-            now = run_signatures(command, cwd, log, lock)
+            now = run_signatures(command, cwd, log)
         else:
             # the work has begun: run on the code it started from, so a re-run never
             # takes the job's own failures for old ones
             now = run_at(cwd, point, os.path.join(job_dir, "baseline-checkout"),
-                         lambda where: run_signatures(command, where, log, lock))
+                         lambda where: run_signatures(command, where, log))
             if now is None:
                 fail("cannot check out %s for the baseline of %s" % (point[:12], args.job))
                 return 2
@@ -2987,7 +2968,7 @@ def cmd_check(args):
     try:
         n = len([r for r in ledger_rows(args.job) if r["check"] == "check"]) + 1
         log = os.path.join(oke_home(), "jobs", args.job, "check-%d.log" % n)
-        now = run_signatures(command, cwd, log, lock)
+        now = run_signatures(command, cwd, log)
         new, resolved = diff_baseline(base, now)
         log = log.replace("\\", "/")
         if now["unrunnable"]:
@@ -3063,12 +3044,12 @@ def verify_job(job, command, accept=None, skip=None, run=False):
     while not try_lock(lock):
         time.sleep(5)
     try:
-        return verify_locked(job, command, accept, info, lock, skip, run)
+        return verify_locked(job, command, accept, info, skip, run)
     finally:
         unlock(lock)
 
 
-def verify_locked(job, command, accept, info, lock, skip=None, run=False):
+def verify_locked(job, command, accept, info, skip=None, run=False):
     status, row = merge_state(job)
     if status == "verified":
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "already": True}))
@@ -3128,7 +3109,7 @@ def verify_locked(job, command, accept, info, lock, skip=None, run=False):
     base = read_baseline(job)
     if (base or {}).get("criteria_rev") != rev:
         base = None  # another command's failures say nothing about this one's
-    now = run_signatures(command, main, log, lock)
+    now = run_signatures(command, main, log)
     code = now["exit"]
     new, _ = diff_baseline(base, now)
     with io.open(log, encoding="utf-8", errors="replace") as f:
