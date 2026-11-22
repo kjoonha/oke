@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { THEME_NAMES, framesOf, orchestratorDenied, paletteOf, promptRole, workerDenied } from './register'
+import { THEME_NAMES, framesOf, keyDenied, orchestratorDenied, paletteOf, promptRole, workerDenied } from './register'
 
 type Run = { argv: readonly string[] }
 
@@ -715,4 +715,12 @@ test('each theme gives every role its own 12x8 character in every mood', () => {
   }
   expect(framesOf('nope', 'pm')).toBe(framesOf('disco', 'pm'))
   expect(framesOf('constructor', 'pm')).toBe(framesOf('disco', 'pm'))
+})
+
+test('no agent tool call may name the ledger key', async () => {
+  expect(keyDenied({ command: 'cat ~/.oke/ledger.key' })).toContain('oke.py only')
+  expect(keyDenied({ file_path: 'C:/oke/LEDGER.KEY' })).toContain('oke.py only')
+  expect(keyDenied({ pattern: '.', path: '/home/u/.oke/ledger.key' })).toContain('oke.py only')
+  expect(keyDenied({ file_path: 'oke.py', old_string: 'LEDGER_KEY = "ledger.key"' })).toBeNull()
+  expect(keyDenied({ command: 'python oke.py ledger show fix-a' })).toBeNull()
 })

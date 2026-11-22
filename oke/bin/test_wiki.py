@@ -1,7 +1,9 @@
 """The wiki: caps, read before write, duplicates, usage, archiving, and the gates."""
 import io
 import json
+import glob
 import os
+import shutil
 
 from test_oke import J, SpawnBase, help_ok, spawn_ok  # noqa: F401
 import oke
@@ -112,6 +114,9 @@ class TestWiki(SpawnBase):
         self.logged("calc")
         self.assertEqual(self.cli("job", "phase", "calc", "done"), 0, self.err)
         self.assertEqual(self.cli("job", "archive", "calc"), 0, self.err)
+        self.assertEqual(self.cli("job", "new", "calc", "--repo", folder), 1)  # an archived name stays taken
+        for old in glob.glob(os.path.join(oke.oke_home(), "archive", "calc-*")):
+            shutil.rmtree(old)  # the user removed the archive: the name is free, its wiki log line is not
         self.assertEqual(self.cli("job", "new", "calc", "--repo", folder), 0, self.err)
         state = oke.load_state()
         state["jobs"]["calc"]["created"] += 2  # the old line is now older than the job

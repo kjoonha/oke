@@ -5,7 +5,9 @@ Python 3.6 compatible, standard library only.
 """
 import argparse
 import glob
+import binascii
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -404,6 +406,12 @@ def worker_deny_rules(folder):
     return rules
 
 
+def key_deny_rules(home):
+    """No agent reads or changes the ledger key: with it, any row could be signed."""
+    rules = edit_rules(home, tail="/" + LEDGER_KEY)
+    return rules + [r.replace("Edit(", "Read(", 1) for r in rules] + ["Bash(*%s*)" % LEDGER_KEY]
+
+
 def plugin_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -712,7 +720,7 @@ def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header
     else:
         args += ["--permission-mode", "bypassPermissions"]
     # deny rules beat allow rules and bypass mode; `git diff/log/show --output=<file>` writes a file
-    denied = GIT_DENY_RULES + (REVIEWER_DENIED if role == "reviewer" else [])
+    denied = GIT_DENY_RULES + (REVIEWER_DENIED if role == "reviewer" else []) + key_deny_rules(home)
     if role == "worker" and folder and folder != home:
         denied = denied + worker_deny_rules(folder)
     args += ["--disallowedTools"] + denied
@@ -1689,13 +1697,18 @@ def board_tree(state, agents, only_key=None):
                 if n["status"] == "dead" and (info.get("held") or not n["pane"]):
                     n["status"] = "off"
             waiting = pending_item(job, info)
+            try:
+                merge = merge_state(job)[0]
+                after = [o for o in after_jobs(job) if o != job and after_block(state, o)] \
+                    if info.get("phase") in ("awaiting_merge", "merging") else []
+            except StateError:  # the ledger key is missing or damaged: the board still shows the rest
+                merge, after = "unreadable", []
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
                          "size": info.get("size"), "direct": bool(info.get("direct")),
-                         "merge": merge_state(job)[0], "held": bool(info.get("held")),
+                         "merge": merge, "held": bool(info.get("held")),
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None,
                          "peer_wait": sorted(repo_name(e["repo"]) for e in peer_waiting(state, job).values()),
-                         "after_wait": [o for o in after_jobs(job) if o != job and after_block(state, o)]
-                         if info.get("phase") in ("awaiting_merge", "merging") else []})
+                         "after_wait": after})
         node = board_node("pm", pm["agent"], key, pm, agents) if pm and pm.get("agent") else None
         if node and node["status"] == "dead" and not open_jobs(state, key):
             node["status"] = "off"  # nothing for it to do (its jobs are done or on hold): not stuck
@@ -2463,28 +2476,139 @@ def ledger_path(job):
     return os.path.join(oke_home(), "jobs", job, "ledger.tsv")
 
 
+# Every row carries an HMAC of the job, the row before it and itself under a key only OKe
+# reads: a row an agent appended by hand, or copied from elsewhere, is not a row at all.
+# shortcut: the agents run as the same OS user, so an agent bent on it can still find and
+# read the key or import oke.py and call ledger_add (deny rules and the mod refuse the
+# obvious ways); dropping the newest rows also goes unseen. OS users would close both.
+LEDGER_KEY = "ledger.key"
+
+
+def read_key(path):
+    try:
+        with io.open(path, encoding="ascii") as f:
+            key = f.read().strip()
+    except (IOError, OSError, UnicodeDecodeError):
+        return None
+    return binascii.unhexlify(key) if re.match(r"^[0-9a-f]{64}$", key) else None
+
+
+def ledger_key():
+    path = os.path.join(oke_home(), LEDGER_KEY)
+    key = read_key(path)
+    if key:
+        return key
+    with locked("ledger-key", timeout=120):
+        key = read_key(path)
+        if key:
+            return key
+        if os.path.exists(path):
+            raise StateError("the ledger key %s is damaged: ask the user" % path)
+        new = path + ".new"  # a first signing that stopped part way resumes with its key
+        key = read_key(new)
+        if not key:
+            if signed_ledgers():
+                # a new key would sign whatever was appended meanwhile: never by itself
+                raise StateError("the ledger key %s is missing while signed ledgers exist: ask the user. "
+                                 "Restore the key file; or, to trust every ledger line as it stands now "
+                                 "(hand-written ones too), the user writes a new key to %s.new: "
+                                 "python -c \"import os;open(r'%s.new','w').write(os.urandom(32).hex())\""
+                                 % (path, path, path))
+            if not os.path.isdir(oke_home()):
+                os.makedirs(oke_home(), exist_ok=True)
+            write_private(new, binascii.hexlify(os.urandom(32)).decode("ascii"))
+            key = read_key(new)
+        sign_ledgers(key)
+        replace_file(new, path)  # last: until then every reader waits on the lock above
+    return key
+
+
+def all_ledgers():
+    """[(job, ledger path)] of open and archived jobs (`archive/<job>-YYYYmmdd-HHMMSS`)."""
+    out = [(os.path.basename(os.path.dirname(l)), l)
+           for l in glob.glob(os.path.join(oke_home(), "jobs", "*", "ledger.tsv"))]
+    for l in glob.glob(os.path.join(oke_home(), "archive", "*", "ledger.tsv")):
+        out.append((re.sub(r"-\d{8}-\d{6}$", "", os.path.basename(os.path.dirname(l))), l))
+    return out
+
+
+def signed_ledgers():
+    for _, ledger in all_ledgers():
+        try:
+            with io.open(ledger, encoding="utf-8", errors="replace") as f:
+                if any(l.count("\t") == 6 for l in f.read().splitlines()):
+                    return True
+        except (IOError, OSError):
+            pass
+    return False
+
+
+def sign_ledgers(key):
+    """Sign every ledger as it stands: the rows from before signing, and again (same result)
+    the rows a stopped run already signed with this key."""
+    for job, ledger in all_ledgers():
+        try:
+            with io.open(ledger, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except (IOError, OSError, UnicodeDecodeError):
+            continue
+        prev, text = "", u""
+        for l in lines:
+            line = l.rpartition("\t")[0] if l.count("\t") == 6 else l
+            if line.count("\t") != 5:
+                continue  # a torn line
+            prev = row_sig(key, job, prev, line)
+            text += line + u"\t" + prev + u"\n"
+        with io.open(ledger + ".tmp", "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        replace_file(ledger + ".tmp", ledger)
+
+
+def row_sig(key, job, prev, line):
+    return hmac.new(key, (u"%s\n%s\n%s" % (job, prev, line)).encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+
+
+def ledger_chain(job, path=None):
+    """(trusted rows, number of lines that were not), and the last trusted row's signature."""
+    key = ledger_key()  # first: making it re-signs the ledgers written before signing
+    try:
+        with io.open(path or ledger_path(job), encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except (IOError, OSError, UnicodeDecodeError):
+        return [], 0, ""
+    prev, rows, bad = "", [], 0
+    for l in lines:
+        line, _, sig = l.rpartition("\t")
+        if line.count("\t") == 5 and hmac.compare_digest(sig.encode("utf-8"), row_sig(key, job, prev, line).encode("ascii")):
+            rows.append(dict(zip(LEDGER_FIELDS, line.split("\t"))))
+            prev = sig
+        elif l.strip():
+            bad += 1
+    return rows, bad, prev
+
+
 def ledger_add(job, by, commit, check, result, detail=""):
     """Append one row. Rows are never rewritten: a later row supersedes an earlier one."""
     values = [time.strftime("%Y-%m-%dT%H:%M:%S"), by, commit, check, result, detail]
     line = "\t".join(" ".join(str(v or "-").split()) for v in values)
     path = ledger_path(job)
-    try:
-        with io.open(path, "rb") as f:
-            f.seek(-1, os.SEEK_END)
-            torn = f.read(1) != b"\n"  # a writer died mid-line: do not glue this row onto it
-    except (IOError, OSError):
-        torn = False
-    with io.open(path, "a", encoding="utf-8", newline="\n") as f:
-        f.write((u"\n" if torn else u"") + line + u"\n")
+    with locked("ledger-" + job, timeout=150):  # the chain needs the last row; the key lock waits 120 s
+        key = ledger_key()  # before the file is open: making the key re-signs older ledgers
+        _, _, prev = ledger_chain(job)
+        sig = row_sig(key, job, prev, line)
+        try:
+            with io.open(path, "rb") as f:
+                f.seek(-1, os.SEEK_END)
+                torn = f.read(1) != b"\n"  # a writer died mid-line: do not glue this row onto it
+        except (IOError, OSError):
+            torn = False
+        with io.open(path, "a", encoding="utf-8", newline="\n") as f:
+            f.write((u"\n" if torn else u"") + line + u"\t" + sig + u"\n")
 
 
 def ledger_rows(job, path=None):
-    try:
-        with io.open(path or ledger_path(job), encoding="utf-8") as f:
-            lines = f.read().splitlines()
-    except (IOError, OSError, UnicodeDecodeError):
-        return []
-    return [dict(zip(LEDGER_FIELDS, l.split("\t"))) for l in lines if l.count("\t") == 5]
+    """The rows OKe wrote, in order; lines without a valid signature are left out."""
+    return ledger_chain(job, path)[0]
 
 
 # Rows only OKe itself writes; `oke ledger add` refuses them so nobody forges a verdict.
@@ -3055,7 +3179,8 @@ def cmd_ledger(args):
         ledger_add(args.job, args.by, args.commit, args.check, args.result, args.detail)
         return 0
     status, _ = merge_state(args.job)
-    print(json.dumps({"job": args.job, "merge": status, "rows": ledger_rows(args.job)}, indent=2))
+    rows, bad, _ = ledger_chain(args.job)
+    print(json.dumps({"job": args.job, "merge": status, "rows": rows, "ignored_lines": bad}, indent=2))
     return 0
 
 
@@ -3168,6 +3293,10 @@ def job_locked(args):
         job_dir = os.path.join(home, "jobs", args.slug)
         if args.slug in state["jobs"] or os.path.exists(job_dir):
             return fail("job already exists: %s" % args.slug)
+        if any(re.match(re.escape(args.slug) + r"-\d{8}-\d{6}$", os.path.basename(d))
+               for d in glob.glob(os.path.join(home, "archive", glob.escape(args.slug) + "-*"))):
+            # never a name again: an archived ledger copied in would carry valid signatures
+            return fail("job %s was archived before: pick another job name" % args.slug)
         try:
             key = repo_key(args.repo)
         except ValueError as e:

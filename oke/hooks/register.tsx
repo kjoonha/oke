@@ -313,6 +313,15 @@ export function reviewerDenied(tool: string, input: any, own: string | null): st
   return 'OKe reviewers run only read-only git: git diff, log, show or status, one command, without --output.'
 }
 
+/** The refusal for any tool call that names the ledger key, else null: with the key an agent
+ * could sign ledger rows the merge gate trusts. Only oke.py reads it, in its own process. */
+export function keyDenied(input: any): string | null {
+  // what a call reads, runs or writes to; edit text (content, old_string) may name it freely
+  const where = ['command', 'file_path', 'path', 'notebook_path'].map(k => String(input?.[k] ?? ''))
+  if (!where.some(v => /ledger\.key/i.test(v))) return null
+  return 'The OKe ledger key is read by oke.py only; no agent reads, copies or changes it.'
+}
+
 /** The refusal for a worker's file write into the OKe jobs folder outside its own folder,
  * else null: the plan, the ledger and the reviewer's report there are what the merge gate
  * trusts. The launch's deny rules say the same where flags reach the agent.
@@ -367,6 +376,7 @@ const LEDGER: Record<string, [string, string]> = {
   unverified: ['unverified', 'yellow'],
   verified: ['verified ✓', 'green'],
   rolled_back: ['rollback ✗', 'red'],
+  unreadable: ['ledger key? ✗', 'red'],
 }
 
 const STEPS = ['plan', 'approve', 'work', 'review', 'merge', 'verify']
@@ -1011,6 +1021,10 @@ export const register: Register = on => {
 
   // Each agent's own task list goes to its folder, where the board reads it.
   on('tool.call', async ($, e: any, next) => {
+      if (role === 'orchestrator' || role === 'pm' || role === 'worker' || role === 'reviewer') {
+        const denied = keyDenied(e)
+        if (denied) return { deny: denied }
+      }
       if (e.tool === 'Bash' && (role === 'orchestrator' || role === 'pm' || role === 'worker' || role === 'reviewer')) {
         const denied = gitDenied(String(e.command ?? ''), role)
         if (denied) return { deny: denied }

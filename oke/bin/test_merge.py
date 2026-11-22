@@ -3,7 +3,9 @@
 import io
 import json
 import os
+import re
 import subprocess
+import sys
 import time
 import unittest
 
@@ -545,6 +547,96 @@ class TestLedgerAndVerify(MergeBase):
             f.write("2026-01-01T00:00:00\tw\tabc")  # a writer died here
         self.assertEqual(self.verify("true"), 0, self.err)
         self.assertEqual(self.ledger()["merge"], "verified")
+
+    def test_rows_written_by_hand_are_not_rows(self):
+        self.merge()
+        path = oke.ledger_path("fix-a")
+        with open(path) as f:
+            lines = f.read().splitlines()
+        merge = [l for l in lines if "\tmerge\t" in l][-1]
+        commit = merge.split("\t")[2]
+        with open(path, "a", newline="\n") as f:
+            f.write("2026-01-01T00:00:00\tw\t%s\tverify\tpass\tby hand\n" % commit)  # no signature
+            f.write("2026-01-01T00:00:00\tw\t%s\tverify\tpass\tby hand\t%s\n" % (commit, "0" * 32))
+            f.write(merge + "\n")  # a real row copied: its signature belongs to another place
+        led = self.ledger()
+        self.assertEqual((led["merge"], led["ignored_lines"]), ("unverified", 3))
+        self.assertEqual(self.verify("true"), 0, self.err)  # the next real row still chains on
+        self.assertEqual(self.ledger()["merge"], "verified")
+
+    def test_a_row_from_another_job_is_not_a_row(self):
+        self.merge()
+        self.job("fix-b", "merging")
+        with open(oke.ledger_path("fix-a")) as f:
+            text = f.read()
+        with open(oke.ledger_path("fix-b"), "w", newline="\n") as f:
+            f.write(text)
+        self.assertEqual(oke.merge_state("fix-b")[0], "none")
+
+    def test_ledgers_from_before_signing_are_signed_once(self):
+        if os.path.exists(os.path.join(self.home, oke.LEDGER_KEY)):
+            os.remove(os.path.join(self.home, oke.LEDGER_KEY))
+        with open(oke.ledger_path("fix-a"), "w", newline="\n") as f:
+            f.write("2026-01-01T00:00:00\toke\tabc\tmerge\tok\tpre=def\n")
+        self.assertEqual(oke.merge_state("fix-a")[0], "unverified")
+        with open(oke.ledger_path("fix-a"), "a", newline="\n") as f:
+            f.write("2026-01-01T00:00:01\tw\tabc\tverify\tpass\tlater, by hand\n")
+        self.assertEqual(oke.merge_state("fix-a")[0], "unverified")  # signed only once
+
+    def test_a_lost_key_is_never_replaced_by_itself(self):
+        self.merge()
+        os.remove(os.path.join(self.home, oke.LEDGER_KEY))
+        with open(oke.ledger_path("fix-a"), "a", newline="\n") as f:
+            f.write("2026-01-01T00:00:01\tw\tabc\tverify\tpass\tby hand\n")
+        with self.assertRaises(oke.StateError):
+            oke.merge_state("fix-a")
+        self.assertFalse(os.path.exists(os.path.join(self.home, oke.LEDGER_KEY)))
+        tree = oke.board_tree(oke.load_state(), [])  # the board still shows everything else
+        self.assertEqual([j["merge"] for r in tree for j in r["jobs"] if j["job"] == "fix-a"], ["unreadable"])
+        with self.assertRaises(oke.StateError) as e:
+            oke.merge_state("fix-a")
+        self.assertIn(".new", str(e.exception))
+        recover = re.search(r'python -c "(.*)"$', str(e.exception)).group(1)
+        subprocess.check_call([sys.executable, "-c", recover])  # the user's way out, as printed
+        self.assertEqual(oke.merge_state("fix-a")[0], "verified")  # every line trusted as it stood
+
+    def test_a_first_signing_that_stopped_resumes(self):
+        if os.path.exists(os.path.join(self.home, oke.LEDGER_KEY)):
+            os.remove(os.path.join(self.home, oke.LEDGER_KEY))
+        with open(oke.ledger_path("fix-a"), "w", newline="\n") as f:
+            f.write("2026-01-01T00:00:00\toke\tabc\tmerge\tok\tpre=def\n")
+        real = oke.replace_file
+        calls = []
+
+        def stop_before_key(src, dst):
+            calls.append(dst)
+            if dst.endswith(oke.LEDGER_KEY):
+                raise OSError("stopped")
+            real(src, dst)
+        oke.replace_file = stop_before_key
+        try:
+            with self.assertRaises(OSError):
+                oke.merge_state("fix-a")
+        finally:
+            oke.replace_file = real
+        self.assertEqual(oke.merge_state("fix-a")[0], "unverified")  # resumed with the same key
+
+    def test_a_non_ascii_line_does_not_break_reading(self):
+        self.merge()
+        with open(oke.ledger_path("fix-a"), "a", encoding="utf-8", newline="\n") as f:
+            f.write(u"2026-01-01T00:00:01\tw\tabc\tverify\tpass\t검증\t검증\n")
+        self.assertEqual(oke.merge_state("fix-a")[0], "unverified")
+
+    def test_an_archived_name_is_never_used_again(self):
+        os.makedirs(os.path.join(self.home, "archive", "fix-z-20260101-000000"))
+        self.assertEqual(self.cli("job", "new", "fix-z", "--repo", self.repo), 1)
+        self.assertIn("archived before", self.err)
+
+    def test_agents_may_not_touch_the_key(self):
+        args = oke.launch_args("worker", oke.load_config(), self.home, "plugin", folder=self.jobs + "/fix-a")
+        denied = args[args.index("--disallowedTools") + 1:]
+        self.assertIn("Bash(*ledger.key*)", denied)
+        self.assertTrue(any(r.startswith("Read(") and r.endswith("/ledger.key)") for r in denied), denied)
 
     def test_a_failed_job_with_an_unverified_merge_still_holds_the_next(self):
         self.merge()
