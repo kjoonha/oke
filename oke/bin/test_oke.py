@@ -293,6 +293,23 @@ class TestState(Base):
         self.assertEqual(os.listdir(kept), ["report.md"])  # the settings copy held the user's env
         self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "fix-a")))
 
+    def test_job_new_path_of_a_submodule_and_a_bare_repository(self):
+        # a submodule's git common dir is <super>/.git/modules/<name>: its parent is no checkout
+        self.git_repo("sub")
+        sup = self.git_repo("sup")
+        self.git(sup, "-c", "protocol.file.allow=always", "submodule", "-q", "add", self.path("sub"), "s")
+        self.assertEqual(self.cli("job", "new", "fix-s", "--repo", os.path.join(sup, "s")), 0, self.err)
+        info = json.loads(self.out)
+        self.assertEqual(oke.normalize_path(info["path"]), oke.normalize_path(os.path.join(sup, "s")))
+        self.assertTrue(oke.load_state()["jobs"]["fix-s"]["base"])
+        main = oke.load_state()["jobs"]["fix-s"]
+        self.assertEqual(oke.normalize_path(oke.check_dir(main)[0]), oke.normalize_path(os.path.join(sup, "s")))
+        bare = self.path("b.git")
+        self.git(self.home, "init", "-q", "--bare", bare)
+        self.assertEqual(self.cli("job", "new", "fix-b", "--repo", bare), 1)
+        self.assertIn("bare", self.err)
+        self.assertNotIn("fix-b", oke.load_state()["jobs"])
+
     def test_job_new_refuses_a_name_whose_branch_exists(self):
         # an archived job keeps its branch; reusing the name would review and merge the old branch
         repo = self.git_repo("r")

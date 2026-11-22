@@ -472,7 +472,7 @@ class TestLedgerAndVerify(MergeBase):
         self.git(self.repo, "commit", "-q", "-m", "b")
         self.set_plan(command)
         oke.write_json_atomic(os.path.join(self.jobs, "baseline.json"),
-                              {"version": 1, "criteria_rev": oke.criteria_rev("fix-a"), "commit": "x",
+                              {"version": oke.BASELINE_VERSION, "criteria_rev": oke.criteria_rev("fix-a"), "commit": "x",
                                "exit": 1, "unrunnable": False, "signatures": baseline})
         return self.git_out(self.repo, "rev-parse", "HEAD").strip()
 

@@ -275,6 +275,51 @@ class TestBaselineCheck(SpawnBase):
         self.assertEqual(self.cli("check", "q"), 2)  # unrunnable at baseline too: still no pass
         self.assertEqual(self.rows(), [])
 
+    def test_baseline_of_another_version_counts_as_none(self):
+        # an older OKe normalized failure lines differently: its signatures would make old failures new
+        self.plan('echo "FAILED old"; exit 1')
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        path = os.path.join(self.home, "jobs", "q", "baseline.json")
+        with open(path) as f:
+            base = json.load(f)
+        self.assertEqual(base["version"], oke.BASELINE_VERSION)
+        oke.write_json_atomic(path, dict(base, version=1, signatures=[]))
+        self.assertIsNone(oke.read_baseline("q"))
+        self.assertEqual(self.cli("check", "q"), 2)
+        self.assertIn("oke baseline q", self.err)
+        self.assertIn("older", self.err)
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        self.assertEqual(len(os.listdir(os.path.join(self.home, "jobs", "q", "baseline.history"))), 1)
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+
+    def test_unrunnable_baseline_keeps_the_previous_one(self):
+        self.plan("true")
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        path = os.path.join(self.home, "jobs", "q", "baseline.json")
+        with open(path) as f:
+            before = f.read()
+        self.plan("no-such-command-oke-xyz")
+        self.assertEqual(self.cli("baseline", "q"), 2)
+        self.assertIn("could not run", self.err)
+        with open(path) as f:
+            self.assertEqual(f.read(), before)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "q", "baseline.history")))
+
+    def test_baselines_in_one_second_keep_distinct_history_in_order(self):
+        from unittest import mock
+        with mock.patch.object(oke, "BASELINE_HISTORY", 2), \
+                mock.patch("time.strftime", return_value="20260101T000000"):
+            for n in range(4):
+                self.plan('echo "FAILED %d"; exit 1' % n)
+                self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        history = os.path.join(self.home, "jobs", "q", "baseline.history")
+        kept = []
+        for name in sorted(os.listdir(history)):
+            with open(os.path.join(history, name)) as f:
+                kept.append(json.load(f)["signatures"])
+        self.assertEqual(kept, [["FAILED 1"], ["FAILED 2"]])
+
     def test_ledger_add_cannot_forge_check(self):
         self.assertEqual(self.cli("ledger", "add", "q", "--by", "w", "--commit", "abc", "--check", "check",
                                   "--result", "pass"), 1)
