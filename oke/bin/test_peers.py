@@ -374,7 +374,8 @@ class TestAfter(PeerBase):
         del s["jobs"]["fix-b"]
         oke.save_state(s)
         self.assertNotIn("fix-b", self.merge())
-        os.remove(os.path.join(dst, "ledger.tsv"))
+        for name in ("ledger.tsv", "ledger.head"):  # the ledger alone gone reads as cut
+            os.remove(os.path.join(dst, name))
         self.assertIn("after fix-b was archived without a verified merge: ask the user", self.merge())
 
     def test_cancel_notifies_the_pm_of_a_job_waiting_on_it(self):

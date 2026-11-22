@@ -6,6 +6,7 @@ Python 3.6 compatible, standard library only.
 import argparse
 import glob
 import binascii
+import errno
 import hashlib
 import hmac
 import io
@@ -206,9 +207,12 @@ def try_lock(name):
         else:
             import fcntl
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (IOError, OSError):
+    except (IOError, OSError) as e:
         os.close(fd)
-        return False
+        if e.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK, errno.EDEADLK):
+            return False  # held by another process (msvcrt says EACCES or EDEADLK)
+        raise StateError("cannot lock %s (%s): OKE_HOME needs a file system with locks "
+                         "(an NFS home without lockd fails here)" % (path, e))
     _lock_fds[path] = fd
     return True
 
@@ -217,7 +221,14 @@ def unlock(name):
     """Only our own lock; the file stays."""
     fd = _lock_fds.pop(lock_path(name), None)
     if fd is not None:
-        os.close(fd)  # closing the fd releases the lock (flock and msvcrt alike)
+        if os.name == "nt":
+            import msvcrt
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)  # closing frees it too, but not at a set time
+            except OSError:
+                pass
+        os.close(fd)
 
 
 class locked(object):
@@ -294,7 +305,7 @@ def repo_key(path):
 def repo_dir(key):
     """The working folder of the repository whose git common dir is `key`; None for a bare one."""
     code, top = git_out(key, "rev-parse", "--show-toplevel")  # a submodule's git dir names it in core.worktree
-    if code == 0:
+    if code == 0 and top:  # git before 2.25 exits 0 with no output inside a .git folder
         return normalize_path(top)
     if git_out(key, "rev-parse", "--is-bare-repository")[1] == "true":
         return None
@@ -404,14 +415,14 @@ def worker_deny_rules(folder):
         return []
     rules = []
     # reviewer folders are <job>-rv[N]: a bare *-rv* would also match `fix-rv-w1`
-    for tail in ("/*.md", "/*.tsv", "/*.json", "/*.log", "/pm/**", "/%s-rv*/**" % os.path.basename(job_dir)):
+    for tail in ("/*.md", "/*.tsv", "/*.head", "/*.json", "/*.log", "/pm/**", "/%s-rv*/**" % os.path.basename(job_dir)):
         rules += edit_rules(job_dir, tail=tail)
     return rules
 
 
 def key_deny_rules(home):
     """No agent reads or changes the ledger key: with it, any row could be signed."""
-    rules = edit_rules(home, tail="/" + LEDGER_KEY)
+    rules = edit_rules(home, tail="/" + LEDGER_KEY) + edit_rules(home, tail="/" + LEDGER_KEY + ".*")
     return rules + [r.replace("Edit(", "Read(", 1) for r in rules] + ["Bash(*%s*)" % LEDGER_KEY]
 
 
@@ -2488,22 +2499,52 @@ def ledger_path(job):
 LEDGER_KEY = "ledger.key"
 
 
-def read_key(path):
+KEY_HEADS = ".heads"  # ledger.key.heads: every ledger has its signed head (agents are denied it)
+
+
+def read_key(path, marked=False):
+    """The key; with marked, (key, whether the heads are written)."""
     try:
         with io.open(path, encoding="ascii") as f:
-            key = f.read().strip()
+            text = f.read().strip()
     except (IOError, OSError, UnicodeDecodeError):
-        return None
-    return binascii.unhexlify(key) if re.match(r"^[0-9a-f]{64}$", key) else None
+        text = ""
+    key = binascii.unhexlify(text) if re.match(r"^[0-9a-f]{64}$", text) else None
+    return (key, os.path.exists(path + KEY_HEADS)) if marked else key
+
+
+def write_key(path, key):
+    """The key file (hex only, as every OKe version reads it) and its heads mark."""
+    write_private(path + ".tmp", binascii.hexlify(key).decode("ascii"))
+    replace_file(path + ".tmp", path)
+    final = path[:-len(".new")] if path.endswith(".new") else path
+    write_private(final + KEY_HEADS, "every ledger has its head\n")
+
+
+def add_heads(key):
+    """Heads for ledgers signed before heads existed: once, as the rows stand."""
+    for job, ledger in all_ledgers():
+        if os.path.exists(head_path(ledger)):
+            continue
+        try:
+            with io.open(ledger, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+        except (IOError, OSError, UnicodeDecodeError):
+            continue
+        sigs = chain_sigs(key, job, lines)[0]
+        write_head(key, job, ledger, len(sigs), sigs[-1] if sigs else "")
 
 
 def ledger_key():
     path = os.path.join(oke_home(), LEDGER_KEY)
-    key = read_key(path)
-    if key:
+    key, heads = read_key(path, marked=True)
+    if key and heads:
         return key
     with locked("ledger-key", timeout=120):
-        key = read_key(path)
+        key, heads = read_key(path, marked=True)
+        if key and not heads:  # the key the agents cannot change says the heads are not written yet
+            add_heads(key)
+            write_key(path, key)
         if key:
             return key
         if os.path.exists(path):
@@ -2523,6 +2564,7 @@ def ledger_key():
             write_private(new, binascii.hexlify(os.urandom(32)).decode("ascii"))
             key = read_key(new)
         sign_ledgers(key)
+        write_key(new, key)  # marked: sign_ledgers wrote every head
         replace_file(new, path)  # last: until then every reader waits on the lock above
     return key
 
@@ -2589,18 +2631,10 @@ def write_head(key, job, ledger, n, last):
     replace_file(path + ".tmp", path)
 
 
-def ledger_chain(job, path=None):
-    """(trusted rows, number of lines that were not), and the last trusted row's signature.
-    Raises StateError when rows were cut from the end (the signed head counts more)."""
-    key = ledger_key()  # first: making it re-signs the ledgers written before signing
-    ledger = path or ledger_path(job)
-    try:
-        with io.open(ledger, encoding="utf-8") as f:
-            lines = f.read().splitlines()
-    except (IOError, OSError, UnicodeDecodeError):
-        lines = None
+def chain_sigs(key, job, lines):
+    """(signatures, rows, untrusted line count) of the lines that chain from the start."""
     prev, rows, sigs, bad = "", [], [], 0
-    for l in lines or []:
+    for l in lines:
         line, _, sig = l.rpartition("\t")
         if line.count("\t") == 5 and hmac.compare_digest(sig.encode("utf-8"), row_sig(key, job, prev, line).encode("ascii")):
             rows.append(dict(zip(LEDGER_FIELDS, line.split("\t"))))
@@ -2608,20 +2642,55 @@ def ledger_chain(job, path=None):
             prev = sig
         elif l.strip():
             bad += 1
-    try:
-        with io.open(head_path(ledger), encoding="utf-8") as f:
-            n, last, mac = f.read().strip().split("\t")
-        n = int(n)
-        head = hmac.compare_digest(mac.encode("utf-8"), head_sig(key, job, n, last).encode("ascii"))
-    except (IOError, OSError, UnicodeDecodeError, ValueError):
-        head = n = last = None
+    return sigs, rows, bad
+
+
+def ledger_chain(job, path=None):
+    """(trusted rows, number of lines that were not), and the last trusted row's signature.
+    Raises StateError when rows were cut from the end (the signed head counts more)."""
+    key = ledger_key()  # first: making it re-signs the ledgers written before signing
+    ledger = path or ledger_path(job)
+    # the head before the rows: a writer puts its row down first, so this head never counts more
+    head = n = last = None
+    for attempt in range(20):
+        try:
+            with io.open(head_path(ledger), encoding="utf-8") as f:
+                n, last, mac = f.read().strip().split("\t")
+            n = int(n)
+            head = hmac.compare_digest(mac.encode("utf-8"), head_sig(key, job, n, last).encode("ascii"))
+            break
+        except (IOError, OSError) as e:
+            if e.errno == errno.ENOENT:
+                break  # no head
+            if attempt == 19:  # Windows: a writer renaming over it holds it for a moment
+                raise StateError("cannot read %s: %s" % (head_path(ledger), e))
+            time.sleep(0.05)
+        except (UnicodeDecodeError, ValueError):
+            head = False  # not a head OKe wrote
+            break
+    lines = None
+    for attempt in range(20):
+        try:
+            with io.open(ledger, encoding="utf-8", errors="replace") as f:
+                lines = f.read().splitlines()
+            break
+        except (IOError, OSError) as e:
+            if e.errno == errno.ENOENT:
+                break  # no ledger yet
+            if attempt == 19:
+                raise StateError("cannot read %s: %s" % (ledger, e))
+            time.sleep(0.05)
+    sigs, rows, bad = chain_sigs(key, job, lines or [])
+    prev = sigs[-1] if sigs else ""
     # a crash between a row and its head leaves one row more than the head: fine. Fewer, a
     # head that is not OKe's, or a lost head over more than the one row it lags: rows were cut
     lost = (head is False or (head and (len(sigs) < n or (n and sigs[n - 1] != last)))
             or (head is None and len(sigs) > 1))
     if lost:
-        raise StateError("the ledger of job %s lost rows or its head (%s): ask the user"
-                         % (job, head_path(ledger)))
+        raise StateError("the ledger of job %s lost rows or its head (%s): ask the user. If an older "
+                         "OKe wrote this job (it kept no heads), deleting %s makes OKe write the "
+                         "missing heads once, as the rows stand" % (job, head_path(ledger),
+                                                                  os.path.join(oke_home(), LEDGER_KEY + KEY_HEADS)))
     if lines is None:
         return [], 0, ""
     return rows, bad, prev
@@ -2940,10 +3009,33 @@ def read_baseline(job, any_version=False):
     return base if any_version or base.get("version") == BASELINE_VERSION else None
 
 
+def reread_baseline(job, info, old):
+    """An older baseline with its signatures read from its baseline.log the current way;
+    None without the log. The run was in the job's checkout or a baseline checkout."""
+    log = os.path.join(oke_home(), "jobs", job, "baseline.log")
+    try:
+        recorded = time.mktime(time.strptime(old.get("recorded_at", ""), "%Y-%m-%dT%H:%M:%S"))
+        if os.path.getmtime(log) > recorded + 60:
+            return None  # written by a later run that saved no baseline: not this one's output
+        with io.open(log, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except (IOError, OSError, ValueError, OverflowError):
+        return None
+    folders = [(info.get("worktree") or {}).get("path"), repo_dir(info["repo"]),
+               os.path.join(oke_home(), "jobs", job, "baseline-checkout")]
+    sigs = []
+    for where in [f for f in folders if f]:
+        sigs += [l for l in signature_lines(text, where) if l not in sigs]
+    return dict(old, signatures=sigs)
+
+
 def cmd_baseline(args):
     found = quality_target(args.job)
     if isinstance(found, int):
         return found
+    if merge_state(args.job)[0] in ("unverified", "verified"):
+        # after the merge the starting point is the job's own tip: its failures would read as old
+        return fail("job %s is merged already: a baseline now would run on its own code" % args.job)
     info, command, cwd, target = found
     job_dir = os.path.join(oke_home(), "jobs", args.job)
     point = base_point(info, cwd)
@@ -3166,6 +3258,14 @@ def verify_locked(job, command, accept, info, skip=None, run=False):
     n = len([r for r in ledger_rows(job) if r["check"] == "verify"]) + 1
     log = os.path.join(oke_home(), "jobs", job, "verify-%d.log" % n)
     base = read_baseline(job)
+    old = read_baseline(job, any_version=True)
+    if not base and old and old.get("criteria_rev") == rev:
+        # recorded by an older OKe, which read failures differently: read its log again the
+        # current way (a new baseline now would run on the job's own merged code)
+        base = reread_baseline(job, info, old)
+        if not base:
+            return fail("the baseline of %s was recorded by an older OKe and its log is gone: ask the user; "
+                        "if they accept the merge as it is, `oke job verify %s --accept \"<why>\"`" % (job, job))
     if (base or {}).get("criteria_rev") != rev:
         base = None  # another command's failures say nothing about this one's
     now = run_signatures(command, main, log)

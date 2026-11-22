@@ -512,6 +512,63 @@ class TestLedgerAndVerify(MergeBase):
         self.assertIn("--run", self.err)
         self.assertEqual(self.ledger()["merge"], "unverified")
 
+    def test_an_old_baseline_is_read_again_from_its_log(self):
+        self.moved_main('echo "FAILED old"; exit 1', ["old form, not matched"])
+        path = os.path.join(self.jobs, "baseline.json")
+        with open(path) as f:
+            base = json.load(f)
+        base["version"] = 1
+        base["recorded_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        with open(path, "w") as f:
+            json.dump(base, f)
+        self.merge()
+        self.assertEqual(self.cli("job", "verify", "fix-a", "--run"), 1)  # no log: the user decides
+        self.assertIn("older OKe", self.err)
+        self.assertEqual(self.ledger()["merge"], "unverified")
+        with open(os.path.join(self.jobs, "baseline.log"), "w") as f:
+            f.write("FAILED old" + chr(10))
+        later = time.time() + 3600
+        os.utime(os.path.join(self.jobs, "baseline.log"), (later, later))
+        self.assertEqual(self.cli("job", "verify", "fix-a", "--run"), 1)  # a later run's log: not this one's
+        os.utime(os.path.join(self.jobs, "baseline.log"), None)
+        self.assertEqual(self.cli("job", "verify", "fix-a", "--run"), 0, self.err)  # old failure stays old
+        self.assertEqual(self.ledger()["merge"], "verified")
+
+    def test_no_baseline_after_the_merge(self):
+        self.merge()
+        self.assertEqual(self.cli("baseline", "fix-a"), 1)
+        self.assertIn("merged already", self.err)
+
+    def test_a_head_busy_for_a_moment_is_read_again(self):
+        self.merge()
+        real, calls = io.open, []
+
+        def busy(path, *a, **k):
+            if str(path).endswith("ledger.head") and not calls:
+                calls.append(path)
+                raise PermissionError(13, "in use")
+            return real(path, *a, **k)
+        oke.io.open = busy
+        try:
+            self.assertEqual(oke.merge_state("fix-a")[0], "unverified")
+        finally:
+            oke.io.open = real
+        self.assertEqual(len(calls), 1)
+
+    def test_ledgers_signed_before_heads_get_theirs_once(self):
+        self.merge()
+        key_path = os.path.join(self.home, oke.LEDGER_KEY)
+        os.remove(key_path + oke.KEY_HEADS)  # a key from before heads
+        os.remove(os.path.join(self.jobs, "ledger.head"))
+        self.assertEqual(oke.merge_state("fix-a")[0], "unverified")
+        self.assertTrue(os.path.exists(os.path.join(self.jobs, "ledger.head")))
+        self.assertTrue(os.path.exists(key_path + oke.KEY_HEADS))
+        with open(key_path) as f:
+            self.assertRegex(f.read(), r"^[0-9a-f]{64}$")  # hex only, as older OKe reads it
+        os.remove(os.path.join(self.jobs, "ledger.head"))  # from now on a lost head is a cut ledger
+        with self.assertRaises(oke.StateError):
+            oke.merge_state("fix-a")
+
     def test_moved_main_runs_and_old_failures_pass(self):
         self.moved_main('echo "FAILED old"; exit 1', ["FAILED old"])
         merged = self.merge()

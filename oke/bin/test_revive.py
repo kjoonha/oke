@@ -768,6 +768,22 @@ class TestSpawnTerminal(ReviveBase):
 
 
 class TestLock(ReviveBase):
+    def test_a_file_system_without_locks_is_an_error_not_a_held_lock(self):
+        import errno
+        name = "msvcrt" if os.name == "nt" else "fcntl"
+        mod = __import__(name)
+        real = mod.locking if os.name == "nt" else mod.flock
+
+        def no_locks(*a):
+            raise OSError(errno.ENOLCK, "No locks available")
+        setattr(mod, "locking" if os.name == "nt" else "flock", no_locks)
+        try:
+            with self.assertRaises(oke.StateError) as e:
+                oke.try_lock("x")
+        finally:
+            setattr(mod, "locking" if os.name == "nt" else "flock", real)
+        self.assertIn("file system with locks", str(e.exception))
+
     def test_second_try_fails_until_unlock(self):
         self.assertTrue(oke.try_lock("x"))
         self.assertFalse(oke.try_lock("x"))

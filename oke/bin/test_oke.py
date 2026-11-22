@@ -1309,5 +1309,16 @@ class TestReviewFixes(SpawnBase):
         self.assertEqual(repo["pm_dir"], oke.pm_dir(key).replace("\\", "/"))
 
 
+class TestRepoDir(unittest.TestCase):
+    def test_old_git_printing_nothing_is_not_the_root(self):
+        real = oke.git_out
+        oke.git_out = lambda key, *a: (0, "") if "--show-toplevel" in a else (0, "false")
+        try:
+            self.assertEqual(oke.repo_dir("C:/x/.git"), "C:/x")
+        finally:
+            oke.git_out = real
+
+
 if __name__ == "__main__":
     unittest.main()
+
