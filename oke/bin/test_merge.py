@@ -564,6 +564,35 @@ class TestLedgerAndVerify(MergeBase):
         self.assertEqual(self.verify("true"), 0, self.err)  # the next real row still chains on
         self.assertEqual(self.ledger()["merge"], "verified")
 
+    def test_rows_cut_from_the_end_show(self):
+        self.merge()
+        self.assertEqual(self.verify("true"), 0, self.err)
+        path = oke.ledger_path("fix-a")
+        with open(path) as f:
+            lines = f.read().splitlines(True)
+        with open(path, "w", newline="\n") as f:
+            f.writelines(lines[:-1])  # the verify row gone: the merge would read unverified
+        with self.assertRaises(oke.StateError) as e:
+            oke.merge_state("fix-a")
+        self.assertIn("lost rows", str(e.exception))
+        with open(path, "w", newline="\n") as f:
+            f.writelines(lines)
+        os.remove(os.path.join(os.path.dirname(path), "ledger.head"))
+        with self.assertRaises(oke.StateError):
+            oke.merge_state("fix-a")
+
+    def test_a_row_written_before_its_head_is_fine(self):
+        self.merge()
+        head = os.path.join(os.path.dirname(oke.ledger_path("fix-a")), "ledger.head")
+        with open(head) as f:
+            old = f.read()
+        self.assertEqual(self.verify("true"), 0, self.err)
+        with open(head, "w", newline="\n") as f:
+            f.write(old)  # the writer died after its row, before the head
+        self.assertEqual(oke.merge_state("fix-a")[0], "verified")
+        self.assertEqual(self.cli("ledger", "add", "fix-a", "--by", "w", "--commit", "abc", "--check", "note", "--result", "pass"), 0, self.err)
+        self.assertEqual(oke.merge_state("fix-a")[0], "verified")
+
     def test_a_row_from_another_job_is_not_a_row(self):
         self.merge()
         self.job("fix-b", "merging")

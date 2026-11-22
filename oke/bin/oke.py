@@ -2480,7 +2480,8 @@ def ledger_path(job):
 # reads: a row an agent appended by hand, or copied from elsewhere, is not a row at all.
 # shortcut: the agents run as the same OS user, so an agent bent on it can still find and
 # read the key or import oke.py and call ledger_add (deny rules and the mod refuse the
-# obvious ways); dropping the newest rows also goes unseen. OS users would close both.
+# obvious ways); putting back an older head with the rows cut to it also goes unseen.
+# OS users would close both.
 LEDGER_KEY = "ledger.key"
 
 
@@ -2562,28 +2563,64 @@ def sign_ledgers(key):
         with io.open(ledger + ".tmp", "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
         replace_file(ledger + ".tmp", ledger)
+        write_head(key, job, ledger, text.count(u"\n"), prev)
 
 
 def row_sig(key, job, prev, line):
     return hmac.new(key, (u"%s\n%s\n%s" % (job, prev, line)).encode("utf-8"), hashlib.sha256).hexdigest()[:32]
 
 
+def head_path(ledger):
+    return os.path.join(os.path.dirname(ledger), "ledger.head")
+
+
+def head_sig(key, job, n, last):
+    return row_sig(key, job, "head", "%d\t%s" % (n, last))
+
+
+def write_head(key, job, ledger, n, last):
+    """The number of rows and the last signature, signed: rows cut from the end show."""
+    path = head_path(ledger)
+    with io.open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
+        f.write(u"%d\t%s\t%s\n" % (n, last, head_sig(key, job, n, last)))
+    replace_file(path + ".tmp", path)
+
+
 def ledger_chain(job, path=None):
-    """(trusted rows, number of lines that were not), and the last trusted row's signature."""
+    """(trusted rows, number of lines that were not), and the last trusted row's signature.
+    Raises StateError when rows were cut from the end (the signed head counts more)."""
     key = ledger_key()  # first: making it re-signs the ledgers written before signing
+    ledger = path or ledger_path(job)
     try:
-        with io.open(path or ledger_path(job), encoding="utf-8") as f:
+        with io.open(ledger, encoding="utf-8") as f:
             lines = f.read().splitlines()
     except (IOError, OSError, UnicodeDecodeError):
-        return [], 0, ""
-    prev, rows, bad = "", [], 0
-    for l in lines:
+        lines = None
+    prev, rows, sigs, bad = "", [], [], 0
+    for l in lines or []:
         line, _, sig = l.rpartition("\t")
         if line.count("\t") == 5 and hmac.compare_digest(sig.encode("utf-8"), row_sig(key, job, prev, line).encode("ascii")):
             rows.append(dict(zip(LEDGER_FIELDS, line.split("\t"))))
+            sigs.append(sig)
             prev = sig
         elif l.strip():
             bad += 1
+    try:
+        with io.open(head_path(ledger), encoding="utf-8") as f:
+            n, last, mac = f.read().strip().split("\t")
+        n = int(n)
+        head = hmac.compare_digest(mac.encode("utf-8"), head_sig(key, job, n, last).encode("ascii"))
+    except (IOError, OSError, UnicodeDecodeError, ValueError):
+        head = n = last = None
+    # a crash between a row and its head leaves one row more than the head: fine. Fewer, a
+    # head that is not OKe's, or a lost head over more than the one row it lags: rows were cut
+    lost = (head is False or (head and (len(sigs) < n or (n and sigs[n - 1] != last)))
+            or (head is None and len(sigs) > 1))
+    if lost:
+        raise StateError("the ledger of job %s lost rows or its head (%s): ask the user"
+                         % (job, head_path(ledger)))
+    if lines is None:
+        return [], 0, ""
     return rows, bad, prev
 
 
@@ -2594,7 +2631,7 @@ def ledger_add(job, by, commit, check, result, detail=""):
     path = ledger_path(job)
     with locked("ledger-" + job, timeout=150):  # the chain needs the last row; the key lock waits 120 s
         key = ledger_key()  # before the file is open: making the key re-signs older ledgers
-        _, _, prev = ledger_chain(job)
+        rows, _, prev = ledger_chain(job)
         sig = row_sig(key, job, prev, line)
         try:
             with io.open(path, "rb") as f:
@@ -2604,6 +2641,7 @@ def ledger_add(job, by, commit, check, result, detail=""):
             torn = False
         with io.open(path, "a", encoding="utf-8", newline="\n") as f:
             f.write((u"\n" if torn else u"") + line + u"\t" + sig + u"\n")
+        write_head(key, job, path, len(rows) + 1, sig)
 
 
 def ledger_rows(job, path=None):
