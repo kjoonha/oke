@@ -2585,7 +2585,8 @@ COUNTS = [
 ]
 # shortcut: pytest --tb=line with -rN prints no per-test line, so two failures with the same message in
 # one file share a signature; the default short summary (FAILED file::test) keeps them apart.
-PROGRESS = re.compile(r"^(?:.+\.py\s+)?[.sxXFE]+\s*(?:\[\s*\d+%\])?$")  # failures are also listed by name
+# the file part has no ":" or " - ", so a failure line (`FAILED a.py::t - ... x.py .`) never matches
+PROGRESS = re.compile(r"^(?:(?:(?! - )[^:])+\.py\s+)?[.sxXFE]+\s*(?:\[\s*\d+%\])?$")  # failures are also listed by name
 CODE_FRAME = re.compile(r"^>?\s*\d+\s*\|")  # jest/babel source excerpts: line numbers move
 # lines a passing test prints, which an added test adds: cargo/unittest -v, mocha, jest, go test
 PASSING = re.compile(u"\\.\\.\\. (?:ok$|skipped\\b)|^✔|^PASS\\s|^ok\\s+\\S+\\s+(?:<v>|\\(cached\\))"
@@ -2625,7 +2626,7 @@ def signature_lines(output, cwd=None):
         line = " ".join(line.split())
         failing = FAILURE_WORD.search(line)
         if not line or len(line) > 500 or any(p.search(line) for p in NOISE) \
-                or ((PROGRESS.match(line) or CODE_FRAME.match(line)) and not failing) \
+                or PROGRESS.match(line) or (CODE_FRAME.match(line) and not failing) \
                 or (PASSING.search(line) and not FAIL_STATUS.search(line)):
             continue
         if not FAILURE_WORD.search(line) and any(p.search(line) for p in NOISE_UNLESS_FAILURE):

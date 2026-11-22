@@ -90,6 +90,9 @@ class TestSignatures(unittest.TestCase):
                      "test_error (tests.test_a.TestA) ... ok", "test_raises_ValueError (t.T) ... skipped 'no net'",
                      u"✔ reports failure to caller (3ms)"):
             self.assertEqual(oke.signature_lines("FAIL old\n" + line), ["FAIL old"], line)
+        self.assertEqual(oke.signature_lines("FAIL old\ntests/test_errors.py ....F [ 50%]"),
+                         oke.signature_lines("FAIL old\ntests/test_errors.py .....F [ 50%]"))
+        self.assertEqual(oke.signature_lines("tests/test_exceptions.py ... [100%]"), [])
         line = "FAILED tests/test_io.py::test_read - OSError: cannot open data.py ."
         self.assertEqual(oke.signature_lines(line), [line])
 
