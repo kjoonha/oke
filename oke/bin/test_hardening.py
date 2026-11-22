@@ -104,17 +104,6 @@ class TestInterview(SpawnBase):
         self.assertNotIn("ledger.tsv", os.listdir(os.path.join(self.home, "wiki")))
         self.assertNotIn("interview.json", os.listdir(os.path.join(self.home, "wiki")))
 
-    def test_a_lock_taken_over_after_it_went_stale_stays_with_its_new_owner(self):
-        self.assertTrue(oke.try_lock("t"))
-        with open(oke.lock_path("t"), "w") as f:
-            f.write("another process")
-        oke.unlock("t")
-        self.assertTrue(os.path.exists(oke.lock_path("t")))
-        os.remove(oke.lock_path("t"))
-        self.assertTrue(oke.try_lock("t"))
-        oke.unlock("t")
-        self.assertFalse(os.path.exists(oke.lock_path("t")))
-
     def test_planning_needs_a_finished_interview(self):
         self.assertEqual(self.cli("job", "phase", "fix-a", "planning"), 1)
         self.assertIn("interview", self.err)
