@@ -896,6 +896,15 @@ for (const [name, s] of [
   ['pixel-heart', HEART], ['coffee', COFFEE], ['onigiri', ONIGIRI], ['axolotl', AXOLOTL], ['bee', BEE],
   ['snail', SNAIL], ['chick', CHICK], ['sakura', SAKURA],
 ] as [string, Sprite][]) cast(name, s)
+// claude: a square critter with two eyes, arm nubs and four legs; throws its arms up, crouches to sleep
+const CLAUDE = ['', '.cccccccc', '.ckcccckc', 'cccccccccc', '.cccccccc', '.cssssssc', '.c.c..c.c', '.c.c..c.c']
+const CLAUDE_UP = ['c........c', 'ccccccccc', '.ckcccckc', '.cccccccc', '.cccccccc', '.cssssssc', '.c.c..c.c', '.c.c..c.c']
+cast('claude', {
+  a: CLAUDE,
+  conduct: [CLAUDE, CLAUDE_UP, CLAUDE, ['', '.cccccccc', '.ckcccckc', 'cccccccccc', '.cccccccc', '.cssssssc', '..c.cc.c', '..c.cc.c']],
+  sleep: ['', '', '', '.cccccccc', '.cccccccc', 'cccccccccc', '.cssssssc', '.c.c..c.c'],
+  wave: [['.........c', '.cccccccc.', '.ckcccckc', 'ccccccccc', '.cccccccc', '.cssssssc', '.c.c..c.c', '.c.c..c.c'], CLAUDE],
+}, [0xd97757, 0x6a9bcc, 0x788c5d, 0xe3dacc])
 // palette variants of the sprites above
 cast('pastel', BUNNY, [0xffc8dd, 0xbde0fe, 0xcaffbf, 0xfdffb6])
 cast('candy', HEART, [0xff8fc8, 0xff5c8a, 0xffc2e2, 0xc86bff])
