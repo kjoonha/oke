@@ -97,7 +97,9 @@ def run_orca(args):
         return data.get("result") or {}
     error = data.get("error") if isinstance(data, dict) else None
     error = error if isinstance(error, dict) else {}
-    code = error.get("code") or "orca_failed"
+    # no JSON at all: the CLI never reached Orca (the Linux shim's "Orca CLI is unavailable"
+    # after an AppImage remount, seen live on the company HPC). An outage, never "gone".
+    code = error.get("code") or ("orca_failed" if data else "herdr_unavailable")
     message = error.get("message") or (err.decode("utf-8", "replace").strip() or text or "exit %d" % p.returncode)
     if code == "runtime_unavailable":
         code = "herdr_unavailable"  # Orca is down or restarting: the domain waits, it does not revive

@@ -460,6 +460,16 @@ class TestOrcaRuntime(OrcaBase):
             self.rt.agents()
         self.assertEqual(c.exception.code, "herdr_unavailable")
 
+    def test_a_cli_that_answers_no_json_is_unavailable_not_dead(self):
+        # the Linux CLI shim's refusal, and a launcher failing with empty stderr
+        for broken in ({"stderr": "Orca CLI is unavailable; reopen Orca or register the CLI again.\n", "exit": 1},
+                       {"exit": 1}):
+            self.register()
+            self.fake({"orchestration worker-show": [broken]})
+            with self.assertRaises(oke.HerdrError) as c:
+                self.rt.agents()
+            self.assertEqual(c.exception.code, "herdr_unavailable")
+
     def test_prompt_is_orca_mail_to_the_dispatch(self):
         self.register()
         self.fake({"orchestration send": [OK({"id": "msg_1"})],
@@ -664,7 +674,8 @@ class TestOrcaRuntime(OrcaBase):
 
     def test_close_stops_and_forgets(self):
         self.register()
-        self.fake({"orchestration worker-stop": [ERR("already_settled")]})
+        self.fake({"orchestration worker-show": [ERR("dispatch_not_found")],
+                   "orchestration worker-stop": [ERR("already_settled")]})
         self.rt.close("termw_1")
         self.assertEqual(runtime_orca.load_registry(), {})
         self.rt.close(self.repo)  # a folder: nothing started there
