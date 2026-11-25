@@ -3871,6 +3871,33 @@ def queue_mail(agent, sender, text):
     with io.open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
         f.write(u"%s: %s\n" % (sender, text))
     os.replace(path + ".tmp", path)
+    set_mail_flag(agent, True)
+
+
+# The agent's mod looks only for this file (no python every tick): it exists while the
+# inbox may hold mail. A stale one costs one `take-mail` call, which removes it.
+MAIL_FLAG = ".new"
+
+
+def lower_mail_flag(agent):
+    """Off when the inbox is empty. Off first, then look: a send in between (it writes
+    its message before the flag) raises it again, or this look sees its message."""
+    if inbox_messages(agent):
+        return
+    set_mail_flag(agent, False)
+    if inbox_messages(agent):
+        set_mail_flag(agent, True)
+
+
+def set_mail_flag(agent, on):
+    flag = os.path.join(inbox_dir(agent), MAIL_FLAG)
+    try:
+        if on:
+            io.open(flag, "a").close()
+        elif os.path.exists(flag):
+            os.remove(flag)
+    except (IOError, OSError):
+        pass  # on: the waits still deliver; off: one more take-mail look
 
 
 def cmd_send(args):
@@ -4112,12 +4139,59 @@ def mark_read(agent, msgs):
                 replace_file(path, os.path.join(done, os.path.basename(path)))
         except OSError:
             pass  # moved already (a job cancel drops its mail): the delivery still happened
+    lower_mail_flag(agent)
     for old in os.listdir(done):
         try:
             if os.path.getmtime(os.path.join(done, old)) < time.time() - 7 * 86400:
                 os.remove(os.path.join(done, old))
         except OSError:
             pass
+
+
+def cmd_take_mail(args):
+    """The agent's own mod takes its inbox after a turn ended, while the runtime may
+    still call the agent working (a background subagent or task runs). Prints
+    {"text": ..., "names": [...]} or {"text": null}. --give-back puts taken mail back
+    when the mod could not submit it."""
+    state = load_state()
+    found = find_target(state, args.agent)
+    rec = found[3] if found else {}
+    if not found or found[0] == "orchestrator" or not args.pane or \
+            args.pane not in (rec.get("pane"), "session:%s" % rec.get("session")):
+        print(json.dumps({"text": None, "why": "not this pane's agent"}))
+        return 0
+    if args.give_back:
+        done = os.path.join(inbox_dir(args.agent), "read")
+        for name in args.give_back:
+            if os.path.basename(name) != name or not name.endswith(".txt"):
+                continue
+            try:
+                replace_file(os.path.join(done, name), os.path.join(inbox_dir(args.agent), name))
+            except OSError:
+                pass
+        set_mail_flag(args.agent, True)
+        print(json.dumps({"text": None, "given_back": len(args.give_back)}))
+        return 0
+    if retry_pending(os.path.join(agent_folder(*found), "api-retry.json")):
+        print(json.dumps({"text": None, "why": "api retry pending"}))
+        return 0
+    lock = "deliver-" + args.agent
+    if not try_lock(lock):
+        print(json.dumps({"text": None, "why": "another delivery runs"}))
+        return 0
+    try:
+        msgs = inbox_messages(args.agent)
+        if not msgs:
+            lower_mail_flag(args.agent)
+            print(json.dumps({"text": None}))
+            return 0
+        msgs = fit_mail(msgs) or msgs[:1]  # the rest on the next look
+        mark_read(args.agent, msgs)  # clears the flag when nothing is left
+        print(json.dumps({"text": "OKe inbox: " + " | ".join(t for _, t in msgs),
+                          "names": [os.path.basename(p) for p, _ in msgs]}, ensure_ascii=False))
+        return 0
+    finally:
+        unlock(lock)
 
 
 # ---------------------------------------------------------------- pending
@@ -4310,6 +4384,12 @@ def build_parser():
     tick.add_argument("--board", action="store_true")
     tick.add_argument("--events-from", type=int)
     tick.set_defaults(func=cmd_tick)
+
+    take = sub.add_parser("take-mail", help="the agent's mod takes its inbox after a turn (mod)")
+    take.add_argument("--agent", required=True)
+    take.add_argument("--pane", required=True)
+    take.add_argument("--give-back", nargs="+", metavar="NAME")
+    take.set_defaults(func=cmd_take_mail)
 
     boundary = sub.add_parser("boundary", help="the assignments this agent has answered (mod)")
     boundary.add_argument("--pane", required=True)

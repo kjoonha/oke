@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 
@@ -43,8 +44,27 @@ def status_of(row):
 BG_SETTINGS = {"worktree": {"bgIsolation": "none"}, "crossSessionInbound": "accept"}
 
 
+def find_claude(name="claude"):
+    """The program to start for `name`: a full path, or `name` when not found. An npm
+    install on Windows is only claude.cmd, which Popen finds by full path only and runs
+    through cmd.exe (which re-parses & % ^ | in arguments and survives a kill): start the
+    claude.exe the shim names instead."""
+    found = shutil.which(name)
+    if not found or not found.lower().endswith(".cmd"):
+        return found or name
+    try:
+        with io.open(found, encoding="utf-8", errors="replace") as f:
+            m = re.search(r'"%dp0%\\([^"]+\.exe)"', f.read(), re.I)
+    except (IOError, OSError):
+        m = None
+    exe = os.path.join(os.path.dirname(found), m.group(1)) if m else None
+    return exe if exe and os.path.isfile(exe) else found
+
+
 def claude_argv():
-    value = os.environ.get("OKE_CLAUDE", "claude")
+    value = os.environ.get("OKE_CLAUDE")
+    if value is None:
+        return [find_claude()]
     if value.lstrip().startswith("["):
         return json.loads(value)
     return value.split()

@@ -124,6 +124,93 @@ class TestSend(InboxBase):
         self.assertEqual(self.texts("pm-toy"), ["fix-a-w1: URGENT fix-a: the plan misses a file"])
 
 
+class TestTakeMail(InboxBase):
+    """The agent's own mod takes its inbox after a turn (a background subagent may run)."""
+
+    def flag(self, agent):
+        return os.path.exists(os.path.join(oke.inbox_dir(agent), oke.MAIL_FLAG))
+
+    def take(self, agent, pane, *extra):
+        self.assertEqual(self.cli("take-mail", "--agent", agent, "--pane", pane, *extra), 0)
+        return json.loads(self.out.strip().splitlines()[-1])
+
+    def test_a_send_raises_the_flag_and_a_take_empties_the_inbox(self):
+        self.fake({})
+        self.cli("send", "pm-toy", "one")
+        self.cli("send", "pm-toy", "two")
+        self.assertTrue(self.flag("pm-toy"))
+        out = self.take("pm-toy", "w1:p3")
+        self.assertEqual(out["text"], "OKe inbox: user: one | user: two")
+        self.assertEqual(len(out["names"]), 2)
+        self.assertEqual(self.texts("pm-toy"), [])
+        self.assertFalse(self.flag("pm-toy"))
+        self.assertIsNone(self.take("pm-toy", "w1:p3")["text"])
+
+    def test_only_the_agents_own_pane_or_session_takes(self):
+        self.fake({})
+        self.cli("send", "pm-toy", "one")
+        self.assertIsNone(self.take("pm-toy", "w1:p5")["text"])  # the worker's pane
+        self.assertIsNone(self.take("nobody", "w1:p3")["text"])
+        self.assertEqual(self.texts("pm-toy"), ["user: one"])
+        self.assertEqual(self.take("pm-toy", "session:s-pm")["text"], "OKe inbox: user: one")
+
+    def test_mail_the_mod_could_not_submit_goes_back(self):
+        self.fake({})
+        self.cli("send", "fix-a-w1", "one")
+        names = self.take("fix-a-w1", "w1:p5")["names"]
+        self.take("fix-a-w1", "w1:p5", "--give-back", *names)
+        self.assertEqual(self.texts("fix-a-w1"), ["user: one"])
+        self.assertTrue(self.flag("fix-a-w1"))
+        outside = os.path.join(oke.inbox_dir("fix-a-w1"), "x.txt")
+        io.open(os.path.join(oke.oke_home(), "x.txt"), "w").close()
+        self.take("fix-a-w1", "w1:p5", "--give-back", "../../x.txt", "..\\..\\x.txt")  # names only
+        self.assertFalse(os.path.exists(outside))
+        self.assertTrue(os.path.exists(os.path.join(oke.oke_home(), "x.txt")))
+
+    def test_a_delivery_running_elsewhere_keeps_the_mail(self):
+        self.fake({})
+        self.cli("send", "pm-toy", "one")
+        self.assertTrue(oke.try_lock("deliver-pm-toy"))
+        try:
+            self.assertIsNone(self.take("pm-toy", "w1:p3")["text"])
+        finally:
+            oke.unlock("deliver-pm-toy")
+        self.assertEqual(self.texts("pm-toy"), ["user: one"])
+
+    def test_a_wait_delivery_lowers_the_flag_too(self):
+        self.fake({})
+        self.cli("send", "fix-a-w1", "one")
+        self.fake({"agent prompt": [J({"type": "agent_prompted"})]})
+        self.assertTrue(oke.deliver("fix-a-w1"))
+        self.assertFalse(self.flag("fix-a-w1"))
+
+    def test_mail_that_lands_while_the_flag_goes_down_raises_it_again(self):
+        self.fake({})
+        os.makedirs(oke.inbox_dir("pm-toy"), exist_ok=True)
+        oke.set_mail_flag("pm-toy", True)
+        real = oke.set_mail_flag
+
+        def send_in_between(agent, on):
+            real(agent, on)
+            if not on:
+                oke.set_mail_flag = real
+                oke.queue_mail("pm-toy", "user", "late")  # writes its message, then the flag
+        oke.set_mail_flag = send_in_between
+        try:
+            oke.lower_mail_flag("pm-toy")
+        finally:
+            oke.set_mail_flag = real
+        self.assertTrue(self.flag("pm-toy"))
+        self.assertEqual(self.texts("pm-toy"), ["user: late"])
+
+    def test_a_stale_flag_goes_away_on_the_next_take(self):
+        self.fake({})
+        os.makedirs(oke.inbox_dir("pm-toy"), exist_ok=True)
+        oke.set_mail_flag("pm-toy", True)
+        self.assertIsNone(self.take("pm-toy", "w1:p3")["text"])
+        self.assertFalse(self.flag("pm-toy"))
+
+
 class TestDeliver(InboxBase):
     def test_delivery_prompts_once_and_moves_the_messages(self):
         self.fake({})

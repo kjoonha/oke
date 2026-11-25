@@ -14,6 +14,8 @@
   질문과 승인은 orchestrator 창의 팝업으로 올라온다.
 </p>
 
+agent 에게 가는 메시지는 그 agent 의 inbox (`$OKE_HOME/inbox/<agent>/`) 에서 기다리다가 그 agent 의 턴이 끝나는 즉시 입력된다. 백그라운드 subagent 나 작업이 아직 돌아도 그렇다. 그래서 한 job 의 리뷰를 돌리는 PM 도 다음 job 을 바로 받는다.
+
 ## 필요한 것
 
 - Claude Code 2.1.322 이상 (mod 를 지원하는 버전)

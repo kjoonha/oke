@@ -99,6 +99,25 @@ class TestBgRuntime(BgBase):
             self.rt.keys("pm-toy", ["enter"])
         self.assertIn("claude attach a2", str(c.exception))
 
+    def test_an_npm_shim_starts_the_exe_it_names(self):
+        bin_dir = os.path.join(self.tmp, "npm")
+        exe = os.path.join(bin_dir, "node_modules", "@anthropic-ai", "claude-code", "bin", "claude.exe")
+        os.makedirs(os.path.dirname(exe))
+        io.open(exe, "w").close()
+        shim = os.path.join(bin_dir, "claude.cmd")
+        with io.open(shim, "w") as f:
+            f.write('@ECHO off\r\nCALL :find_dp0\r\n"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n')
+        old = runtime_bg.shutil.which
+        runtime_bg.shutil.which = lambda name: shim
+        try:
+            self.assertEqual(runtime_bg.find_claude(), exe)
+            os.remove(exe)
+            self.assertEqual(runtime_bg.find_claude(), shim)  # the shim names nothing there: run it
+            runtime_bg.shutil.which = lambda name: None
+            self.assertEqual(runtime_bg.find_claude(), "claude")
+        finally:
+            runtime_bg.shutil.which = old
+
     def test_child_env_drops_nesting_variables(self):
         os.environ.update({"CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "x", "AI_AGENT": "d",
                            "CLAUDE_CONFIG_DIR": "/c", "PATH_KEEP_ME": "y"})

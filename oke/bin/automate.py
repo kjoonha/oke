@@ -281,8 +281,8 @@ def load(folder):
 def claude_command():
     """The claude to start, resolved now: the scheduler's PATH is not the user's."""
     argv = runtime_bg.claude_argv()
-    found = shutil.which(argv[0])
-    if not found:
+    found = runtime_bg.find_claude(argv[0])
+    if not os.path.isabs(found):
         raise AutomateError("cannot find %s on PATH" % argv[0])
     return [found] + argv[1:]
 

@@ -1,7 +1,8 @@
 // OKe mod: a thin shell around bin/oke.py. It ticks the watcher every 10 s
 // (orchestrator and PM only), resubmits a turn that ended on an API error after
-// the delay oke.py decides, and draws the /oke-board pane. All decisions live in
-// oke.py, where they are tested against a fake herdr.
+// the delay oke.py decides, types the agent's own inbox in once its turn ended,
+// and draws the /oke-board pane. All decisions live in oke.py, where they are
+// tested against a fake herdr.
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
@@ -39,6 +40,11 @@ let lastError = ''
 let pending: { cancel: () => void } | null = null
 let job: string | null = null
 let seq: number | null = null
+let agentName: string | null = null
+// false once the main loop's turn ended, true from the next prompt; null after a reload
+// (unknown: the waits deliver as before until the next turn ends)
+let inTurn: boolean | null = null
+let taking = false
 
 /** Run `oke.py <args>` and parse its JSON line; null when it failed. */
 async function oke($: any, args: string[]): Promise<any> {
@@ -95,6 +101,7 @@ async function tick($: any) {
     theme = out.theme ?? theme
     job = out.job ?? null
     seq = out.seq ?? null
+    agentName = out.agent ?? null
     eventsOffset = out.events_offset
     if (role === 'orchestrator') {
       for (const line of out.events as string[]) $.ui.toast(`OKe: ${line.replace(/^\S+ /, '')}`, { timeoutMs: 8000 })
@@ -114,6 +121,43 @@ async function tick($: any) {
     }
   } finally {
     ticking = false
+  }
+  await takeMail($)
+}
+
+/** Type the agent's queued mail in once its turn ended. The runtime may still call the
+ * agent working (a background subagent or task runs): the waits then cannot deliver,
+ * and a new job would sit until that work is done. */
+async function takeMail($: any) {
+  if (taking || inTurn !== false || pending || !pane || !home || !agentName) return
+  if (role !== 'pm' && role !== 'worker' && role !== 'reviewer') return
+  taking = true
+  try {
+    const flag = `${home}/inbox/${agentName}/.new`.replace(/\\/g, '/')
+    if (!(await $.fs.exists(flag))) return
+    if ((await $.prompt.read()).text.trim()) return  // the person is typing here
+    const out = await oke($, ['take-mail', '--agent', agentName, '--pane', pane])
+    if (!out?.text) return
+    const back = () => oke($, ['take-mail', '--agent', agentName as string, '--pane', pane as string,
+      '--give-back', ...(out.names as string[])])
+    if (inTurn !== false) {
+      await back()  // a turn started while we looked: the next end takes it
+      return
+    }
+    inTurn = true
+    let dropped = true
+    try {
+      // a refused prompt resolves with { drop }: the mail goes back, as when it throws
+      dropped = (await $.prompt.submit({ text: out.text }))?.drop !== undefined
+    } catch {
+      // dropped stays true
+    }
+    if (dropped) {
+      inTurn = false
+      await back()
+    }
+  } finally {
+    taking = false
   }
 }
 
@@ -148,22 +192,33 @@ const COMPACT_NOTE ='OKe task boundary: the report for this assignment is writte
 
 /** At a task boundary (a report for an assignment's current seq, new since the last
  * look) a PM, worker or reviewer compacts, unless the person turned auto-compact off. */
-async function compactAtBoundary($: any) {
-  if (role !== 'pm' && role !== 'worker' && role !== 'reviewer') return
+async function compactAtBoundary($: any): Promise<boolean> {
+  if (role !== 'pm' && role !== 'worker' && role !== 'reviewer') return false
   const out = await oke($, ['boundary', '--pane', pane as string])
-  if (!out) return
+  if (!out) return false
   const seen = await read($, answeredSeen)
   const fresh = (out.answered as string[]).some(a => !seen.includes(a))
   await update($, answeredSeen, () => out.answered)
-  if (!fresh) return
+  if (!fresh) return false
   try {
     const u = await $.session.usage({ breakdown: 'summary' })
-    if (u.context?.breakdown?.isAutoCompactEnabled === false) return
+    if (u.context?.breakdown?.isAutoCompactEnabled === false) return false
   } catch {
-    return
+    return false
   }
-  // after this turn has settled, not inside its hook
-  $.clock.after(0, () => void $.session.compact({ instructions: COMPACT_NOTE }))
+  // after this turn has settled, not inside its hook. No mail while it compacts.
+  inTurn = null
+  $.clock.after(0, async () => {
+    try {
+      await $.session.compact({ instructions: COMPACT_NOTE })
+    } finally {
+      if (inTurn === null) {
+        inTurn = false
+        await takeMail($)
+      }
+    }
+  })
+  return true
 }
 
 const USAGE_HEAD = 'time,model,input,output,cache_read,cache_write'
@@ -1009,10 +1064,10 @@ export const register: Register = on => {
     let skipped = 0
     let early = UNKNOWN_EVERY
     $.clock.every(TICK_MS, () => {
-      if (role === 'worker' || role === 'reviewer') return
+      if (role === 'worker' || role === 'reviewer') return takeMail($)  // a file check, no python
       if (role === null && --early < 0 && ++skipped < UNKNOWN_EVERY) return
       skipped = 0
-      void tick($)
+      return tick($)
     })
     // The conductor moves while there is something to show; rest breathes at half speed.
     $.clock.every(400, () => {
@@ -1153,6 +1208,7 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    inTurn = true
     // The person typed during a backoff: their turn replaces the retry.
     pending?.cancel()
     pending = null
@@ -1174,7 +1230,10 @@ export const register: Register = on => {
     // a subagent's turn ends with its own turn.complete: retry and compaction are the main loop's
     if (e.agentId !== undefined) return next(e)
     const r = await next(e)
-    if (!pane) return r
+    if (!pane) {
+      inTurn = false
+      return r
+    }
     if (folder) {
       // the job's cost on the PM's and the orchestrator's status line
       const self = await selfUsage($)
@@ -1188,7 +1247,14 @@ export const register: Register = on => {
     }
     if (e.reason !== 'error') {
       if (attempt > 0 || e.reason === 'aborted') await clearRetry($)
-      if (e.reason !== 'aborted') await compactAtBoundary($)
+      // a compaction about to run goes first; it takes the mail when it is done
+      const compacting = e.reason !== 'aborted' && await compactAtBoundary($)
+      if (e.reason === 'aborted') {
+        inTurn = null  // the person stepped in (Esc) and may type next: only the waits deliver
+      } else if (!compacting) {
+        inTurn = false
+        $.clock.after(0, () => takeMail($))  // after this turn has settled, not inside its hook
+      }
       return r
     }
     attempt += 1
@@ -1206,6 +1272,7 @@ export const register: Register = on => {
     } else {
       attempt = 0  // not an OKe session
     }
+    inTurn = false  // a retry armed above holds the mail (pending)
     return r
   })
 

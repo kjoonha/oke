@@ -21,10 +21,19 @@ let answeredNow: string[] = []
 let autoCompact = true
 let okeState = true
 let draft = ''
+let mailFlag = false
+let dropMail = false
+let mailText: string | null = null
 
 function answer(args: readonly string[]) {
   if (args[0] === 'tick') {
-    return { role: tickRole, folder: '/oke/jobs/j/w1', home: 'C:/oke', wiki: 'C:/oke/wiki', claude_dir: 'C:/Users/u/.claude', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : tickBoard }
+    return { role: tickRole, agent: tickRole === 'pm' ? 'pm-toy' : 'calc-sub-w1', folder: '/oke/jobs/j/w1', home: 'C:/oke', wiki: 'C:/oke/wiki', claude_dir: 'C:/Users/u/.claude', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : tickBoard }
+  }
+  if (args[0] === 'take-mail') {
+    if (args.includes('--give-back')) return { text: null, given_back: 1 }
+    const text = mailText
+    mailText = null
+    return text ? { text, names: ['1.txt'] } : { text: null }
   }
   if (args[0] === 'boundary') return { role: tickRole, answered: answeredNow }
   if (args[0] === 'api-retry' && args.includes('--clear')) return { action: 'cleared' }
@@ -44,12 +53,15 @@ function engine(on: any, runs: Run[], prompts: string[]) {
   on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('prompt.submit', (_: any, e: any) => {
+    if (dropMail && String(e.text).startsWith('OKe inbox')) return { drop: 'a Stop stands' }
     prompts.push(e.text)
     return { text: e.text }
   })
   on('turn.complete', () => ({ text: '' }))
   on('classic.StopFailure', () => ({}))
-  on('fs.exists', (_: any, e: any) => ({ value: okeState && String(e.path).endsWith('state.json') }))
+  on('fs.exists', (_: any, e: any) => ({
+    value: /[\\/]\.new$/.test(String(e.path)) ? mailFlag : okeState && String(e.path).endsWith('state.json'),
+  }))
   on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }))
 }
 
@@ -713,4 +725,126 @@ test('no agent tool call may name the ledger key', async () => {
   expect(keyDenied({ pattern: '.', path: '/home/u/.oke/ledger.key' })).toContain('oke.py only')
   expect(keyDenied({ file_path: 'oke.py', old_string: 'LEDGER_KEY = "ledger.key"' })).toBeNull()
   expect(keyDenied({ command: 'python oke.py ledger show fix-a' })).toBeNull()
+})
+
+
+async function mailSession($: any, on: any, as: string, setup?: () => void) {
+  const clock = mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  tickRole = as
+  const runs: Run[] = []
+  const prompts: string[] = []
+  engine(on, runs, prompts)
+  setup?.()
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  return { clock, runs, prompts, takes: () => runs.filter(r => r.argv.includes('take-mail')) }
+}
+
+test('a PM takes its mail as soon as its turn ends, though a background subagent still runs', async ($, on) => {
+  const s = await mailSession($, on, 'pm')
+  await $.prompt.submit({ text: 'Use the oke:pm skill.' } as any)
+  mailFlag = true
+  mailText = 'OKe inbox: orchestrator: Job b: assignment updated (seq 1).'
+  await s.clock.advance(10_000)
+  expect(s.takes().length).toBe(0)  // its turn still runs
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await s.clock.advance(1)
+  expect(s.prompts).toContain('OKe inbox: orchestrator: Job b: assignment updated (seq 1).')
+  const take = s.takes()[0]!
+  expect(take.argv.slice(-4)).toEqual(['--agent', 'pm-toy', '--pane', 'w1:p5'])
+  mailFlag = false
+  tickRole = 'worker'
+})
+
+test('without the new-mail file the mod runs no python for mail', async ($, on) => {
+  const s = await mailSession($, on, 'worker')
+  await $.prompt.submit({ text: 'go' } as any)
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await s.clock.advance(30_000)
+  expect(s.takes().length).toBe(0)
+})
+
+test('a worker checks for mail every tick once idle, and not while the person types', async ($, on) => {
+  const s = await mailSession($, on, 'worker')
+  await $.prompt.submit({ text: 'go' } as any)
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  mailFlag = true
+  draft = 'half a sentence'
+  await s.clock.advance(10_000)
+  expect(s.takes().length).toBe(0)
+  draft = ''
+  mailText = 'OKe inbox: pm-toy: new instruction (seq 3).'
+  await s.clock.advance(10_000)
+  expect(s.prompts).toContain('OKe inbox: pm-toy: new instruction (seq 3).')
+  mailFlag = false
+})
+
+test('the orchestrator has no inbox to take', async ($, on) => {
+  const s = await mailSession($, on, 'orchestrator')
+  mailFlag = true
+  await $.prompt.submit({ text: 'hi' } as any)
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await s.clock.advance(10_000)
+  expect(s.takes().length).toBe(0)
+  mailFlag = false
+  tickRole = 'worker'
+})
+
+test('a refused mail prompt gives the mail back and the next end of turn tries again', async ($, on) => {
+  const s = await mailSession($, on, 'worker')
+  await $.prompt.submit({ text: 'go' } as any)
+  mailFlag = true
+  mailText = 'OKe inbox: pm-toy: one'
+  dropMail = true
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await s.clock.advance(1)
+  const back = s.runs.find(r => r.argv.includes('--give-back'))
+  expect(back?.argv.slice(-2)).toEqual(['--give-back', '1.txt'])
+  dropMail = false
+  mailText = 'OKe inbox: pm-toy: one'
+  await s.clock.advance(10_000)  // not stuck: the next look takes it
+  expect(s.prompts).toContain('OKe inbox: pm-toy: one')
+  mailFlag = false
+})
+
+test('no mail while an API-error retry waits or after the person pressed Esc', async ($, on) => {
+  const s = await mailSession($, on, 'worker')
+  mailFlag = true
+  mailText = 'OKe inbox: pm-toy: later'
+  await $.prompt.submit({ text: 'go' } as any)
+  await $.classic.StopFailure({ error: 'overloaded' } as any)
+  await $.turn.complete({ ...TURN, reason: 'error' } as any)
+  await s.clock.advance(10_000)
+  expect(s.takes().length).toBe(0)
+  await $.prompt.submit({ text: 'person: stop that' } as any)  // cancels the retry
+  await $.turn.complete({ ...TURN, reason: 'aborted' } as any)
+  await s.clock.advance(20_000)
+  expect(s.takes().length).toBe(0)
+  await $.prompt.submit({ text: 'person: go on' } as any)
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await s.clock.advance(1)
+  expect(s.prompts).toContain('OKe inbox: pm-toy: later')
+  mailFlag = false
+})
+
+test('a compaction at a task boundary runs first, then the mail goes in', async ($, on) => {
+  let compacted = 0
+  const s = await mailSession($, on, 'worker', () => {
+    on('fs.write', () => ({ value: undefined }))
+    on('session.compact', () => {
+      compacted += 1
+      return { skip: 'test' }
+    })
+  })
+  await $.prompt.submit({ text: 'go' } as any)
+  mailFlag = true
+  mailText = 'OKe inbox: pm-toy: after compact'
+  answeredNow = ['calc-sub:2']
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  expect(s.takes().length).toBe(0)
+  await s.clock.advance(1)
+  expect(compacted).toBe(1)
+  expect(s.prompts).toContain('OKe inbox: pm-toy: after compact')
+  answeredNow = []
+  mailFlag = false
 })
