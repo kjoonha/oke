@@ -45,6 +45,7 @@ let agentName: string | null = null
 // (unknown: the waits deliver as before until the next turn ends)
 let inTurn: boolean | null = null
 let taking = false
+let naming = false  // a tick run by takeMail to learn agentName
 
 /** Run `oke.py <args>` and parse its JSON line; null when it failed. */
 async function oke($: any, args: string[]): Promise<any> {
@@ -129,8 +130,18 @@ async function tick($: any) {
  * agent working (a background subagent or task runs): the waits then cannot deliver,
  * and a new job would sit until that work is done. */
 async function takeMail($: any) {
-  if (taking || inTurn !== false || pending || !pane || !home || !agentName) return
+  if (taking || naming || inTurn !== false || pending || !pane) return
   if (role !== 'pm' && role !== 'worker' && role !== 'reviewer') return
+  if (!agentName) {
+    // a child's first turn can run before spawn records it: its ticks then knew no name
+    naming = true
+    try {
+      await tick($)
+    } finally {
+      naming = false
+    }
+  }
+  if (!home || !agentName || inTurn !== false) return
   taking = true
   try {
     const flag = `${home}/inbox/${agentName}/.new`.replace(/\\/g, '/')
@@ -1174,7 +1185,8 @@ export const register: Register = on => {
         </Text>
       )
     })
-    const working = org.filter(r => r.job?.agents.some(n => n.status === 'working')).length
+    // a PM's background subagent works without a pane of its own
+    const working = org.filter(r => r.job && (r.job.subagent || r.job.agents.some(n => n.status === 'working'))).length
     const toggle = jobCount > FOLD_AT
       ? [<Button key="jobs" plain onPress={() => void update($, bandOpen, v => !v)}>
           <Text dimColor>{`${unfolded ? '▾' : '▸'} ${jobCount} jobs · ${working} working`}</Text>

@@ -23,11 +23,12 @@ let okeState = true
 let draft = ''
 let mailFlag = false
 let dropMail = false
+let unrecorded = false  // spawn has not recorded the agent yet
 let mailText: string | null = null
 
 function answer(args: readonly string[]) {
   if (args[0] === 'tick') {
-    return { role: tickRole, agent: tickRole === 'pm' ? 'pm-toy' : 'calc-sub-w1', folder: '/oke/jobs/j/w1', home: 'C:/oke', wiki: 'C:/oke/wiki', claude_dir: 'C:/Users/u/.claude', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : tickBoard }
+    return { role: tickRole, agent: unrecorded ? null : tickRole === 'pm' ? 'pm-toy' : 'calc-sub-w1', folder: '/oke/jobs/j/w1', home: 'C:/oke', wiki: 'C:/oke/wiki', claude_dir: 'C:/Users/u/.claude', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : tickBoard }
   }
   if (args[0] === 'take-mail') {
     if (args.includes('--give-back')) return { text: null, given_back: 1 }
@@ -393,17 +394,21 @@ test('more than three open jobs fold under one row that opens them', async ($, o
   tickRole = 'orchestrator'
   const job = (name: string) => ({ job: name, phase: 'working', merge: 'none', pending: null, agents: [{
     agent: `${name}-w1`, role: 'worker', status: 'working', pane: null, report: null, board: '', revives: 0, todos: [] }] })
-  tickBoard = [{ repo: 'toy-6b0484', key: 'k', pm: null, jobs: ['a', 'b', 'c', 'd'].map(job) }]
+  // e: a PM's background subagent works on it, with no pane of its own; f: nobody works on it
+  const quiet = (name: string, subagent: boolean) => ({ ...job(name), agents: [], subagent })
+  tickBoard = [{ repo: 'toy-6b0484', key: 'k', pm: null,
+    jobs: [...['a', 'b', 'c', 'd'].map(job), quiet('e', true), quiet('f', false)] }]
   engine(on, [], [])
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount(BAND)
-  expect(await ui.find({ type: 'Text', text: '▸ 4 jobs · 4 working' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '▸ 6 jobs · 5 working' })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /├ a work/ })).toBeFalsy()
   expect(await ui.find({ type: 'Text', text: /^toy$/ })).toBeTruthy()  // the repo row stays
   await ui.press({ key: 'jobs' })
   expect(await ui.find({ type: 'Text', text: /├ a work w1●/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /└ d work/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /├ d work/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /└ f work/ })).toBeTruthy()
   await ui.unmount()
   tickBoard = BOARD
   tickRole = 'worker'
@@ -846,5 +851,18 @@ test('a compaction at a task boundary runs first, then the mail goes in', async 
   expect(compacted).toBe(1)
   expect(s.prompts).toContain('OKe inbox: pm-toy: after compact')
   answeredNow = []
+  mailFlag = false
+})
+
+test('a child that spawn recorded only after its first turn began still takes its mail', async ($, on) => {
+  unrecorded = true
+  const s = await mailSession($, on, 'worker')
+  await $.prompt.submit({ text: 'Use the oke:worker skill.' } as any)
+  unrecorded = false  // spawn recorded it meanwhile
+  mailFlag = true
+  mailText = 'OKe inbox: pm-toy: Stop and wait'
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await s.clock.advance(1)
+  expect(s.prompts).toContain('OKe inbox: pm-toy: Stop and wait')
   mailFlag = false
 })

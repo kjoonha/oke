@@ -1695,6 +1695,8 @@ def board_tree(state, agents, only_key=None):
                 if n["status"] == "dead" and (info.get("held") or not n["pane"]):
                     n["status"] = "off"
             waiting = pending_item(job, info)
+            pm_report = read_header(os.path.join(pm_job_dir(job), "report.md")) or {}
+            subagent = pm_report.get("type") == "waiting" and "subagent" in str(pm_report.get("on") or "")
             try:
                 merge = merge_state(job)[0]
                 after = [o for o in after_jobs(job) if o != job and after_block(state, o)] \
@@ -1703,7 +1705,7 @@ def board_tree(state, agents, only_key=None):
                 merge, after = "unreadable", []
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
                          "size": info.get("size"), "direct": bool(info.get("direct")),
-                         "merge": merge, "held": bool(info.get("held")),
+                         "merge": merge, "held": bool(info.get("held")), "subagent": subagent,
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None,
                          "peer_wait": sorted(repo_name(e["repo"]) for e in peer_waiting(state, job).values()),
                          "after_wait": after})
@@ -1793,10 +1795,13 @@ def cmd_tick(args):
 # ---------------------------------------------------------------- task boundary
 
 def answered(folder):
-    """The assignment seq the report in `folder` answers, or None while it owes one."""
+    """The assignment seq the report in `folder` answers, or None while it owes one. A
+    `waiting` report (a subagent or a wait still runs) has not answered it yet."""
     seq = (read_header(os.path.join(folder, "assignment.md")) or {}).get("seq")
     report = read_header(os.path.join(folder, "report.md")) or {}
-    return seq if seq is not None and report.get("seq") == seq else None
+    if seq is None or report.get("seq") != seq or report.get("type") not in FINAL_TYPES:
+        return None
+    return seq
 
 
 def cmd_boundary(args):

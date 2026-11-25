@@ -13,7 +13,7 @@ OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if python3 doe
 
 `$OKE_HOME` is OKe's home folder (`~/.oke` when the variable is not set). Each automation has its own folder, `$OKE_HOME/automations/<name>/` (`automation.json`, `prompt.md`, and `run.log` with one line per run, manual ones included); `add` and `list` print it as `folder`. Below, the *work folder* is where the session runs; the *automation folder* is this one. Never edit its files by hand: run `$OKE automate add` again to change one.
 
-At each scheduled time the OS scheduler runs `$OKE automate run <automation folder> --scheduled`, which starts `claude "<prompt>" --bg --name auto-<name>-<MMDD-HHMMSS>` in the work folder, with the PATH and locale the user had at `add` (cron's own are bare). The session runs on its own: nobody is watching it. A run is skipped (one `skipped` line in `run.log`) while the previous run of the same automation still works or waits at a dialog.
+At each scheduled time the OS scheduler runs `$OKE automate run <automation folder> --scheduled`, which starts `claude "<prompt>" --bg --name auto-<name>-<MMDD-HHMMSS>` in the work folder, with the PATH and locale the user had at `add` on Linux and macOS (cron's own are bare); on Windows with the user's login environment, not the shell's (a PATH set only in the shell, such as `nvm use` or a conda env, is missing). The session runs on its own: nobody is watching it. A run is skipped (one `skipped` line in `run.log`) while the previous run of the same automation still works or waits at a dialog.
 
 ## Set one up
 

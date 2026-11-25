@@ -29,6 +29,7 @@ export type BoardJob = {
   pending: string | null
   /** The user put it on hold (`oke job hold`): nothing runs for it until it is back. */
   held?: boolean
+  subagent?: boolean  // the PM waits on a background subagent for it (no pane of its own)
   /** Repositories whose PM still owes this job an answer (`oke peer ask`). */
   peer_wait?: string[]
   /** Jobs that must merge and verify before this one may merge (plan `after:`). */

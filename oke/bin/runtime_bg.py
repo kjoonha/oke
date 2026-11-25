@@ -54,7 +54,7 @@ def find_claude(name="claude"):
         return found or name
     try:
         with io.open(found, encoding="utf-8", errors="replace") as f:
-            m = re.search(r'"%dp0%\\([^"]+\.exe)"', f.read(), re.I)
+            m = re.search(r'"%dp0%\\([^"]*claude\.exe)"', f.read(), re.I)
     except (IOError, OSError):
         m = None
     exe = os.path.join(os.path.dirname(found), m.group(1)) if m else None
@@ -73,10 +73,13 @@ def claude_argv():
 def child_env():
     """The caller's environment without the variables that make claude think it runs
     nested inside the caller's session (or inside the caller's host)."""
-    # shortcut: drops by prefix; keep-list grows if a needed one shows up
-    keep = ("CLAUDE_CONFIG_DIR",)
+    # the user's own settings (provider, login, shell) stay; the rest of the prefix goes
+    keep = ("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_GIT_BASH_PATH",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+    keep_prefix = ("CLAUDE_CODE_USE_", "CLAUDE_CODE_SKIP_", "CLAUDE_CODE_DISABLE_")
     return dict((k, v) for k, v in os.environ.items()
-                if k in keep or not k.startswith(("CLAUDECODE", "CLAUDE_CODE_", "AI_AGENT")))
+                if k in keep or k.startswith(keep_prefix)
+                or not k.startswith(("CLAUDECODE", "CLAUDE_CODE_", "AI_AGENT")))
 
 
 def run_claude(args, cwd=None):

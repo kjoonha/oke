@@ -64,7 +64,7 @@ herdr pane 또는 일반 터미널에서 Claude Code 를 켜고 `/oke:start`. �
 - 주기 (이 컴퓨터의 시각): `every 30m`, `every 2h`, `daily 09:00`, `weekdays 09:00`, `weekly mon,thu 09:00`, Windows 밖에서는 `cron <다섯 칸>`.
 - 폴더는 Claude Code 가 이미 신뢰하는 곳이어야 한다: 백그라운드 세션은 신뢰 창에 답하지 못한다.
 - 예약 세션의 권한 창에는 아무도 답하지 않는다. 사용자 기본 권한 모드면 첫 권한 창에서 누가 attach 할 때까지 기다린다. 같은 automation 의 이전 실행이 아직 일하거나 기다리는 동안 다음 실행은 건너뛴다.
-- 그 시각에 컴퓨터가 켜져 있어야 한다. Windows 는 사용자가 로그인해 있어야 한다 (배터리로 돌 때도 실행된다). 실행은 등록할 때 셸의 PATH 와 locale 을 받는다.
+- 그 시각에 컴퓨터가 켜져 있어야 한다. Windows 는 사용자가 로그인해 있어야 한다 (배터리로 돌 때도 실행된다). Linux 와 macOS 에서는 등록할 때 셸의 PATH 와 locale 을 받고, Windows 에서는 사용자 로그인 환경을 받는다.
 - automation 하나는 폴더 `$OKE_HOME/automations/<name>/` 하나다 (`automation.json`, `prompt.md`, 실행마다 (손으로 돌린 것도) 한 줄씩 쌓이는 `run.log`). `oke automate list`, `oke automate run <name>` (지금 한 번), `oke automate remove <name>` 은 셸에서도 된다.
 
 ## 설정: `~/.oke/config.json`

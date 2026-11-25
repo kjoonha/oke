@@ -106,7 +106,10 @@ class TestBgRuntime(BgBase):
         io.open(exe, "w").close()
         shim = os.path.join(bin_dir, "claude.cmd")
         with io.open(shim, "w") as f:
-            f.write('@ECHO off\r\nCALL :find_dp0\r\n"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n')
+            # a JS shim names node.exe first: never start that
+            f.write('@ECHO off\r\nIF EXIST "%dp0%\\node.exe" (SET "_prog=%dp0%\\node.exe")\r\n'
+                    '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n')
+        io.open(os.path.join(bin_dir, "node.exe"), "w").close()
         old = runtime_bg.shutil.which
         runtime_bg.shutil.which = lambda name: shim
         try:
@@ -119,9 +122,16 @@ class TestBgRuntime(BgBase):
             runtime_bg.shutil.which = old
 
     def test_child_env_drops_nesting_variables(self):
+        saved = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
         os.environ.update({"CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "x", "AI_AGENT": "d",
-                           "CLAUDE_CONFIG_DIR": "/c", "PATH_KEEP_ME": "y"})
+                           "CLAUDE_CONFIG_DIR": "/c", "PATH_KEEP_ME": "y",
+                           "CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDE_CODE_OAUTH_TOKEN": "t",
+                           "CLAUDE_CODE_SESSION_ID": "s"})
         env = runtime_bg.child_env()
+        self.assertEqual(env["CLAUDE_CODE_USE_BEDROCK"], "1")  # the user's provider and login stay
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "t")
+        self.assertNotIn("CLAUDE_CODE_SESSION_ID", env)
         self.assertNotIn("CLAUDECODE", env)
         self.assertNotIn("CLAUDE_CODE_ENTRYPOINT", env)
         self.assertNotIn("AI_AGENT", env)

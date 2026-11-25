@@ -568,6 +568,12 @@ class TestTick(ReviveBase):
         self.assertEqual(job["merge"], "none")
         self.assertIn("pending", job)
         self.assertEqual(job["agents"][0]["todos"], [])
+        self.assertFalse(job["subagent"])
+        os.makedirs(oke.pm_job_dir("fix-a"), exist_ok=True)
+        self.write_file(os.path.join(oke.pm_job_dir("fix-a"), "report.md"),
+                        "type: waiting\nseq: 2\non: work subagent a7\n---\n")
+        out = self.tick("w7:p1", [AG(None, pane="w7:p1", session="s-o")], "--board")
+        self.assertTrue(out["board"][0]["jobs"][0]["subagent"])  # it works without a pane
 
     def test_a_wait_past_one_and_a_half_times_its_expect_is_overdue(self):
         report = os.path.join(self.child_dir, "report.md")
@@ -625,7 +631,11 @@ class TestBoundary(ReviveBase):
         folder = oke.pm_job_dir("fix-a")
         os.makedirs(folder)
         self.write_file(os.path.join(folder, "assignment.md"), "seq: 1\n---\nplan it\n")
-        self.write_file(os.path.join(folder, "report.md"), "seq: 1\ntype: plan\n---\nplan\n")
+        # a subagent still runs for it: not the end of that task yet
+        self.write_file(os.path.join(folder, "report.md"),
+                        "seq: 1\ntype: waiting\non: planner subagent a1\n---\n.\n")
+        self.assertEqual(self.boundary("w1:p3"), {"role": "pm", "answered": []})
+        self.write_file(os.path.join(folder, "report.md"), "seq: 1\ntype: done\n---\nplan\n")
         self.assertEqual(self.boundary("w1:p3"), {"role": "pm", "answered": ["fix-a:1"]})
         self.assertEqual(self.boundary("w7:p1")["answered"], [])
 

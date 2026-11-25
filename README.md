@@ -111,7 +111,7 @@ Run `/oke:automate` in any Claude Code session and say what should run and how o
 - Schedules (local time): `every 30m`, `every 2h`, `daily 09:00`, `weekdays 09:00`, `weekly mon,thu 09:00`, and `cron <five fields>` outside Windows.
 - The folder must be one Claude Code already trusts: a background session cannot answer the trust dialog.
 - Nobody answers a scheduled session's dialogs. With the user's default permission mode it waits at its first dialog until someone attaches; a run is skipped while the previous run of the same automation still works or waits.
-- The computer must be on at that time; on Windows the user must be logged in (the task also runs on battery). A run gets the PATH and locale the shell had when it was registered.
+- The computer must be on at that time; on Windows the user must be logged in (the task also runs on battery). On Linux and macOS a run gets the PATH and locale the shell had when it was registered; on Windows it gets the user's login environment.
 - Each automation is a folder `$OKE_HOME/automations/<name>/` (`automation.json`, `prompt.md`, and `run.log` with one line per run, manual ones included). `oke automate list`, `oke automate run <name>` (one run now) and `oke automate remove <name>` work from a shell too.
 
 ## Settings: `~/.oke/config.json`
