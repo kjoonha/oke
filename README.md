@@ -103,6 +103,16 @@ Things you can say along the way:
 - `continue <job>`: bring a held job back; the PM restarts what it needs.
 - `cancel <job>`: drop it.
 
+## Scheduled runs: `/oke:automate`
+
+Run `/oke:automate` in any Claude Code session and say what should run and how often. Claude asks for the prompt, the folder, the schedule, the permission mode and optionally the model, shows the setup, and registers it: with `crontab` on Linux and macOS, with Task Scheduler (folder `OKe`) on Windows. At each scheduled time a background session (`claude --bg`, named `auto-<name>-<MMDD-HHMMSS>`) starts in that folder with the saved prompt; watch it with `claude attach <session>` or list sessions with `claude agents`.
+
+- Schedules (local time): `every 30m`, `every 2h`, `daily 09:00`, `weekdays 09:00`, `weekly mon,thu 09:00`, and `cron <five fields>` outside Windows.
+- The folder must be one Claude Code already trusts: a background session cannot answer the trust dialog.
+- Nobody answers a scheduled session's dialogs. With the user's default permission mode it waits at its first dialog until someone attaches; a run is skipped while the previous run of the same automation still works or waits.
+- The computer must be on at that time; on Windows the user must be logged in (the task also runs on battery). A run gets the PATH and locale the shell had when it was registered.
+- Each automation is a folder `$OKE_HOME/automations/<name>/` (`automation.json`, `prompt.md`, and `run.log` with one line per run, manual ones included). `oke automate list`, `oke automate run <name>` (one run now) and `oke automate remove <name>` work from a shell too.
+
 ## Settings: `~/.oke/config.json`
 
 Optional. Only the values you set override the defaults.

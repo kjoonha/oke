@@ -55,6 +55,16 @@ herdr pane 또는 일반 터미널에서 Claude Code 를 켜고 `/oke:start`. �
 
 검사: 계획에는 번호 붙은 수용 기준 (`## 수용 기준`) 과 검사 명령 하나 (`## 검증 명령`, 백틱 안) 가 있다. 일을 시작하기 전에 `oke baseline <job>` 이 손대지 않은 checkout 에서 명령을 돌려 원래 깨진 것을 저장한다. worker 는 `oke check <job>` 으로 검사한다: OKe 가 명령을 돌리고, baseline 에 없던 실패 줄만 새 실패로 친다. 결과는 OKe 가 job 장부에 적고 줄마다 서명한다. 서명 키 (`$OKE_HOME/ledger.key`) 는 agent 가 읽을 수 없고, 손으로 적거나 복사한 줄은 서명이 맞지 않아 세지 않는다. `oke job merge` 는 리뷰가 계획의 현재 `criteria_rev` (수용 기준과 명령의 해시) 를 적었고, 장부에 리뷰한 커밋에서 통과한 `oke check` 가 있을 때만 합친다. 합친 뒤 `oke job verify <job>` 은 합친 코드가 검사를 통과한 코드와 같으면 돌리지 않고 통과로 적고, 검사 뒤 다른 merge 가 main 을 바꿨으면 바뀐 파일 목록을 보여 주고 PM 이 정한다: 그 파일이 결과를 바꿀 수 없으면 (예: 문서) `--skip "<이유>"` 로 이유와 파일 목록을 장부에 남기고, 아니면 `--run` 으로 main 에서 명령을 돌려 새 실패가 있을 때 merge 를 되돌린다.
 
+## 예약 실행: `/oke:automate`
+
+아무 Claude Code 세션에서 `/oke:automate` 를 부르고 무엇을 얼마나 자주 돌릴지 말한다. Claude 가 프롬프트, 폴더, 주기, 권한 모드, (원하면) 모델을 묻고, 설정을 보여 준 뒤 등록한다: Linux 와 macOS 는 `crontab`, Windows 는 작업 스케줄러 (`OKe` 폴더). 정한 시각마다 그 폴더에서 저장된 프롬프트로 백그라운드 세션 (`claude --bg`, 이름 `auto-<name>-<MMDD-HHMMSS>`) 이 뜬다. `claude attach <session>` 으로 보거나 `claude agents` 로 목록을 본다.
+
+- 주기 (이 컴퓨터의 시각): `every 30m`, `every 2h`, `daily 09:00`, `weekdays 09:00`, `weekly mon,thu 09:00`, Windows 밖에서는 `cron <다섯 칸>`.
+- 폴더는 Claude Code 가 이미 신뢰하는 곳이어야 한다: 백그라운드 세션은 신뢰 창에 답하지 못한다.
+- 예약 세션의 권한 창에는 아무도 답하지 않는다. 사용자 기본 권한 모드면 첫 권한 창에서 누가 attach 할 때까지 기다린다. 같은 automation 의 이전 실행이 아직 일하거나 기다리는 동안 다음 실행은 건너뛴다.
+- 그 시각에 컴퓨터가 켜져 있어야 한다. Windows 는 사용자가 로그인해 있어야 한다 (배터리로 돌 때도 실행된다). 실행은 등록할 때 셸의 PATH 와 locale 을 받는다.
+- automation 하나는 폴더 `$OKE_HOME/automations/<name>/` 하나다 (`automation.json`, `prompt.md`, 실행마다 (손으로 돌린 것도) 한 줄씩 쌓이는 `run.log`). `oke automate list`, `oke automate run <name>` (지금 한 번), `oke automate remove <name>` 은 셸에서도 된다.
+
 ## 설정: `~/.oke/config.json`
 
 없어도 된다. 있으면 아래 값만 덮어쓴다.

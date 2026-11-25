@@ -18,6 +18,7 @@ import subprocess
 import sys
 import time
 
+import automate
 import runtime_bg
 import runtime_herdr
 import wiki
@@ -4375,6 +4376,8 @@ def build_parser():
 
     hook = sub.add_parser("compact-hook")
     hook.set_defaults(func=cmd_compact_hook)
+
+    automate.add_parser(sub, lambda args: automate.cmd(args, oke_home(), native_path))
     return parser
 
 
