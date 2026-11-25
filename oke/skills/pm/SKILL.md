@@ -166,7 +166,7 @@ When a child's wait finishes, act on its first line:
 |---|---|
 | worker `report done` | If 검증 출력 is missing or does not show the command passing, send it back. Otherwise start the review |
 | worker `report question` | Answer from the plan, the code or the wiki if you can (autonomy `balanced` or `full`). If it is about what the user wants, or autonomy is `conservative`, report `question` for that job and wait for `kind: answer` |
-| `blocked` | Report `type: blocked` for that job: name the child agent and paste the screen text. Do not start that child's wait again yet. The orchestrator answers the dialog and gives you `kind: dialog`. A screen `OKe: <child> may have failed to start` (Orca): first run `$OKE read <child>` again; if the note is gone, it started meanwhile: start its wait again, report nothing. Else report it the same way: do not close or revive that child yourself, the user decides |
+| `blocked` | Report `type: blocked` for that job: name the child agent and paste the screen text. Do not start that child's wait again yet. The orchestrator answers the dialog and gives you `kind: dialog`. |
 | `report blocked` | Children do not use this type. Treat it as `report question` |
 | `idle_no_report` | Once: `$OKE send <child> "continue"` (its turn stopped short: it picks up where it was), then wait again. Second time: report `failed` for that job |
 | `bad_report` | Once: `$OKE send <child> "Rewrite your report.md in the format your skill gives."`, then wait again. Second time: report `failed` for that job |

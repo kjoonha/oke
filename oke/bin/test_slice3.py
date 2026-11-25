@@ -328,13 +328,13 @@ class TestPmWait(InboxBase):
         self.assertEqual(self.wait(), "blocked" + NL + "Allow? 1. Yes")
 
     def test_a_report_written_while_the_pm_read_blocked_comes_first(self):
-        # e2e (Orca): a PM slow to start reads blocked, then writes its report meanwhile
+        # a PM reads blocked, then writes its report meanwhile
         folder = self.pm_job("fix-a", 2, REPORT("waiting", 2))
         original = oke.look_at
 
         def blocked_then_report(*a, **kw):
             self.put(os.path.join(folder, "report.md"), REPORT("done", 2))
-            return "blocked" + NL + "OKe: pm-toy may have failed to start"
+            return "blocked" + NL + "Allow? 1. Yes"
         oke.look_at = blocked_then_report
         try:
             self.assertEqual(oke.check_pm_once("pm-toy", self.key), "report done fix-a")

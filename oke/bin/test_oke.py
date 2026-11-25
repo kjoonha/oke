@@ -24,9 +24,7 @@ class Base(unittest.TestCase):
         self._grace = oke.BLOCKED_GRACE
         os.environ["OKE_HOME"] = self.home
         for k in ("HERDR_ENV", "HERDR_PANE_ID", "OKE_HERDR", "FAKE_HERDR_DIR", "OKE_RUNTIME",
-                  "OKE_CLAUDE", "CLAUDE_CODE_SESSION_ID", "ORCA_TERMINAL_HANDLE", "OKE_ORCA",
-                  "ORCA_CLI_COMMAND", "ORCA_DEV_REPO_ROOT", "ORCA_CHAT_SCRATCH_DIR",
-                  "CLAUDE_CONFIG_DIR"):
+                  "OKE_CLAUDE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CONFIG_DIR"):
             os.environ.pop(k, None)
         os.environ["OKE_RUNTIME"] = "herdr"  # outside a herdr pane OKe would pick bg
         self.out = ""
@@ -912,7 +910,7 @@ class TestWait(Base):
 
         def blocked_then_report(*a, **kw):
             self.report("type: done\nseq: 2\n---\n")
-            return "blocked\nOKe: a may have failed to start"
+            return "blocked\nAllow? 1. Yes"
         oke.look_at = blocked_then_report
         try:
             self.assertEqual(oke.check_once("a", r, 2), "report done")
@@ -948,15 +946,15 @@ class TestWait(Base):
         self.assertEqual(self.cli("wait", "a", "--report", r, "--seq", "7"), 0)
         self.assertEqual(self.out.strip(), "report failed")
 
-    def test_bg_and_orca_waits_look_every_10_s(self):
-        # each bg or Orca look runs a node program; herdr's is cheap
+    def test_bg_waits_look_every_10_s(self):
+        # each bg look runs a node program; herdr's is cheap
         polls = []
         self.addCleanup(setattr, oke, "wait_loop", oke.wait_loop)
         oke.wait_loop = lambda *a, **k: polls.append(k["poll"])
-        for runtime, extra in (("herdr", []), ("bg", []), ("orca", []), ("bg", ["--poll", "3"])):
+        for runtime, extra in (("herdr", []), ("bg", []), ("bg", ["--poll", "3"])):
             os.environ["OKE_RUNTIME"] = runtime
             self.assertEqual(self.cli("wait", "a", "--report", "r.md", "--seq", "1", *extra), 0, self.err)
-        self.assertEqual(polls, [2, 10, 10, 3])
+        self.assertEqual(polls, [2, 10, 3])
 
 
 def help_ok():

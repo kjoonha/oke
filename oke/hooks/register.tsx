@@ -279,9 +279,6 @@ const REVIEWER_GIT = /^\s*git(?:\s+(?:-C\s+\S+|--no-pager))*\s+(?:diff|log|show|
 // Tools a reviewer gets at all (the launch's ROLE_TOOLS["reviewer"]); anything else, Agent and MCP tools included, is refused.
 const REVIEWER_TOOLS = ['Read', 'Grep', 'Glob', 'Skill', 'ToolSearch', 'TaskCreate', 'TaskUpdate', 'TaskList',
   'WebFetch', 'WebSearch', 'Bash', 'Edit', 'Write']
-// Inside Orca a reviewer also reports with `orca orchestration send` (worker_done) or asks
-// with `ask`; a quoted orca path reads as "" here.
-const REVIEWER_ORCA = /^\s*(?:\S*orca(?:\.exe)?|"")\s+orchestration\s+(?:send|ask)\b/
 
 /** The role and folder an OKe first or revive prompt names, else null: the mod knows
  * them from the first turn on, before `oke spawn` has recorded the agent. */
@@ -292,8 +289,8 @@ export function promptRole(text: string): { role: string, folder: string } | nul
 }
 
 /** The refusal for a reviewer's tool call that could change the repository, else null.
- * The reviewer's launch flags say the same; this holds where no flags reach the agent
- * (Orca starts it itself). It writes only its own folder (report, board). */
+ * The reviewer's launch flags say the same; this holds even if they did not reach it.
+ * It writes only its own folder (report, board). */
 export function reviewerDenied(tool: string, input: any, own: string | null): string | null {
   if (!REVIEWER_TOOLS.includes(tool)) return `OKe reviewers do not use ${tool}: read, review and report.`
   if (tool === 'Edit' || tool === 'Write') {
@@ -309,7 +306,7 @@ export function reviewerDenied(tool: string, input: any, own: string | null): st
   const cmd = unquoted(raw)
   // `$`, backticks and line breaks act inside double quotes too, so they count before unquoting
   const safe = !/[`$\r\n]/.test(raw) && !/[;&|<>]|--output|--ext-diff/.test(cmd)
-  if (safe && (REVIEWER_GIT.test(cmd) || REVIEWER_ORCA.test(cmd))) return null
+  if (safe && REVIEWER_GIT.test(cmd)) return null
   return 'OKe reviewers run only read-only git: git diff, log, show or status, one command, without --output.'
 }
 
@@ -984,10 +981,9 @@ async function openBoard($: any) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    // herdr pane, else Orca terminal, else this Claude session (bg children)
+    // herdr pane, else this Claude session (bg children)
     // the process env has no session id (seen live): ask the session itself
-    pane = (await $.env.get('HERDR_PANE_ID')) || (await $.env.get('ORCA_TERMINAL_HANDLE'))
-      || `session:${await $.session.id()}`
+    pane = (await $.env.get('HERDR_PANE_ID')) || `session:${await $.session.id()}`
     if (!pane) return r
     await $.command.register({ name: 'oke-board', description: 'Show the OKe agents and their boards' })
     // A process that died during a backoff leaves its marker; this one starts clean.
@@ -1160,7 +1156,7 @@ export const register: Register = on => {
     // The person typed during a backoff: their turn replaces the retry.
     pending?.cancel()
     pending = null
-    // Orca runs a new agent's first turn before spawn records it: its guardrails hold from the first tool call
+    // a new agent's first turn can run before spawn records it: its guardrails hold from the first tool call
     const said = role === null ? promptRole(String((e as any).text ?? '')) : null
     if (said) {
       role = said.role

@@ -62,7 +62,6 @@ Agents talk through files under `$OKE_HOME` (default `~/.oke`), so a crash loses
 - Python 3.6 or later (standard library only) and git
 - One place to run the agents:
   - herdr 0.9.5 or later (agents run in herdr panes), or
-  - Orca (agents run as Orca orchestration workers, each in its own Orca terminal; tested with 1.4.261), or
   - neither: agents run as background `claude --bg` sessions.
 
 ## Install (online)
@@ -94,17 +93,9 @@ This is the same place a marketplace from GitHub lives. The plugin is read from 
 
 ## Use
 
-Start Claude Code in a herdr pane, an Orca terminal or a plain terminal, and run `/oke:start`. That session becomes the orchestrator. Tell it what you want done. If the session was cut off, run `/oke:resume`.
+Start Claude Code in a herdr pane or a plain terminal, and run `/oke:start`. That session becomes the orchestrator. Tell it what you want done. If the session was cut off, run `/oke:resume`.
 
-In Orca:
-
-- OKe runs only in an Orca terminal tab. `/oke:start` in an Orca chat refuses ("OKe runs in an Orca terminal, not a chat"); a chat draws no mod pane.
-- Orca's Agent Orchestration setting must be on, and Orca's default for new agent tabs must be CLI, not Chat. OKe starts each PM, worker and reviewer as an Orca worker in a new terminal tab (titled `OKe PM: <repo>`, `OKe worker 1: <job>`, ...); if Orca starts it as a chat instead, OKe stops it right after it started and says to change that default (or, if it could not stop it, which one to close in Orca). The first PM start is where you meet this.
-- Orca starts the agents itself, so OKe's launch flags do not reach them: install the OKe plugin in Claude Code, and `lean_launch` has no effect there.
-- A closed agent terminal is reopened by Orca with the next message to that agent. An agent whose process died reads `gone`, and the orchestrator asks whether to resume it (resume, hold or cancel; with autonomy `full` see `autonomy` below). A resume starts a new Orca worker that reads the dead one's transcript, and gets the messages queued for it meanwhile.
-- If Orca sent an agent its task but never saw claude start (`start_unknown`), reading that agent shows a note instead of its screen: revive it (`oke close <handle>`, then `oke revive <name> --reset`) or wait; it turns back to working once Orca sees its turn.
-
-`oke status` (and `oke board`) work from any terminal: they read the runtime the orchestrator chose. Outside that runtime's terminals (for example a plain shell while OKe runs in herdr or Orca) they only report; nothing can be started from there.
+`oke status` (and `oke board`) work from any terminal: they read the runtime the orchestrator chose. Outside that runtime's terminals (for example a plain shell while OKe runs in herdr) they only report; nothing can be started from there.
 
 Things you can say along the way:
 
@@ -116,7 +107,7 @@ Things you can say along the way:
 
 Optional. Only the values you set override the defaults.
 
-OKe keeps its files in `~/.oke`. To use another folder, set `OKE_HOME` in the `env` of `~/.claude/settings.json` (`"env": {"OKE_HOME": "D:/oke"}`): every agent OKe starts gets it there, including those Orca starts. A variable set only in your shell does not reach Orca's agents.
+OKe keeps its files in `~/.oke`. To use another folder, set `OKE_HOME` in the `env` of `~/.claude/settings.json` (`"env": {"OKE_HOME": "D:/oke"}`): every agent OKe starts gets it there.
 
 ```json
 {

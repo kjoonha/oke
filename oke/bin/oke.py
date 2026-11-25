@@ -20,7 +20,6 @@ import time
 
 import runtime_bg
 import runtime_herdr
-import runtime_orca
 import wiki
 from runtime_herdr import DialogError, HerdrError, herdr, herdr_text, replace_file, session_of, write_private  # noqa: F401 (tests)
 
@@ -322,15 +321,12 @@ def slug(text, limit=24):
 
 # ---------------------------------------------------------------- runtime
 
-RUNTIMES = {"herdr": runtime_herdr.HerdrRuntime, "bg": runtime_bg.BgRuntime, "orca": runtime_orca.OrcaRuntime}
+RUNTIMES = {"herdr": runtime_herdr.HerdrRuntime, "bg": runtime_bg.BgRuntime}
 
 
 def default_runtime():
-    """herdr inside a herdr pane, orca inside Orca, else bg. An Orca chat counts as Orca
-    (never bg), though OKe refuses to run there (cmd_status)."""
-    if os.environ.get("HERDR_ENV") == "1":
-        return "herdr"
-    return "orca" if os.environ.get("ORCA_TERMINAL_HANDLE") or runtime_orca.in_chat() else "bg"
+    """herdr inside a herdr pane, else bg."""
+    return "herdr" if os.environ.get("HERDR_ENV") == "1" else "bg"
 _runtimes = {}
 
 
@@ -386,8 +382,6 @@ def bank_usage(folder):
 def agent_command(role, config, home, plugin_dir, folder, resume=None):
     """The claude arguments for one worker or reviewer."""
     bank_usage(folder)
-    if runtime().name == "orca":
-        config = dict(config, lean_launch=False)  # Orca starts the agent: no flags reach it
     header = read_header(os.path.join(folder, "assignment.md")) if folder else None
     return launch_args(role, config, home, plugin_dir, resume, folder, header)
 REVIEWER_TOOLS = ["Read", "Grep", "Glob", "Skill", "Bash(git diff:*)", "Bash(git log:*)",
@@ -1090,8 +1084,8 @@ def check_pm_once(agent, key):
     if not fresh:
         look = look_at(agent, pm_dir(key))
         if look and look.startswith("blocked"):
-            # a report written while we looked beats the blocked read before it (an Orca PM
-            # slow to start reads blocked, then writes its report): read the reports again
+            # a report written while we looked beats the blocked read before it: read the
+            # reports again
             jobs, fresh = reports()
     if fresh:
         name, seq, header, _ = min(fresh, key=lambda j: j[3] or 0)
@@ -1277,7 +1271,7 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
 
 
 def cmd_wait(args):
-    if args.poll is None:  # a bg or Orca look runs a node program: not every 2 s
+    if args.poll is None:  # a bg look runs a node program: not every 2 s
         args.poll = 2 if runtime().name == "herdr" else 10
     if args.jobs:
         state = load_state()
@@ -1614,28 +1608,17 @@ def cmd_resume_all(args):
 def whoami(state, pane):
     """(role, name, key, record) of the OKe agent in `pane`, or None. Pane ids come
     back after a herdr restart, so a recorded session has to match as well."""
-    pane = getattr(runtime(), "canonical", lambda p: p)(pane)  # Orca: a follow-up's new terminal
     if pane and pane.startswith("session:"):
         # a session id is never reused: no need to ask the runtime who is there
         sid = pane[len("session:"):]
         mine = [r for r in records(state) if r[3].get("pane") == pane or r[3].get("session") == sid]
         return (mine[0] if mine else None), list_agents()
     mine = [r for r in records(state) if r[3].get("pane") == pane]
-    agents = None
-    if not mine and hasattr(runtime(), "canonical"):
-        # Orca: an agent whose follow-up started in a new terminal, before anyone looked
-        agents = list_agents()  # looking moves the registry to its new terminal
-        pane = runtime().canonical(pane)
-        mine = [r for r in records(state) if r[3].get("pane") == pane]
     if not mine:
         return None, []
-    agents = agents if agents is not None else list_agents()
+    agents = list_agents()
     here = [a for a in agents if a.get("pane_id") == pane]
     if not here:
-        # Orca lists only the workers OKe started, never the user's own session: there
-        # the orchestrator's recorded place is all there is (seen live: role null)
-        if not runtime().owns_orchestrator:
-            return next((r for r in mine if r[0] == "orchestrator"), None), agents
         return None, agents
     for r in mine:
         if same_agent(r[3], here[0]):
@@ -1926,8 +1909,6 @@ def cmd_status(args):
     # herdr calls are slow (seconds each): make them before taking the lock, so
     # spawn and the waits do not time out on it. The agent list may then be a few
     # seconds old: an agent that just started can show as dead until the next status.
-    if runtime_orca.in_chat():
-        return fail(runtime_orca.CHAT_REFUSAL)  # /oke:start's first command: no screen, no mod there
     if args.claim and not os.environ.get("OKE_RUNTIME"):
         # one runtime per OKe home, chosen by where the orchestrator starts
         want = default_runtime()

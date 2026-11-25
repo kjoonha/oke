@@ -33,8 +33,8 @@ Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`.
 
 ## Start
 
-1. Run `$OKE status`. If it fails with "OKe runs in an Orca terminal, not a chat", tell the user exactly that and stop.
-2. `herdr.inside` false: say OKe cannot start its agents here, stop. (Outside herdr OKe runs them as background sessions, or as Orca workers inside Orca, and this is true.)
+1. Run `$OKE status`.
+2. `herdr.inside` false: say OKe cannot start its agents here, stop. (Outside herdr OKe runs them as background sessions, and this is true.)
 3. `herdr.missing` not empty: name the missing herdr commands, stop (only in a herdr pane).
 4. `orchestrator_conflict` set: say which pane already runs the orchestrator, stop.
 5. Run `$OKE status --claim`.
@@ -163,7 +163,7 @@ When it finishes, read the first line of its output. If the user speaks before i
 | First line | Do |
 |---|---|
 | `report <type> <job>` | Start the wait again first (it keeps delivering the PM's mail while you ask the user), then run the queue |
-| `blocked` | The PM itself is at a dialog. This comes before the queue. Ask: approve once / deny / go to that pane. Send the key yourself: `$OKE keys <pm> enter` to approve, `$OKE keys <pm> esc` to deny, or `$OKE attach <pm>` (then tell the user to answer the dialog there and to tell you when done, end your turn, and continue only after the user says so). Start the wait again with `--after-blocked` added. Never send a second key for the same dialog. A screen that starts with `OKe: <pm> may have failed to start` (Orca) is no dialog: send no key; read and follow `${CLAUDE_PLUGIN_ROOT}/skills/orchestrator/references/orca.md` |
+| `blocked` | The PM itself is at a dialog. This comes before the queue. Ask: approve once / deny / go to that pane. Send the key yourself: `$OKE keys <pm> enter` to approve, `$OKE keys <pm> esc` to deny, or `$OKE attach <pm>` (then tell the user to answer the dialog there and to tell you when done, end your turn, and continue only after the user says so). Start the wait again with `--after-blocked` added. Never send a second key for the same dialog. |
 | `idle_no_report <job>` | `$OKE send <pm> --job <job> "Job <job>: continue"` (its turn stopped short, like a cut-off answer: it picks up where it was) and wait again |
 | `bad_report <job> ...` | `$OKE send <pm> --job <job> "Job <job>: rewrite <pm_job_dir>/report.md in the required format."` and wait again |
 | `idle_no_report again <job>`, `bad_report again <job> ...` | The nudge did not help. Do not nudge again: the wait now leaves that job alone and `pending` lists it as `silent`. Wait again (for the other jobs), then run the queue |
@@ -186,7 +186,7 @@ Run the queue after every wait result except `superseded`, after the start proce
 3. Handle it by `kind`:
    - `report_done`: no question. Read `<pm_job_dir>/report.md` and act as in "Flow".
    - `question`: read the report. Ask the user with `AskUserQuestion`. An item with `peers` (also `blocked` or `failed`): those PMs never answered a peer ask of this job; ask about them as for `peer` in the same popup, and put that line into the same `kind: answer`. Before you give the answer to the PM (`kind: answer`), read the report again: if it now says `blocked`, ask about the dialog too, and give both in one assignment: `kind: dialog` with the dialog line, then a line `Answer: <the user's answer>`. Write it, send the key to the child as for `blocked`, then steps 3 to 6. Never write two assignments for one job before the PM has reported on the first: the second overwrites the first.
-   - `blocked`: the report names a child agent and shows its screen. Ask: approve once / deny / go to that pane. For "go to that pane": `$OKE attach <child>`, `$OKE job defer <job>`, and continue that item only after the user says they are done. Then, in this order: write the PM's `kind: dialog` assignment ("Dialog answered for <child>." or "Dialog denied for <child>: <what was refused>."; step 2 of "Give the job to the PM"), send the key to that child yourself (`$OKE keys <child> enter` or `esc`; none after "go to that pane"), then steps 3 to 6. Writing first means a compaction in between shows the item as `unsent`, never as the same dialog again. Never send a second key for the same report. A screen that starts with `OKe: <child> may have failed to start` (Orca) is no dialog: send no key; read and follow `${CLAUDE_PLUGIN_ROOT}/skills/orchestrator/references/orca.md`.
+   - `blocked`: the report names a child agent and shows its screen. Ask: approve once / deny / go to that pane. For "go to that pane": `$OKE attach <child>`, `$OKE job defer <job>`, and continue that item only after the user says they are done. Then, in this order: write the PM's `kind: dialog` assignment ("Dialog answered for <child>." or "Dialog denied for <child>: <what was refused>."; step 2 of "Give the job to the PM"), send the key to that child yourself (`$OKE keys <child> enter` or `esc`; none after "go to that pane"), then steps 3 to 6. Writing first means a compaction in between shows the item as `unsent`, never as the same dialog again. Never send a second key for the same report.
    - `failed`: show the summary (an "API error" summary means automatic retries ran out). Ask: retry (give the PM the same step again) / give up (see "Giving up") / later.
    - `legacy`, `unsent`, `silent` or `peer`: read and follow `${CLAUDE_PLUGIN_ROOT}/skills/orchestrator/references/queue-kinds.md`.
    - `plan`: the plan approval question (see "Flow").
@@ -254,6 +254,5 @@ With `full` the phases stay the same: set `awaiting_approval` (or `awaiting_merg
 
 - Write a decision or a user instruction into the assignment or intake file the moment you get it. Your context can be compacted; the files cannot.
 - After compaction, run `$OKE status` and the queue, and start a wait for each PM with open jobs (a held job is not open).
-- `$OKE attach <agent>` prints `"attached": false` and a `hint` when OKe cannot show the agent itself (background sessions, Orca workers): give the user that hint. `$OKE keys` fails there too: for a dialog, offer only that command.
-- Inside Orca: when Orca wakes you with `worker_done` or `escalation`, or a spawn or revive fails with "OKe needs Orca's default for new agent tabs to be CLI", read and follow `${CLAUDE_PLUGIN_ROOT}/skills/orchestrator/references/orca.md`.
+- `$OKE attach <agent>` prints `"attached": false` and a `hint` when OKe cannot show the agent itself (background sessions): give the user that hint. `$OKE keys` fails there too: for a dialog, offer only that command.
 - OKe blocks git commands that lose or publish work (`push`, `reset --hard`, `clean`, forced checkouts, branch deletes) in your session too. When the user wants one, tell them to run it themselves.

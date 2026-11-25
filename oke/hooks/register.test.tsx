@@ -586,18 +586,9 @@ test('a PM, worker or reviewer cannot run git commands that lose or publish work
   expect(ran.length).toBe(12)
 })
 
-test('inside Orca the terminal handle is the place', async ($, on) => {
-  mock.clock(on)
-  mock.env(on, { ORCA_TERMINAL_HANDLE: 'structworker_1' })
-  const runs: Run[] = []
-  engine(on, runs, [])
-  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  expect(runs[0]?.argv[runs[0].argv.indexOf('--pane') + 1]).toBe('structworker_1')
-})
-
 test('a reviewer writes only its own folder and runs only read-only git', async ($, on) => {
   mock.clock(on)
-  mock.env(on, { ORCA_TERMINAL_HANDLE: 'structworker_2' })
+  mock.env(on, { HERDR_PANE_ID: 'w1:p2' })
   tickRole = 'reviewer'
   engine(on, [], [])
   on('tool.call', () => ({ result: { stdout: '' } }))
@@ -613,8 +604,7 @@ test('a reviewer writes only its own folder and runs only read-only git', async 
     expect((await call(bad)).deny).toMatch(/^OKe reviewers/)
   }
   for (const ok of [{ tool: 'Write', file_path: '\\oke\\jobs\\j\\w1\\report.md' }, { tool: 'Read', file_path: '/repo/a' },
-    { tool: 'Bash', command: 'git -C r diff main...HEAD' }, { tool: 'Bash', command: 'git log --oneline -5' },
-    { tool: 'Bash', command: '"C:/o/orca.exe" orchestration send --type worker_done --body "pass; no findings"' }]) {
+    { tool: 'Bash', command: 'git -C r diff main...HEAD' }, { tool: 'Bash', command: 'git log --oneline -5' }]) {
     expect((await call(ok)).deny).toBeUndefined()
   }
   tickRole = 'worker'
@@ -622,7 +612,7 @@ test('a reviewer writes only its own folder and runs only read-only git', async 
 
 test('the orchestrator writes only the OKe home and starts no subagent', async ($, on) => {
   mock.clock(on)
-  mock.env(on, { ORCA_TERMINAL_HANDLE: 'term_1' })
+  mock.env(on, { HERDR_PANE_ID: 'w1:p1' })
   tickRole = 'orchestrator'
   engine(on, [], [])
   on('tool.call', () => ({ result: { stdout: '' } }))

@@ -100,12 +100,12 @@ class TestBgRuntime(BgBase):
         self.assertIn("claude attach a2", str(c.exception))
 
     def test_child_env_drops_nesting_variables(self):
-        os.environ.update({"CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "x", "ORCA_CHAT_SCRATCH_DIR": "d",
+        os.environ.update({"CLAUDECODE": "1", "CLAUDE_CODE_ENTRYPOINT": "x", "AI_AGENT": "d",
                            "CLAUDE_CONFIG_DIR": "/c", "PATH_KEEP_ME": "y"})
         env = runtime_bg.child_env()
         self.assertNotIn("CLAUDECODE", env)
         self.assertNotIn("CLAUDE_CODE_ENTRYPOINT", env)
-        self.assertNotIn("ORCA_CHAT_SCRATCH_DIR", env)
+        self.assertNotIn("AI_AGENT", env)
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], "/c")
         self.assertEqual(env["PATH_KEEP_ME"], "y")
 

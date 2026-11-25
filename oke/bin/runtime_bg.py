@@ -53,10 +53,10 @@ def claude_argv():
 def child_env():
     """The caller's environment without the variables that make claude think it runs
     nested inside the caller's session (or inside the caller's host)."""
-    # shortcut: drops by prefix (measured with an Orca-hosted parent); keep-list grows if a needed one shows up
+    # shortcut: drops by prefix; keep-list grows if a needed one shows up
     keep = ("CLAUDE_CONFIG_DIR",)
     return dict((k, v) for k, v in os.environ.items()
-                if k in keep or not k.startswith(("CLAUDECODE", "CLAUDE_CODE_", "ORCA_", "AI_AGENT")))
+                if k in keep or not k.startswith(("CLAUDECODE", "CLAUDE_CODE_", "AI_AGENT")))
 
 
 def run_claude(args, cwd=None):
