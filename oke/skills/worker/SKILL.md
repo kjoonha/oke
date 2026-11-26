@@ -57,7 +57,7 @@ The board shows 결정 필요, 막힌 것 and 확인 필요 under your tasks; �
 
 ## Report
 
-Before every turn ends, overwrite `report.md` in your folder:
+Before every turn ends, overwrite `report.md` in your folder. Your PM never reads your chat: a report or an answer goes in `report.md` (an urgent finding through `send`, as above).
 
 ```
 type: done | question | failed | waiting

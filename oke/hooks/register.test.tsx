@@ -19,6 +19,8 @@ let tickRole = 'worker'
 let tickBoard: unknown = BOARD
 let answeredNow: string[] = []
 let autoCompact = true
+let contextPercent = 34
+let nextWork = ''
 let okeState = true
 let draft = ''
 let mailFlag = false
@@ -41,7 +43,7 @@ function answer(args: readonly string[]) {
     mailText = null
     return text ? { text, names: ['1.txt'] } : { text: null }
   }
-  if (args[0] === 'boundary') return { role: tickRole, answered: answeredNow }
+  if (args[0] === 'boundary') return { role: tickRole, answered: answeredNow, next: nextWork, min_percent: 30 }
   if (args[0] === 'path-check') {
     if (failCheck) return undefined
     const file = String(args[args.indexOf('--path') + 1])
@@ -61,7 +63,7 @@ function engine(on: any, runs: Run[], prompts: string[]) {
   on('command.register', () => ({ value: { command: 'oke-board' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('session.id', () => ({ value: 'sid-1' }))
-  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000, percent: 34, breakdown: { isAutoCompactEnabled: autoCompact } }, rateLimits: [], cost: { usd: 1.2 } } }))
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000, percent: contextPercent, breakdown: { isAutoCompactEnabled: autoCompact } }, rateLimits: [], cost: { usd: 1.2 } } }))
   on('session.model', () => ({ value: 'claude-sonnet-5-5' }))
   on('session.start', (_: any, e: any) => ({ cwd: e.cwd }))
   on('prompt.submit', (_: any, e: any) => {
@@ -519,6 +521,54 @@ test('a worker compacts once at each new task boundary', async ($, on) => {
   await clock.advance(10)
   expect(compacts.length).toBe(1)  // the same boundary
   answeredNow = []
+})
+
+test('a boundary compaction keeps what the next work needs', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  engine(on, [], [])
+  on('fs.write', () => ({ value: undefined }))
+  const compacts: any[] = []
+  on('session.compact', (_: any, e: any) => {
+    compacts.push(e)
+    return { skip: 'test' }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  nextWork = 'job calc-mul is open (working): add mul'
+  answeredNow = ['calc-sub:1']
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await clock.advance(10)
+  expect(compacts.length).toBe(1)
+  expect(compacts[0].instructions).toMatch(/report for calc-sub:1 is written/)
+  expect(compacts[0].instructions).toMatch(/Next: job calc-mul is open \(working\): add mul\. Keep in full/)
+  answeredNow = []
+  nextWork = ''
+})
+
+test('a boundary with little context used does not compact', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  engine(on, [], [])
+  on('fs.write', () => ({ value: undefined }))
+  contextPercent = 12
+  const compacts: any[] = []
+  on('session.compact', (_: any, e: any) => {
+    compacts.push(e)
+    return { skip: 'test' }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  answeredNow = ['calc-sub:1']
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await clock.advance(10)
+  expect(compacts.length).toBe(0)
+  contextPercent = 40
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await clock.advance(10)
+  expect(compacts.length).toBe(0)  // that boundary passed: the next one decides again
+  answeredNow = []
+  contextPercent = 34
 })
 
 test('auto-compact turned off by the person wins over a boundary', async ($, on) => {

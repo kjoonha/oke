@@ -512,6 +512,7 @@ class SpawnBase(Base):
         Base.setUp(self)
         self.repo = self.git_repo("toy")
         runtime_herdr.DIALOG_POLL = 0
+        runtime_herdr.PROMPT_POLL = 0
         self.pm = "pm-toy"
 
     def job(self, name, phase):
@@ -579,8 +580,8 @@ class TestSpawn(SpawnBase):
         self.fake(spawn_ok())
         self.assertEqual(self.cli("spawn", a, "--split-from", "w1:p1"), 0)
         self.assertEqual([c[:2] for c in self.calls()],
-                         [["agent", "list"], ["pane", "split"], ["agent", "start"],
-                          ["agent", "prompt"], ["agent", "get"], ["pane", "get"]])
+                         [["agent", "list"], ["pane", "split"], ["agent", "start"], ["agent", "read"],
+                          ["agent", "prompt"], ["agent", "get"], ["agent", "read"], ["pane", "get"]])
         rec = self.children()["fix-a-w1"]
         self.assertEqual((rec["session"], rec["pane"], rec["seq"], rec["job"], rec["role"]),
                          ("s-1", "w1:p9", 4, "fix-a", "worker"))
@@ -686,6 +687,50 @@ class TestSpawn(SpawnBase):
         self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
         prompt = self.argv_of("agent", "prompt")[0]
         self.assertEqual(prompt[4:], ["--wait", "--until", "working", "--until", "blocked", "--timeout", "20000"])
+
+    def test_spawn_types_a_lost_first_prompt_again(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        s = spawn_ok()
+        s["agent read"] = [{"stdout": " Claude Code\n > \n", "exit": 0}]  # no prompt on screen
+        s["agent get"] = [AGENT("working"), AGENT("idle")]
+        self.fake(s)
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
+        self.assertEqual(len(self.argv_of("agent", "prompt")), 3)  # the first and two more, then it stops
+
+    def test_spawn_does_not_take_an_earlier_copy_of_the_prompt_for_this_one(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        prompt = oke.FIRST_PROMPT.format(role="worker", path=os.path.abspath(a))
+        s = spawn_ok()
+        s["agent read"] = [{"stdout": " > " + prompt + "\n", "exit": 0}]  # a resumed session's old one
+        s["agent get"] = [AGENT("working"), AGENT("idle")]
+        self.fake(s)
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
+        self.assertEqual(len(self.argv_of("agent", "prompt")), 3)
+
+    def test_spawn_does_not_type_the_prompt_again_into_a_busy_agent(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        s = spawn_ok()  # herdr says working throughout
+        s["agent read"] = [{"stdout": " Claude Code\n", "exit": 0}]
+        s["agent prompt"] = [J({"type": "agent_prompted"}), E("agent_not_idle")]
+        self.fake(s)
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0, self.err)
+        self.assertEqual(len(self.argv_of("agent", "prompt")), 1)
+
+    def test_spawn_types_a_first_prompt_on_screen_once(self):
+        self.job("fix-a", "working")
+        a = self.assignment("fix-a-w1", "worker", "fix-a")
+        prompt = oke.FIRST_PROMPT.format(role="worker", path=os.path.abspath(a))
+        s = spawn_ok()
+        # claude wraps the prompt over lines on a narrow pane
+        s["agent read"] = [{"stdout": " Claude Code\n", "exit": 0},  # before it is typed
+                           {"stdout": " > " + prompt[:30] + "\n   " + prompt[30:] + "\n", "exit": 0}]
+        s["agent get"] = [AGENT("working"), AGENT("idle")]  # a retype would be allowed
+        self.fake(s)
+        self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
+        self.assertEqual(len(self.argv_of("agent", "prompt")), 1)
 
     def test_spawn_survives_a_stalled_first_prompt(self):
         self.job("fix-a", "working")

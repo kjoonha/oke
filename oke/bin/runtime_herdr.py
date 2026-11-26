@@ -120,6 +120,8 @@ def missing_commands():
 TRUST_MARKER = "trust this folder"
 DIALOG_TRIES = 5
 DIALOG_POLL = 1.0
+PROMPT_TRIES = 3  # looks for the first prompt on screen, typing it again after each miss but the last
+PROMPT_POLL = 3.0  # seconds claude gets to finish starting before the next look
 START_TIMEOUT_MS = 90000
 
 
@@ -151,6 +153,9 @@ def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: No
         answer_startup_dialogs(agent, trusted)
     registered()
 
+    # a resumed session shows its earlier prompts: only a new copy counts as this one
+    shown = prompt_count(agent, prompt) or 0
+
     # Wait until the first turn starts: for a few seconds after a prompt herdr still
     # says idle, and `oke wait` would read that as "idle with no report".
     try:
@@ -170,7 +175,44 @@ def start_agent(agent, pane, claude_args, prompt, trusted, registered=lambda: No
             if e.code != "timeout":
                 raise
         info = herdr("agent", "get", agent).get("agent", {})
+    # Seen live: a prompt typed while claude was still starting vanished, while herdr
+    # already said working (the startup itself), so the session never had a first turn.
+    # Give claude time to finish starting, then type it again.
+    for attempt in range(PROMPT_TRIES):
+        if prompt_seen(agent, prompt, shown):
+            break
+        time.sleep(PROMPT_POLL)
+        if attempt == PROMPT_TRIES - 1 or prompt_seen(agent, prompt, shown):
+            break  # it showed up late, or the last look: `oke wait` reports a silent child
+        info = herdr("agent", "get", agent).get("agent", {})
+        if info.get("agent_status") not in ("idle", "done"):
+            continue  # still starting, or at a dialog: herdr refuses a prompt now; look again
+        try:
+            herdr("agent", "prompt", agent, prompt,
+                  "--wait", "--until", "working", "--until", "blocked", "--timeout", "20000")
+        except HerdrError as e:
+            if e.code not in ("agent_prompt_stalled", "timeout", "agent_not_idle", "agent_blocked"):
+                raise
+        info = herdr("agent", "get", agent).get("agent", {})
     return info
+
+
+def prompt_count(agent, prompt):
+    """How often the start of `prompt` is on the agent's screen (typed or taken), or None
+    when the screen cannot be read."""
+    try:
+        screen = herdr_text("agent", "read", agent, "--source", "recent-unwrapped", "--lines", "400")
+    except HerdrError:
+        return None
+    return "".join(screen.split()).count("".join(prompt.split())[:40])
+
+
+def prompt_seen(agent, prompt, shown=0):
+    """Whether the screen shows `prompt` more often than the `shown` copies it had before
+    it was typed. Unsure (the read failed) counts as seen: a second copy of the prompt is
+    worse than a retry missed."""
+    count = prompt_count(agent, prompt)
+    return count is None or count > shown
 
 
 def startup_keys(screen, trusted):

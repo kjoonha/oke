@@ -265,23 +265,31 @@ async function notifyAsks($: any, tree: BoardPm[]) {
   }
 }
 
-const COMPACT_NOTE ='OKe task boundary: the report for this assignment is written. Keep the role, the job, '
-  + 'the assignment path and seq, decisions made and why, open questions and the files touched. '
-  + 'Drop tool output and exploration details.'
+/** The compaction instructions at a task boundary: what comes next decides what to keep. */
+function compactNote(done: string[], next: string): string {
+  return `OKe task boundary: the report for ${done.join(', ')} is written. `
+    + (next ? `Next: ${next}. Keep in full what that next work needs; of the finished task keep only what it still needs. `
+      : '')
+    + 'Keep the role, the assignment paths and seqs, decisions made and why, open questions and the files touched. '
+    + 'Drop tool output and exploration details.'
+}
 
 /** At a task boundary (a report for an assignment's current seq, new since the last
- * look) a PM, worker or reviewer compacts, unless the person turned auto-compact off. */
+ * look) a PM, worker or reviewer compacts, unless the person turned auto-compact off or
+ * the context is still less full than config `compact_min_percent`. */
 async function compactAtBoundary($: any): Promise<boolean> {
   if (role !== 'pm' && role !== 'worker' && role !== 'reviewer') return false
   const out = await oke($, ['boundary', '--pane', pane as string])
   if (!out) return false
   const seen = await read($, answeredSeen)
-  const fresh = (out.answered as string[]).some(a => !seen.includes(a))
+  const done = (out.answered as string[]).filter(a => !seen.includes(a))
   await update($, answeredSeen, () => out.answered)
-  if (!fresh) return false
+  if (!done.length) return false
   try {
     const u = await $.session.usage({ breakdown: 'summary' })
     if (u.context?.breakdown?.isAutoCompactEnabled === false) return false
+    // little used: the finished task's details cost little and may still help
+    if (typeof u.context?.percent === 'number' && u.context.percent < (out.min_percent ?? 30)) return false
   } catch {
     return false
   }
@@ -289,7 +297,7 @@ async function compactAtBoundary($: any): Promise<boolean> {
   inTurn = null
   $.clock.after(0, async () => {
     try {
-      await $.session.compact({ instructions: COMPACT_NOTE })
+      await $.session.compact({ instructions: compactNote(done, out.next ?? '') })
     } finally {
       if (inTurn === null) {
         inTurn = false

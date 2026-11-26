@@ -79,6 +79,8 @@ def load_config():
         # effortLevel per role ("low" .. "max"); a lean child of a role left out uses the default
         "effort": {},
         "theme": "disco",  # the band's characters: disco (default), slime, mushroom, cute-dog, cute-cat, ... (README lists all)
+        # a PM, worker or reviewer compacts at a task boundary only from this much context used
+        "compact_min_percent": 30,
     }
     try:
         with io.open(os.path.join(home, "config.json"), encoding="utf-8") as f:
@@ -2390,12 +2392,46 @@ def answered(folder):
     return seq
 
 
+def assignment_goal(folder):
+    """The first line of an assignment's body (past its header and headings), shortened."""
+    try:
+        with io.open(os.path.join(folder, "assignment.md"), encoding="utf-8-sig") as f:
+            text = f.read()
+    except (IOError, OSError, UnicodeDecodeError):
+        return ""
+    body = text.split("\n---\n", 1)[1] if "\n---\n" in text else text
+    for line in body.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            return line[:160]
+    return ""
+
+
+def next_work(role, name, record, open_jobs):
+    """What the agent will do after the task it just answered, in words, for the
+    compaction at that boundary: its unread mail, a PM's jobs still open."""
+    parts = []
+    mail = [t for _, t in inbox_messages(name)][:3]
+    if mail:
+        parts.append("mail waiting: " + " | ".join(t[:300] for t in mail))
+    if role == "pm":
+        for job, phase, folder in open_jobs:
+            goal = assignment_goal(folder)
+            parts.append("job %s is open (%s)%s" % (job, phase, ": " + goal if goal else ""))
+    elif record.get("job"):
+        parts.append("the PM may come back on job %s: %s" % (record["job"], (
+            "a new review round of the same assignment" if role == "reviewer"
+            else "review findings or a new seq of the same assignment")))
+    return "; ".join(parts)
+
+
 def cmd_boundary(args):
     """The assignments this PM, worker or reviewer has answered, as `job:seq`. A new
-    one since the mod last looked is a task boundary, where the mod compacts."""
+    one since the mod last looked is a task boundary, where the mod compacts when the
+    context is at least `min_percent` full, keeping what `next` needs."""
     state = load_state()
     me, _ = whoami(state, args.pane)
-    out = {"role": None, "answered": []}
+    out = {"role": None, "answered": [], "next": "", "min_percent": load_config().get("compact_min_percent", 30)}
     if me is not None:
         role, name, key, record = me
         out["role"] = role
@@ -2406,11 +2442,18 @@ def cmd_boundary(args):
             channels = [(record["job"], agent_folder(role, name, key, record))]
         else:
             channels = []
+        open_jobs = []
         for job, folder in channels:
             seq = answered(folder)
             if seq is not None:
                 out["answered"].append("%s:%s" % (job, seq))
-    print(json.dumps(out))
+            info = state["jobs"].get(job, {})
+            if info.get("phase") not in (None, "done", "failed") and not info.get("held"):
+                # answered and still open: the next step of that job comes back to the PM
+                open_jobs.append((job, info["phase"], folder))
+        if role in ("pm", "worker", "reviewer"):
+            out["next"] = next_work(role, name, record, open_jobs)
+    print(json.dumps(out, ensure_ascii=False))
     return 0
 
 

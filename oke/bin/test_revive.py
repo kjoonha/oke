@@ -627,7 +627,7 @@ class TestBoundary(ReviveBase):
     def test_a_report_for_the_current_seq_is_a_boundary(self):
         self.write_file(os.path.join(self.child_dir, "assignment.md"), "seq: 2\n---\nwork\n")
         self.write_file(os.path.join(self.child_dir, "report.md"), "seq: 1\ntype: done\n---\nold\n")
-        self.assertEqual(self.boundary("w1:p5"), {"role": "worker", "answered": []})
+        self.assertEqual(self.boundary("w1:p5")["answered"], [])
         self.write_file(os.path.join(self.child_dir, "report.md"), "seq: 2\ntype: done\n---\nnew\n")
         self.assertEqual(self.boundary("w1:p5")["answered"], ["fix-a:2"])
 
@@ -638,10 +638,45 @@ class TestBoundary(ReviveBase):
         # a subagent still runs for it: not the end of that task yet
         self.write_file(os.path.join(folder, "report.md"),
                         "seq: 1\ntype: waiting\non: planner subagent a1\n---\n.\n")
-        self.assertEqual(self.boundary("w1:p3"), {"role": "pm", "answered": []})
+        self.assertEqual(self.boundary("w1:p3")["answered"], [])
         self.write_file(os.path.join(folder, "report.md"), "seq: 1\ntype: done\n---\nplan\n")
-        self.assertEqual(self.boundary("w1:p3"), {"role": "pm", "answered": ["fix-a:1"]})
+        self.assertEqual(self.boundary("w1:p3")["answered"], ["fix-a:1"])
         self.assertEqual(self.boundary("w7:p1")["answered"], [])
+
+
+    def test_the_boundary_names_the_next_work_and_the_threshold(self):
+        self.write_file(os.path.join(self.child_dir, "assignment.md"), "seq: 1\n---\nwork\n")
+        self.write_file(os.path.join(self.child_dir, "report.md"), "seq: 1\ntype: done\n---\nnew\n")
+        out = self.boundary("w1:p5")
+        self.assertEqual(out["min_percent"], 30)
+        self.assertIn("the PM may come back on job fix-a", out["next"])
+        self.assertEqual(self.cli("send", "fix-a-w1", "also fix mul"), 0, self.err)
+        self.assertIn("mail waiting: ", self.boundary("w1:p5")["next"])
+        self.assertIn("also fix mul", self.boundary("w1:p5")["next"])
+        self.write_file(os.path.join(self.home, "config.json"), '{"compact_min_percent": 50}')
+        self.assertEqual(self.boundary("w1:p5")["min_percent"], 50)
+
+    def test_a_pms_next_work_is_its_other_open_jobs(self):
+        self.job("fix-b", "working")
+        state = oke.load_state()
+        state["jobs"]["fix-b"]["pm"] = state["jobs"]["fix-a"]["pm"]
+        oke.save_state(state)
+        for job, seq_line in (("fix-a", "type: done"), ("fix-b", None)):
+            folder = oke.pm_job_dir(job)
+            if not os.path.isdir(folder):
+                os.makedirs(folder)
+            self.write_file(os.path.join(folder, "assignment.md"), "seq: 1\n---\n## goal\n%s goal\n" % job)
+            if seq_line:
+                self.write_file(os.path.join(folder, "report.md"), "seq: 1\n%s\n---\n.\n" % seq_line)
+        out = self.boundary("w1:p3")
+        self.assertEqual(out["answered"], ["fix-a:1"])
+        self.assertIn("job fix-b is open (", out["next"])
+        self.assertIn("fix-b goal", out["next"])
+        self.assertIn("job fix-a is open (", out["next"])  # answered, but it comes back
+        state = oke.load_state()
+        state["jobs"]["fix-b"]["held"] = True
+        oke.save_state(state)
+        self.assertNotIn("fix-b", self.boundary("w1:p3")["next"])
 
 
 class TestApiRetry(ReviveBase):
