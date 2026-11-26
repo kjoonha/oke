@@ -497,7 +497,12 @@ export type Brief = { job: string, path: string, brief: string }
 /** Whether `text` holds `word` whole: not inside a longer name or path. */
 function holdsWord(text: string, word: string): boolean {
   const esc = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`(^|[^a-z0-9_.-])${esc}(?![a-z0-9_.-])`).test(text)
+  return new RegExp(`(^|[^a-z0-9_.-])${esc}(?![a-z0-9_-]|\\.[a-z0-9_])`).test(text)
+}
+
+/** `text` without its absolute paths: a job named like its repo folder is not named by the path. */
+function withoutPaths(text: string): string {
+  return text.replace(/(^|[^a-z0-9_.-])([a-z]:)?\/[\x21-\x7e]*/g, '$1 ')
 }
 
 /** The plan approval popup shows the plan itself: a question that names a job awaiting
@@ -511,8 +516,9 @@ export function withBriefs(questions: any[], briefs: Brief[], jobs: string[] = [
   const out = questions.map(q => {
     if (!q || q.multiSelect || !Array.isArray(q.options) || !q.options.length) return q
     const text = norm(`${q.question ?? ''} ${q.header ?? ''}`)
-    let hit = briefs.filter(b => holdsWord(text, b.job.toLowerCase()))
-    if (!hit.length && !jobs.some(j => holdsWord(text, j.toLowerCase()))) {
+    const words = withoutPaths(text)
+    let hit = briefs.filter(b => holdsWord(words, b.job.toLowerCase()))
+    if (!hit.length && !jobs.some(j => holdsWord(words, j.toLowerCase()))) {
       const byPath = briefs.filter(b => b.path && holdsWord(text, norm(b.path)))
       if (byPath.length === 1) hit = byPath
     }

@@ -1066,4 +1066,9 @@ test('the plan approval question shows the job brief as its first option preview
   const two = [...briefs, { job: 'docs', path: 'c:/work/conv', brief: 'docs brief' }]
   expect(withBriefs(q('c:/work/conv 에서 작업합니다'), two)).toBeNull()
   expect(withBriefs(q('c:/work/conv 의 docs 계획'), two)![0].options[0].preview).toBe('docs brief')
+  // a job named like its repo folder is not named by the path; a sentence's period ends a name
+  const conv = [{ job: 'conv', path: 'c:/work/conv', brief: 'conv brief' }]
+  expect(withBriefs(q('c:/work/conv 의 fix-b 를 merge 할까요?'), conv, ['conv', 'fix-b'])).toBeNull()
+  expect(withBriefs(q('worktree oke/k-to-c.'), briefs)).not.toBeNull()
+  expect(withBriefs(q('c:/work/conv 에서 작업합니다.'), briefs, ['k-to-c'])).not.toBeNull()
 })

@@ -1345,7 +1345,8 @@ class TestOutputs(PmBase):
         self.assertIn(u"1. 고친다", self.out)
         self.assertIn("## Check command", self.out)
         self.assertNotIn("Impact elsewhere", self.out)
-        self.assertTrue(lines[-1].startswith("plan: "))
+        self.assertTrue(lines[2].startswith("plan: "))
+        self.assertLess(self.out.index("## Check command"), self.out.index("## Steps"))
         # the mod's form: only jobs awaiting approval
         self.assertEqual(self.cli("job", "brief", "--json"), 0, self.err)
         self.assertEqual(json.loads(self.out.splitlines()[-1]), {"briefs": [], "jobs": ["small"]})

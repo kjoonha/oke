@@ -2724,25 +2724,26 @@ def cmd_compact_hook(args):
 
 # ---------------------------------------------------------------- job
 
-BRIEF_SECTIONS = ("Workspace", "Approach", "Steps", "Acceptance criteria", "Check command",
-                  "Impact elsewhere", "Questions for the user")
+# what the user decides on first, the steps last: a long brief is cut short in the popup
+BRIEF_SECTIONS = ("Workspace", "Approach", "Acceptance criteria", "Check command",
+                  "Impact elsewhere", "Questions for the user", "Steps")
 
 
 def job_brief(job):
-    """The plan as the user reads it before approving: the job's absolute path first, then
-    the plan's main sections, then the plan file."""
+    """The plan as the user reads it before approving: the job's absolute path and plan file
+    first, then the plan's main sections."""
     info = load_state()["jobs"].get(job)
     if info is None:
         raise StateError("no job " + job)
-    lines = ["job: %s" % job, "path: %s" % (native_path(info["path"]) if info.get("path") else "path?"), ""]
+    lines = ["job: %s" % job, "path: %s" % (native_path(info["path"]) if info.get("path") else "path?"),
+             "plan: %s" % native_path(os.path.join(oke_home(), "jobs", job, "plan.md")), ""]
     for name in BRIEF_SECTIONS:
         text = plan_section(job, name)
         if not text or (name in ("Impact elsewhere", "Questions for the user")
                         and text.lower().startswith("none")):
             continue
         lines += ["## " + name, text, ""]
-    lines.append("plan: %s" % native_path(os.path.join(oke_home(), "jobs", job, "plan.md")))
-    return "\n".join(lines)
+    return "\n".join(lines).rstrip("\n")
 
 
 def cmd_job(args):
