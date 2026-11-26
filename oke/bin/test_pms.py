@@ -491,7 +491,7 @@ class TestJobSplit(PmBase):
         PmBase.setUp(self)
         self.pmc("add", "a")
         self.assertEqual(self.new("fix-a", "a"), 0, self.err)
-        self.write("home/jobs/fix-a/intake.md", "job: fix-a\n---\n## 원하는 결과\nboth\n")
+        self.write("home/jobs/fix-a/intake.md", "job: fix-a\n---\n## Desired result\nboth\n")
         self.assertEqual(self.cli("interview", "fix-a", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
         self.assertEqual(self.cli("job", "phase", "fix-a", "planning"), 0, self.err)
 
@@ -947,7 +947,7 @@ class TestAfterNotices(PmBase):
 
     def test_an_approval_cut_before_its_assignment_is_unassigned_not_a_done_report(self):
         self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
-        self.write("home/jobs/fix-a/pm/assignment.md", "agent: a\nrole: pm\njob: fix-a\nseq: 1\n---\n## 이번 지시\n\nkind: answer\n")  # planning's last
+        self.write("home/jobs/fix-a/pm/assignment.md", "agent: a\nrole: pm\njob: fix-a\nseq: 1\n---\n## Instruction\n\nkind: answer\n")  # planning's last
         self.write("home/jobs/fix-a/pm/report.md", "type: done\nseq: 1\n---\nthe plan\n")
         st = oke.load_state()
         st["jobs"]["fix-a"]["sent_seq"] = 1
@@ -957,13 +957,13 @@ class TestAfterNotices(PmBase):
         item = self.kinds()["fix-a"]  # compacted here: the plan report must not read as work done
         self.assertEqual(item["kind"], "unassigned")
         self.assertIn("was never written", item["text"])
-        self.write("home/jobs/fix-a/pm/assignment.md", "agent: a\nrole: pm\njob: fix-a\nseq: 2\n---\n## 이번 지시\n\nkind: execute\n")
+        self.write("home/jobs/fix-a/pm/assignment.md", "agent: a\nrole: pm\njob: fix-a\nseq: 2\n---\n## Instruction\n\nkind: execute\n")
         self.assertEqual(self.kinds()["fix-a"]["kind"], "unsent")  # written, not yet sent: the next step
         st = oke.load_state()
         st["jobs"]["fix-a"]["sent_seq"] = 2
         oke.save_state(st)
         self.assertNotIn("fix-a", self.kinds())  # sent: working, nothing to ask
-        self.write("home/jobs/fix-a/pm/assignment.md", "agent: a\nrole: pm\njob: fix-a\nseq: 3\n---\n## 이번 지시\n\nkind: answer\n")
+        self.write("home/jobs/fix-a/pm/assignment.md", "agent: a\nrole: pm\njob: fix-a\nseq: 3\n---\n## Instruction\n\nkind: answer\n")
         st = oke.load_state()
         st["jobs"]["fix-a"]["sent_seq"] = 3
         oke.save_state(st)
@@ -975,7 +975,7 @@ class TestAfterNotices(PmBase):
         self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
         self.write("home/jobs/fix-a/pm/report.md", "type: done\nseq: 1\n---\nthe plan\n")
         # "proceed as if no impact" went out while the plan waited; its report is not in yet
-        self.write("home/jobs/fix-a/pm/assignment.md", "agent: a\nrole: pm\njob: fix-a\nseq: 2\n---\n## 이번 지시\n\nkind: answer\n")
+        self.write("home/jobs/fix-a/pm/assignment.md", "agent: a\nrole: pm\njob: fix-a\nseq: 2\n---\n## Instruction\n\nkind: answer\n")
         st = oke.load_state()
         st["jobs"]["fix-a"]["sent_seq"] = 2
         oke.save_state(st)
@@ -994,7 +994,7 @@ class TestAfterNotices(PmBase):
 
     def research_sent(self, seq, kind):
         self.write("home/jobs/look/pm/assignment.md",
-                   "agent: a\nrole: pm\njob: look\nseq: %d\n---\n## 이번 지시\n\nkind: %s\n" % (seq, kind))
+                   "agent: a\nrole: pm\njob: look\nseq: %d\n---\n## Instruction\n\nkind: %s\n" % (seq, kind))
         st = oke.load_state()
         st["jobs"]["look"]["sent_seq"] = seq
         oke.save_state(st)
@@ -1185,8 +1185,8 @@ class TestOutputs(PmBase):
         oke.save_state(st)
 
     def plan(self, job, worktree=True):
-        self.write("home/jobs/%s/plan.md" % job, "job: %s\n---\n## 작업 위치\n%s\n" % (
-            job, ("oke/" + job) if worktree else u"없음"))
+        self.write("home/jobs/%s/plan.md" % job, "job: %s\n---\n## Workspace\n%s\n" % (
+            job, ("oke/" + job) if worktree else u"none"))
 
     def report(self, job, child, verdict=None):
         body = ("verdict: %s\n" % verdict) if verdict else "done\n"
@@ -1310,8 +1310,8 @@ class TestOutputs(PmBase):
         self.git(self.repo, "add", "x.txt")  # the user's uncommitted change
         self.assertEqual(self.cli("job", "phase", "small", "working"), 1)
         self.assertIn("x.txt", self.err)
-        self.assertIn(u"이어받을 수정", self.err)
-        self.write("home/jobs/small/plan.md", u"job: small\n---\n## 작업 위치\nmain 폴더에서 직접\n이어받을 수정: x.txt\n")
+        self.assertIn(u"Takes over", self.err)
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nmain checkout\nTakes over: x.txt\n")
         self.assertEqual(oke.plan_uncommitted("small"), ["x.txt"])
         self.assertEqual(self.cli("job", "phase", "small", "working"), 0, self.err)
         self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 1)  # x.txt is the job's now
@@ -1326,27 +1326,27 @@ class TestOutputs(PmBase):
         self.git(self.repo, "add", "README.md")
         self.git(self.repo, "commit", "-qm", "r", "README.md")  # 문서.md stays staged, uncommitted
         self.git(self.repo, "mv", "README.md", "READ ME.md")
-        self.write("home/jobs/small/plan.md", u"job: small\n---\n## 작업 위치\nmain 폴더에서 직접\n이어받을 수정: 문서.md\n")
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nmain checkout\nTakes over: 문서.md\n")
         self.assertEqual(self.cli("job", "phase", "small", "working"), 1)
         self.assertIn("READ ME.md", self.err)
         self.assertNotIn(u"문서", self.err)
         self.write("home/jobs/small/plan.md",
-                   u"job: small\n---\n## 작업 위치\nmain 폴더에서 직접\n이어받을 수정: `문서.md`, \"READ ME.md\"\n")
+                   u"job: small\n---\n## Workspace\nmain checkout\nTakes over: `문서.md`, \"READ ME.md\"\n")
         self.assertEqual(self.cli("job", "phase", "small", "working"), 0, self.err)
 
-    def test_an_old_plan_still_reads(self):
+    def test_the_workspace_section(self):
         self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
-        self.write("home/jobs/small/plan.md", u"job: small\n---\n## worktree\n없음\n미커밋: 포함: a.py, b.py\n")
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nmain checkout\nTakes over: a.py, b.py\n")
         self.assertEqual(oke.plan_uncommitted("small"), ["a.py", "b.py"])
-        self.write("home/jobs/small/plan.md", u"job: small\n---\n## worktree\noke/small\n")
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nnew worktree (branch oke/small)\n")
         self.assertTrue(oke.plan_worktree("small"))
-        self.write("home/jobs/small/plan.md", u"job: small\n---\n## 작업 위치\nmain 폴더에서 직접\n이어받을 수정: 없음\n")
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nmain checkout\nTakes over: none\n")
         self.assertEqual(oke.plan_uncommitted("small"), [])
         self.assertFalse(oke.plan_worktree("small"))
 
     def test_a_file_under_oke_slash_job_is_not_a_worktree(self):
         self.assertEqual(self.new("bin", "a", "--path", self.repo), 0, self.err)
-        self.write("home/jobs/bin/plan.md", u"job: bin\n---\n## 작업 위치\nmain 폴더에서 직접\n이어받을 수정: oke/bin/x.py\n")
+        self.write("home/jobs/bin/plan.md", u"job: bin\n---\n## Workspace\nmain checkout\nTakes over: oke/bin/x.py\n")
         self.assertFalse(oke.plan_worktree("bin"))
 
     def test_a_start_in_a_worktree_ignores_the_main_checkout(self):

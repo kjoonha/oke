@@ -556,7 +556,7 @@ const TODO: Record<string, [string, string | undefined]> = {
 
 const TODO_ORDER = ['in_progress', 'pending', 'completed']
 
-/** The lines of one `## <title>` section of a board.md, an empty marker (없음, none, -) dropped. */
+/** The lines of one `## <title>` section of a board.md, an empty marker (none, -) dropped. */
 function section(board: string, title: string, max: number): string[] {
   const lines = board.split(/\r?\n/).map(l => l.trim())
   const at = lines.findIndex(l => l.startsWith('##') && l.slice(2).replace(/\(.*$/, '').trim() === title)
@@ -564,16 +564,16 @@ function section(board: string, title: string, max: number): string[] {
   const end = lines.findIndex((l, i) => i > at && l.startsWith('## '))
   return lines.slice(at + 1, end < 0 ? undefined : end)
     .map(l => l.replace(/^[-*]\s+/, ''))
-    .filter(l => l && !/^(없음|none|-)$/i.test(l))
+    .filter(l => l && !/^(none|-)$/i.test(l))
     .slice(0, max)
 }
 
 /** board.md sections shown under an agent's todos: title, mark, label, color. */
 const NOTES: [string, string, string, string][] = [
-  ['결정 필요', '?', 'decide', INK.yellow],
-  ['막힌 것', '✗', 'blocked', INK.red],
-  ['확인 필요', '!', 'check', INK.magenta],
-]  // 결정 (made already) asks nothing of the person: it shows only in the opened board.md
+  ['Decision needed', '?', 'decide', INK.yellow],
+  ['Blocked', '✗', 'blocked', INK.red],
+  ['To check', '!', 'check', INK.magenta],
+]  // Decisions (made already) asks nothing of the person: it shows only in the opened board.md
 
 const TASK_TOOLS = ['TaskCreate', 'TaskUpdate', 'TodoWrite']
 
@@ -1381,7 +1381,7 @@ export const register: Register = on => {
     const now = Date.now()
     if (tree.length === 0 && mine.length === 0) return <Text dimColor>No OKe work yet.</Text>
 
-    // in progress first, each with how it goes (board.md's 지금), then planned, then done
+    // in progress first, each with how it goes (board.md's Now), then planned, then done
     const todoRows = (list: Todo[], now: string[] = []) => TODO_ORDER.flatMap(status =>
       list.filter(t => (TODO[t.status] ? t.status : 'pending') === status).flatMap(t => {
         const [tm, tc] = TODO[status]!
@@ -1432,7 +1432,7 @@ export const register: Register = on => {
             <Text dimColor>{isOpen ? '  ▾' : '  ▸'}</Text>
           </Button>
           <Box flexDirection="column" paddingLeft={2}>
-            {todoRows(n.todos ?? [], section(n.board, '지금', 3))}
+            {todoRows(n.todos ?? [], section(n.board, 'Now', 3))}
             {notes}
             {isOpen
               ? [

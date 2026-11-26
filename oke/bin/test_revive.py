@@ -556,8 +556,8 @@ class TestTick(ReviveBase):
         self.assertIn("gave_up fix-a-w1", again["events"][0])
 
     def test_board_tree(self):
-        self.write_file(os.path.join(oke.pm_dir(self.pm), "board.md"), "## 지금\nplanning\n")
-        self.write_file(os.path.join(self.child_dir, "board.md"), "## 지금\ncoding\n")
+        self.write_file(os.path.join(oke.pm_dir(self.pm), "board.md"), "## Now\nplanning\n")
+        self.write_file(os.path.join(self.child_dir, "board.md"), "## Now\ncoding\n")
         out = self.tick("w7:p1", [AG(None, pane="w7:p1", session="s-o"),
                                   AG("pm-toy", pane="w1:p3", status="working"),
                                   AG("fix-a-w1", pane="w1:p5", status="idle")], "--board")

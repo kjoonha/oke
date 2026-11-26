@@ -71,6 +71,7 @@ def load_config():
     home = oke_home()
     config = {
         "autonomy": "balanced",
+        "language": "",  # what agents write for people; empty: the language the user writes in
         "wiki_path": os.path.join(home, "wiki"),
         "models": {"pm": "opus", "worker": "opus", "reviewer": "opus"},
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
@@ -1094,7 +1095,7 @@ def write_pm_assignment(state, name):
              u"cwd: %s" % folder.replace("\\", "/"),
              u"wiki: %s" % wiki_dir(name).replace("\\", "/"),
              u"shared_wiki: %s" % shared_wiki().replace("\\", "/"),
-             u"seq: %d" % ((old + 1) if isinstance(old, int) else 1), u"---", u"## 목표",
+             u"seq: %d" % ((old + 1) if isinstance(old, int) else 1), u"---", u"## Goal",
              u"You are PM %s. Each job has one path, which you find while planning (the paths of your" % name,
              u"jobs so far are your places: `$OKE pm list`). Each job has its own assignment at",
              u"$OKE_HOME/jobs/<job>/pm/assignment.md and its own report at $OKE_HOME/jobs/<job>/pm/report.md.",
@@ -2510,7 +2511,7 @@ def cmd_api_retry(args):
             seq = (read_header(os.path.join(f_dir, "assignment.md")) or {}).get("seq")
             report = os.path.join(f_dir, "report.md")
             with io.open(report + ".tmp", "w", encoding="utf-8", newline="\n") as f:  # a wait reads it
-                f.write(u"type: failed\nseq: %s\n---\n## 요약\nAPI error %s: automatic retry stopped "
+                f.write(u"type: failed\nseq: %s\n---\n## Summary\nAPI error %s: automatic retry stopped "
                         u"after %d attempts.\n" % (seq, kind or "unknown", args.attempt))
             replace_file(report + ".tmp", report)
     if marker and os.path.exists(marker):
@@ -2768,7 +2769,7 @@ def cmd_job(args):
         return cancel_children(args.slug, info.get("pm"))
     if args.action == "verify":
         if len([x for x in (args.command, args.accept, args.skip, args.run) if x]) > 1:
-            return fail("give at most one of: the 검증 명령, --accept, --skip, --run")
+            return fail("give at most one of: the Check command, --accept, --skip, --run")
         if args.skip is not None and not args.skip.strip():
             return fail("--skip needs the reason")
         return verify_job(args.slug, args.command, args.accept, args.skip, args.run)  # can take hours
@@ -2954,7 +2955,7 @@ def quality_block(job, review_asg, target):
     (or tree:<sha>) must be a pass under it."""
     rev = criteria_rev(job)
     if review_asg.get("criteria_rev") != rev:
-        return (u"the criteria or the 검증 명령 of %s changed since the review (or the review assignment "
+        return (u"the criteria or the Check command of %s changed since the review (or the review assignment "
                 u"names no criteria_rev): give the reviewer a new instruction with `criteria_rev: %s`"
                 % (job, rev))
     rows = [r for r in ledger_rows(job) if r["check"] == "check" and r["commit"] == target]
@@ -3462,7 +3463,7 @@ def merge_state(job, path=None):
 
 
 def find_bash():
-    """bash for the plan's 검증 명령. On Windows only Git Bash: the `bash` on PATH may be
+    """bash for the plan's Check command. On Windows only Git Bash: the `bash` on PATH may be
     the WSL launcher (System32, WindowsApps), which has no Windows python or tools."""
     if os.name != "nt":
         return shutil.which("bash")
@@ -3630,14 +3631,14 @@ def plan_section(job, name):
 
 
 def plan_command(job):
-    """The 검증 명령: the first backticked span of plan.md's section."""
-    m = re.search(r"`([^`]+)`", plan_section(job, u"검증 명령"))
+    """The Check command: the first backticked span of plan.md's section."""
+    m = re.search(r"`([^`]+)`", plan_section(job, u"Check command"))
     return m.group(1).strip() if m else None
 
 
 def criteria_rev(job):
-    """Changes whenever the acceptance criteria or the 검증 명령 change."""
-    text = plan_section(job, u"수용 기준") + "\n" + (plan_command(job) or "")
+    """Changes whenever the acceptance criteria or the Check command change."""
+    text = plan_section(job, u"Acceptance criteria") + "\n" + (plan_command(job) or "")
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -3670,7 +3671,7 @@ def quality_target(job):
         return fail(no_path(job, info))
     command = plan_command(job)
     if not command:
-        fail(u"plan.md of %s names no 검증 명령: its section's first line is the command in backticks" % job)
+        fail(u"plan.md of %s names no Check command: its section's first line is the command in backticks" % job)
         return 2
     cwd, target = check_dir(info)
     if not target:
@@ -3782,7 +3783,7 @@ def cmd_baseline(args):
                 fail("cannot check out %s for the baseline of %s" % (point[:12], args.job))
                 return 2
         if now["unrunnable"]:  # the previous baseline stays
-            fail(u"the 검증 명령 could not run (exit %d, see %s): fix the command in plan.md, then "
+            fail(u"the Check command could not run (exit %d, see %s): fix the command in plan.md, then "
                  u"`$OKE baseline %s` again" % (now["exit"], log.replace("\\", "/"), args.job))
             return 2
         target = point
@@ -3813,7 +3814,7 @@ def cmd_baseline(args):
 
 
 def cmd_check(args):
-    """Run the 검증 명령 where the job's work is and judge it against the baseline:
+    """Run the Check command where the job's work is and judge it against the baseline:
     0 no new failure, 1 new failures, 2 cannot judge. Written to the ledger by OKe."""
     found = quality_target(args.job)
     if isinstance(found, int):
@@ -3836,7 +3837,7 @@ def cmd_check(args):
             fail("job %s has no baseline: run `$OKE baseline %s` before the work starts" % (args.job, args.job))
         return 2
     if base.get("criteria_rev") != rev:
-        fail(u"the 검증 명령 or the criteria of %s changed since the baseline: run `$OKE baseline %s` again"
+        fail(u"the Check command or the criteria of %s changed since the baseline: run `$OKE baseline %s` again"
              % (args.job, args.job))
         return 2
     lock = "check-" + args.job
@@ -3849,7 +3850,7 @@ def cmd_check(args):
         new, resolved = diff_baseline(base, now)
         log = log.replace("\\", "/")
         if now["unrunnable"]:
-            fail(u"the 검증 명령 could not run (exit %d, see %s)" % (now["exit"], log))
+            fail(u"the Check command could not run (exit %d, see %s)" % (now["exit"], log))
             return 2
         result = "fail" if new else "pass"
         ledger_add(args.job, "oke", target, "check", result,
@@ -3909,7 +3910,7 @@ def changed_since_check(job, main, merged, rev):
 
 
 def verify_job(job, command, accept=None, skip=None, run=False):
-    """Run the 검증 명령 on the merged main checkout. A failure undoes the merge, but never
+    """Run the Check command on the merged main checkout. A failure undoes the merge, but never
     anybody else's work: only while HEAD is still the merge, and with `reset --keep`,
     which keeps local edits and refuses when they would be lost.
     No time limit: a long simulation is a normal check. Run it in the background.
@@ -3945,11 +3946,11 @@ def verify_locked(job, command, accept, info, skip=None, run=False):
                     "the merge as it is, `$OKE job verify %s --accept \"<why>\"`" % (job, row["commit"][:12], job))
     planned = plan_command(job)
     if command and planned and command != planned:
-        return fail(u"the 검증 명령 given (%s) differs from plan.md's (%s): run `$OKE job verify %s` "
+        return fail(u"the Check command given (%s) differs from plan.md's (%s): run `$OKE job verify %s` "
                     u"without a command" % (command, planned, job))
     command = planned or command
     if not command:
-        return fail(u"give the 검증 명령 (plan.md names none), or --accept \"<why>\" when the user "
+        return fail(u"give the Check command (plan.md names none), or --accept \"<why>\" when the user "
                     u"accepts the merge as it is")
     rev = criteria_rev(job)
     same = same_tree_check(job, main, row["commit"], rev)
@@ -4001,7 +4002,7 @@ def verify_locked(job, command, accept, info, skip=None, run=False):
         tail = f.read().splitlines()[-40:]
     log = log.replace("\\", "/")
     if now["unrunnable"]:  # the shell could not run the command: not a verdict on the merge
-        return fail("the 검증 명령 could not run (exit %d, see %s): fix the command; the merge stays"
+        return fail("the Check command could not run (exit %d, see %s): fix the command; the merge stays"
                     % (code, log))
     if not new:
         ledger_add(job, "oke", row["commit"], "verify", "pass", command)
@@ -4025,7 +4026,7 @@ def verify_locked(job, command, accept, info, skip=None, run=False):
     if not pre or head != row["commit"] or subprocess.call(
             ["git", "-C", main, "reset", "-q", mode, pre],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
-        return fail("the 검증 명령 failed on the merge of %s (log %s), and the merge was NOT undone: "
+        return fail("the Check command failed on the merge of %s (log %s), and the merge was NOT undone: "
                     "the main checkout moved on or has local edits in the merged files. Ask the user."
                     % (job, log))
     ledger_add(job, "oke", pre, "rollback", "ok", "after verify fail")
@@ -4088,23 +4089,23 @@ def experiment(info):
 
 
 def plan_worktree(job):
-    """Does the job's plan give it a worktree (its `## 작업 위치` section names its branch)?"""
+    """Does the job's plan give it a worktree (its `## Workspace` section names its branch)?"""
     section = plan_place(job)
     if section is None:
         return False
-    # the 이어받을 수정 line names files, which may contain oke/<job> too
+    # the Takes over line names files, which may contain oke/<job> too
     lines = [l for l in section.splitlines() if not TAKEN_LINE.match(l)]
     return ("oke/" + job) in "\n".join(lines)
 
 
-# a plan's work-place section (`## worktree` in plans written before it was renamed)
-PLACE_SECTION = re.compile(u"^## (?:작업 위치|worktree)[^\n]*\n(.*?)(?=^## |\\Z)", re.M | re.S)
-# its line naming the main checkout's uncommitted changes the job takes over (`미커밋:` before)
-TAKEN_LINE = re.compile(u"^\\s*(?:이어받을 수정|미커밋)\\s*:\\s*(?:포함\\s*:)?\\s*(.*)$", re.M)
+# a plan's work-place section
+PLACE_SECTION = re.compile(r"^## Workspace[^\n]*\n(.*?)(?=^## |\Z)", re.M | re.S)
+# its line naming the main checkout's uncommitted changes the job takes over
+TAKEN_LINE = re.compile(r"^\s*Takes over\s*:\s*(.*)$", re.M | re.I)
 
 
 def plan_place(job):
-    """The text of the job's `## 작업 위치` section, or None."""
+    """The text of the job's `## Workspace` section, or None."""
     try:
         with io.open(os.path.join(oke_home(), "jobs", job, "plan.md"), encoding="utf-8") as f:
             section = PLACE_SECTION.search(f.read())
@@ -4140,11 +4141,11 @@ def uncommitted_tracked(cwd):
 
 def plan_uncommitted(job):
     """The main checkout's uncommitted files the plan takes over as the job's own change
-    (its `## 작업 위치` section's `이어받을 수정: <file>, <file>` line), or [] (`이어받을 수정: 없음`,
+    (its `## Workspace` section's `Takes over: <file>, <file>` line), or [] (`Takes over: none`,
     or no such line)."""
     section = plan_place(job)
     line = TAKEN_LINE.search(section) if section is not None else None
-    if not line or line.group(1).strip() in (u"없음", ""):
+    if not line or line.group(1).strip().lower() in ("none", ""):
         return []
     names = [p.strip().strip("`\"'").strip() for p in line.group(1).split(",")]
     return [n.replace("\\", "/") for n in names if n]
@@ -4447,7 +4448,7 @@ def job_locked(args):
         src = os.path.join(home, "jobs", args.slug, "intake.md")
         intake = io.open(src, encoding="utf-8").read() if os.path.exists(src) else u""
         starts_late = state["jobs"][new].get("direct")
-        intake += u"\n## 분할\nSplit from job %s by its PM: this job changes only %s.%s\n" % (
+        intake += u"\n## Split\nSplit from job %s by its PM: this job changes only %s.%s\n" % (
             args.slug, state["jobs"][new]["path"],
             (u" It starts its work only after job %s (plan `after: %s`)." if starts_late else
              u" It merges only after job %s (plan `after: %s`).") % (args.after, args.after) if args.after else u"")
@@ -4486,7 +4487,7 @@ def job_locked(args):
         if args.phase == "working" and info.get("size") != "research" and no_path(args.slug, info):
             return fail(no_path(args.slug, info))
         if args.phase == "working" and experiment(info) and not plan_worktree(args.slug):
-            return fail("job %s is an experiment (output result): its plan's `## 작업 위치` must name branch "
+            return fail("job %s is an experiment (output result): its plan's `## Workspace` must name branch "
                         "oke/%s, so its edits never reach the main checkout" % (args.slug, args.slug))
         if args.phase == "working" and info.get("git_key") and not info.get("direct") \
                 and info.get("size") != "research" and not plan_worktree(args.slug) and not info.get("worked_in_main") \
@@ -4500,7 +4501,7 @@ def job_locked(args):
             if unnamed:
                 return fail(u"the main checkout %s has uncommitted changes the plan of job %s does not take in "
                             u"(%s): working there, the job would commit them. Ask the user, then give the PM "
-                            u"`kind: plan`: a worktree, or `이어받을 수정: <files>` naming them as the job's"
+                            u"`kind: plan`: a worktree, or `Takes over: <files>` naming them as the job's"
                             % (main, args.slug, ", ".join(unnamed[:5])))
         if args.phase == "working" and never_merges(info) and info.get("size") != "research" \
                 and now in GATE_PHASES:
@@ -5424,7 +5425,7 @@ WORK_KINDS = ("execute", "research", "curate")  # assignments that start a job's
 
 
 def assignment_kind(job):
-    """The `kind:` of a job's current PM assignment (its first line under `## 이번 지시`), or None."""
+    """The `kind:` of a job's current PM assignment (its first line under `## Instruction`), or None."""
     try:
         with io.open(os.path.join(pm_job_dir(job), "assignment.md"), encoding="utf-8") as f:
             text = f.read()
@@ -5597,11 +5598,11 @@ def build_parser():
     job_sub.add_parser("tree", help="the tree a review of a job without a worktree names").add_argument("slug")
     verify = job_sub.add_parser("verify")
     verify.add_argument("slug")
-    verify.add_argument("command", nargs="?", help="the plan's 검증 명령, as one quoted string")
+    verify.add_argument("command", nargs="?", help="the plan's Check command, as one quoted string")
     verify.add_argument("--accept", help="the user accepts the merge without (another) check: why")
     verify.add_argument("--skip", help="the PM judged that the files other merges changed since the "
                                        "check cannot change its result: why")
-    verify.add_argument("--run", action="store_true", help="run the 검증 명령 even though other merges "
+    verify.add_argument("--run", action="store_true", help="run the Check command even though other merges "
                                                           "changed the code since the check")
     job.set_defaults(func=cmd_job)
 
@@ -5629,10 +5630,10 @@ def build_parser():
             p.add_argument("--reason", required=True)
     wk.set_defaults(func=cmd_wiki)
 
-    bl = sub.add_parser("baseline", help="record the plan's 검증 명령 failures before the work starts")
+    bl = sub.add_parser("baseline", help="record the plan's Check command failures before the work starts")
     bl.add_argument("job")
     bl.set_defaults(func=cmd_baseline)
-    ck = sub.add_parser("check", help="run the 검증 명령 on the job's work and judge it against the baseline")
+    ck = sub.add_parser("check", help="run the Check command on the job's work and judge it against the baseline")
     ck.add_argument("job")
     ck.set_defaults(func=cmd_check)
     ledger = sub.add_parser("ledger")

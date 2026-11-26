@@ -195,7 +195,7 @@ class TestState(Base):
         self.assertNotIn("_recovered", oke.load_state())
 
     def test_read_header(self):
-        p = self.write("r.md", "type: done\nseq: 3\n---\n## 요약\n")
+        p = self.write("r.md", "type: done\nseq: 3\n---\n## Summary\n")
         self.assertEqual(oke.read_header(p), {"type": "done", "seq": 3})
         self.assertIsNone(oke.read_header(self.write("half.md", "type: do")))
         self.assertIsNone(oke.read_header(self.path("missing.md")))
@@ -530,7 +530,7 @@ class SpawnBase(Base):
         lines = ["agent: " + agent, "role: " + role, "cwd: " + (cwd or self.repo), "seq: %d" % seq]
         if job:
             lines.append("job: " + job)
-        return self.write("asg/%s.md" % agent, "\n".join(lines) + "\n---\n## 목표\n")
+        return self.write("asg/%s.md" % agent, "\n".join(lines) + "\n---\n## Goal\n")
 
     def children(self):
         with io.open(oke.children_path(self.pm), encoding="utf-8") as f:

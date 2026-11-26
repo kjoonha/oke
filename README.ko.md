@@ -63,7 +63,7 @@ herdr pane 또는 일반 터미널에서 Claude Code 를 켜고 `/oke:start`. �
 
 `oke status` (와 `oke board`) 는 어느 터미널에서나 된다: orchestrator 가 고른 runtime 을 읽는다. 그 runtime 의 터미널 밖 (예: OKe 가 herdr 에서 도는데 일반 셸) 에서는 보여 주기만 하고 아무것도 띄우지 못한다.
 
-검사: 계획에는 번호 붙은 수용 기준 (`## 수용 기준`) 과 검사 명령 하나 (`## 검증 명령`, 백틱 안) 가 있다. 일을 시작하기 전에 `oke baseline <job>` 이 손대지 않은 checkout 에서 명령을 돌려 원래 깨진 것을 저장한다. worker 는 `oke check <job>` 으로 검사한다: OKe 가 명령을 돌리고, baseline 에 없던 실패 줄만 새 실패로 친다. 결과는 OKe 가 job 장부에 적고 줄마다 서명한다. 서명 키 (`$OKE_HOME/ledger.key`) 는 agent 가 읽을 수 없고, 손으로 적거나 복사한 줄은 서명이 맞지 않아 세지 않는다. `oke job merge` 는 리뷰가 계획의 현재 `criteria_rev` (수용 기준과 명령의 해시) 를 적었고, 장부에 리뷰한 커밋에서 통과한 `oke check` 가 있을 때만 합친다. 합친 뒤 `oke job verify <job>` 은 합친 코드가 검사를 통과한 코드와 같으면 돌리지 않고 통과로 적고, 검사 뒤 다른 merge 가 main 을 바꿨으면 바뀐 파일 목록을 보여 주고 PM 이 정한다: 그 파일이 결과를 바꿀 수 없으면 (예: 문서) `--skip "<이유>"` 로 이유와 파일 목록을 장부에 남기고, 아니면 `--run` 으로 main 에서 명령을 돌려 새 실패가 있을 때 merge 를 되돌린다.
+검사: 계획에는 번호 붙은 수용 기준 (`## Acceptance criteria`) 과 검사 명령 하나 (`## Check command`, 백틱 안) 가 있다. 일을 시작하기 전에 `oke baseline <job>` 이 손대지 않은 checkout 에서 명령을 돌려 원래 깨진 것을 저장한다. worker 는 `oke check <job>` 으로 검사한다: OKe 가 명령을 돌리고, baseline 에 없던 실패 줄만 새 실패로 친다. 결과는 OKe 가 job 장부에 적고 줄마다 서명한다. 서명 키 (`$OKE_HOME/ledger.key`) 는 agent 가 읽을 수 없고, 손으로 적거나 복사한 줄은 서명이 맞지 않아 세지 않는다. `oke job merge` 는 리뷰가 계획의 현재 `criteria_rev` (수용 기준과 명령의 해시) 를 적었고, 장부에 리뷰한 커밋에서 통과한 `oke check` 가 있을 때만 합친다. 합친 뒤 `oke job verify <job>` 은 합친 코드가 검사를 통과한 코드와 같으면 돌리지 않고 통과로 적고, 검사 뒤 다른 merge 가 main 을 바꿨으면 바뀐 파일 목록을 보여 주고 PM 이 정한다: 그 파일이 결과를 바꿀 수 없으면 (예: 문서) `--skip "<이유>"` 로 이유와 파일 목록을 장부에 남기고, 아니면 `--run` 으로 main 에서 명령을 돌려 새 실패가 있을 때 merge 를 되돌린다.
 
 ## 예약 실행: `/oke:automate`
 
@@ -106,6 +106,7 @@ OKe 는 파일을 `~/.oke` 에 둔다. 다른 폴더를 쓰려면 `~/.claude/set
   - 컬러 스킴 (역할 색을 그 스킴의 팔레트에서 가져온다): `tokyo-night`, `catppuccin` (mocha), `github` (dark), `dracula`, `nord`, `gruvbox`, `solarized`, `one-dark`, `monokai`, `rose-pine`, `everforest`, `kanagawa`, `ayu`, `material`, `synthwave-84`.
   - 모르는 이름이면 `disco`.
 
+- `language`: OKe 의 agent 가 사용자에게 쓰는 언어 (대화, 팝업, 계획과 보고의 본문). 예: `ko`, `en`. 비우면 (기본) 사용자가 쓰는 언어를 따른다. 파일의 제목과 키는 늘 영어다.
 - `autonomy`: `conservative` (worker 가 명령마다 승인을 묻는다), `balanced` (기본), `full`. `full` 이면 orchestrator 가 계획과 merge 를 묻지 않고 승인하고, 죽은 (`gone`) PM 이나 자식을 한 번은 묻지 않고 다시 띄운다 (`oke revive <name> --auto`); 한 줄로 알려 준다 (PM 은 다시 띄운 자식을 자기 board 에 적는다). 그 뒤 아무 보고 없이 또 죽으면 묻는다 (resume / hold / cancel). hold 한 job 은 다시 띄우지 않는다. `conservative` 와 `balanced` 는 늘 묻는다.
 - `lean_launch`: PM / worker / reviewer 를 사용자 plugin, hook, MCP 서버 없이 띄운다 (`--setting-sources project,local --strict-mcp-config`). 사용자 `settings.json` 에서 herdr hook 과 `env` 만 `~/.oke/lean-settings.json` 으로 옮긴다. 시작 context 가 약 76k 에서 40k token 으로 준다. 도구도 역할별 핵심 도구만 켠다 (`--tools`, 시작 context 약 15k token). PM 이 job 마다 assignment header 의 `tools:`, `mcp:`, `plugins:` 로 필요한 것만 더 켠다 (`oke.py extras` 가 목록을 보여준다). 자식에게 개인 설정 전부가 필요하면 `false`.
 - `models`: 역할 (`pm`, `worker`, `reviewer`) 마다 쓸 model. 기본 `opus`.

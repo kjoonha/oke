@@ -341,7 +341,7 @@ class TestAfter(PeerBase):
     def setUp(self):
         PeerBase.setUp(self)
         self.advance("fix-a", "merging")
-        self.put(os.path.join(self.home, "jobs", "fix-a", "plan.md"), "job: fix-a\nafter: fix-b\n---\n## 접근\n")
+        self.put(os.path.join(self.home, "jobs", "fix-a", "plan.md"), "job: fix-a\nafter: fix-b\n---\n## Approach\n")
 
     def merge(self):
         self.cli("job", "merge", "fix-a")

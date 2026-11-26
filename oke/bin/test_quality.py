@@ -166,8 +166,8 @@ class TestBaselineCheck(SpawnBase):
 
     def plan(self, command, criteria="1. a.txt exists"):
         self.write(os.path.join(self.home, "jobs", "q", "plan.md"),
-                   u"job: q\n---\n## 접근\nx\n## 수용 기준\n%s\n## 검증 명령        (what passing is)\n"
-                   u"`%s` passes\n## 다른 경로 영향\n없음\n" % (criteria, command))
+                   u"job: q\n---\n## Approach\nx\n## Acceptance criteria\n%s\n## Check command        (what passing is)\n"
+                   u"`%s` passes\n## Impact elsewhere\nnone\n" % (criteria, command))
 
     def rows(self):
         return [r for r in oke.ledger_rows("q") if r["check"] == "check"]

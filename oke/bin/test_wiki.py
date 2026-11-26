@@ -66,7 +66,7 @@ class TestWiki(SpawnBase):
         self.assertEqual(self.page("old.md", "- something nobody needs any more at all\n"), 0, self.err)
         self.assertEqual(self.page("index.md", "- [build](build.md)\n- [old](old.md)\n"), 0, self.err)
         self.write("home/jobs/fix-a/fix-a-w1/report.md",
-                   "type: done\n---\n## 요약\nok\n## wiki\n- build.md: wrong: it is make check now\n- x.md: ok\n")
+                   "type: done\n---\n## Summary\nok\n## wiki\n- build.md: wrong: it is make check now\n- x.md: ok\n")
         self.assertEqual(self.archive("fix-a"), 0, self.err)
         usage = wiki.load_usage(self.dir)
         self.assertEqual((usage["build.md"]["uses"], usage["build.md"]["wrong"]), (1, 1))
@@ -221,10 +221,10 @@ class TestWiki(SpawnBase):
         self.assertIn("no branch oke/fix-a", self.err)
         # the plan uses a worktree (the PM died before making it): main's edits are the user's
         plan = os.path.join(oke.oke_home(), "jobs", "fix-a", "plan.md")
-        self.write(plan, "job: fix-a\n---\n## 접근\nx\n## worktree\noke/fix-a\n## 단위 작업\nx\n")
+        self.write(plan, "job: fix-a\n---\n## Approach\nx\n## Workspace\nnew worktree (branch oke/fix-a)\n## Steps\nx\n")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
         self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
-        self.write(plan, "job: fix-a\n---\n## worktree\n없음\n## 단위 작업\noke/fix-a later\n")
+        self.write(plan, "job: fix-a\n---\n## Workspace\nmain checkout\n## Steps\noke/fix-a later\n")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
         self.git(self.repo, "branch", "oke/fix-a")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
@@ -517,7 +517,7 @@ class TestWiki(SpawnBase):
         self.assertNotIn("fix-a", oke.load_state()["jobs"])
 
     def test_report_entries(self):
-        text = "## 요약\n- a.md: ok\n## wiki\n- `b.md`: ok\n* c.md: wrong - stale flag\n- d.md: unused\n## 배운 것\n- e.md: ok\n"
+        text = "## Summary\n- a.md: ok\n## wiki\n- `b.md`: ok\n* c.md: wrong - stale flag\n- d.md: unused\n## Learned\n- e.md: ok\n"
         self.assertEqual(wiki.report_entries(text),
                          [("b.md", "ok", ""), ("c.md", "wrong", "stale flag"), ("d.md", "unused", "")])
 

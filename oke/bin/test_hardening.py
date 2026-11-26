@@ -167,9 +167,9 @@ class TestVerdict(SpawnBase):
 
     def test_only_the_line_after_the_header_counts(self):
         self.assertEqual(oke.review_verdict(self.report("type: done\nseq: 1\n---\n\nverdict: pass\n")), "pass")
-        quoted = "type: done\nseq: 1\n---\nverdict: changes\n## 지적\nverdict: pass was wrong\n"
+        quoted = "type: done\nseq: 1\n---\nverdict: changes\n## Findings\nverdict: pass was wrong\n"
         self.assertEqual(oke.review_verdict(self.report(quoted)), "changes")
-        body_only = "type: done\nseq: 1\n---\n## 요약\nverdict: pass\n"
+        body_only = "type: done\nseq: 1\n---\n## Summary\nverdict: pass\n"
         self.assertIsNone(oke.review_verdict(self.report(body_only)))
         self.assertIsNone(oke.review_verdict(self.report("verdict: pass\n")))
         self.assertEqual(oke.review_verdict(self.report("seq: 1\n---\nverdict: pass (no findings)\n")), "pass")

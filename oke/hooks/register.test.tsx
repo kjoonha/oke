@@ -7,7 +7,7 @@ const BOARD = [{
   name: 'toy', key: 'toy', pm: null,
   jobs: [{ job: 'calc-sub', phase: 'working', merge: 'rolled_back', pending: 'question', size: 'small', agents: [{
     agent: 'calc-sub-w1', role: 'worker', status: 'working', pane: 'w7:p9', report: null,
-    board: '## 지금\nwriting sub', revives: 1, cost: 0.4, todos: [
+    board: '## Now\nwriting sub', revives: 1, cost: 0.4, todos: [
       { content: 'write sub', status: 'completed' }, { content: 'test sub', status: 'in_progress' },
       { content: 'docs', status: 'pending' }] }] },
   { job: 'calc-add', phase: 'done', merge: 'verified', pending: null, agents: [{
@@ -226,10 +226,10 @@ test('the board lists an agent and expands its board.md', async ($, on) => {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ key: 'open-calc-sub-w1' }))?.text).toMatch(/● w1 working .*revived 1x/)
-    expect(await ui.find({ type: 'Text', text: /## 지금/ })).toBeFalsy()
+    expect(await ui.find({ type: 'Text', text: /## Now/ })).toBeFalsy()
     expect(await ui.find({ key: 'go-calc-sub-w1' })).toBeFalsy()
     await ui.press({ key: 'open-calc-sub-w1' })
-    expect(await ui.find({ type: 'Text', text: /## 지금/ })).toBeTruthy()
+    expect(await ui.find({ type: 'Text', text: /## Now/ })).toBeTruthy()
     expect(await ui.find({ key: 'go-calc-sub-w1' })).toBeTruthy()
     await ui.press({ key: 'open-calc-sub-w1' })
     await ui.unmount()
@@ -304,7 +304,7 @@ test('the board marks done, current and open todos apart', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /✓ write sub/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /▸ test sub/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /○ docs/ })).toBeTruthy()
-  // in progress first with how it goes from board.md's 지금, then planned, then done
+  // in progress first with how it goes from board.md's Now, then planned, then done
   const texts = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
   const at = (re: RegExp) => texts.findIndex((t: string) => re.test(t))
   expect(texts[at(/▸ test sub/) + 1]).toMatch(/^\s+└ writing sub$/)
@@ -620,15 +620,15 @@ test('the board shows to decide, to check and blocked from board.md, not what is
   tickRole = 'orchestrator'
   tickBoard = [{ name: 'toy', key: 'toy', jobs: [], pm: {
     agent: 'pm-toy', role: 'pm', status: 'working', pane: null, report: null, revives: 0, todos: [],
-    board: 'agent: pm-toy\n---\n## 지금\nplanning\n## 결정        (decided, with why)\n- JWT over sessions: no shared store\n'
-      + '## 결정 필요\nuser: keep the old endpoint?\n## 확인 필요\n없음\n## 막힌 것\nnone' } }]
+    board: 'agent: pm-toy\n---\n## Now\nplanning\n## Decisions        (decided, with why)\n- JWT over sessions: no shared store\n'
+      + '## Decision needed\nuser: keep the old endpoint?\n## To check\nnone\n## Blocked\nnone' } }]
   engine(on, [], [])
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /JWT over sessions/ })).toBeFalsy()  // decided: only in the opened board.md
   expect(await ui.find({ type: 'Text', text: /\? decide\s+user: keep the old endpoint\?$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /check|blocked/ })).toBeFalsy()  // 없음 and none are empty
+  expect(await ui.find({ type: 'Text', text: /check|blocked/ })).toBeFalsy()  // none is empty
   await ui.unmount()
   tickBoard = BOARD
   tickRole = 'worker'

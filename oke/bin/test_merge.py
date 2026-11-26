@@ -28,10 +28,10 @@ class MergeBase(SpawnBase):
 
     def set_plan(self, command, criteria="1. a.txt exists"):
         with io.open(os.path.join(self.jobs, "plan.md"), "w", encoding="utf-8") as f:
-            f.write(u"job: fix-a\n---\n## 수용 기준\n%s\n## 검증 명령\n`%s` passes\n" % (criteria, command))
+            f.write(u"job: fix-a\n---\n## Acceptance criteria\n%s\n## Check command\n`%s` passes\n" % (criteria, command))
 
     def verify(self, command, *extra):
-        """`job verify` with `command` as the plan's 검증 명령. The plan changes after the
+        """`job verify` with `command` as the plan's Check command. The plan changes after the
         check, so the identical-tree skip does not apply and the command runs."""
         self.set_plan(command)
         return self.cli("job", "verify", "fix-a", *extra)
