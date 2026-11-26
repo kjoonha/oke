@@ -1440,6 +1440,18 @@ class TestOutputs(PmBase):
         self.assertEqual(self.cli("job", "size", "sim", "small"), 1)
         self.assertIn("normal or large", self.err)
 
+    def test_a_no_change_job_is_not_asked_again_before_done(self):
+        self.assertEqual(self.new("fix", "a", "--path", self.repo), 0, self.err)
+        self.advance("fix", "planning")
+        self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 0, self.err)
+        self.assertEqual(self.cli("pending"), 0, self.err)
+        kinds = [i["kind"] for i in json.loads(self.out)["items"] if i["job"] == "fix"]
+        self.assertEqual(kinds, ["no_change"])
+        self.assertEqual(self.cli("wiki", "log", "--job", "fix", "--note", "none"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "fix", "done"), 0, self.err)
+        self.assertEqual(self.cli("pending"), 0, self.err)
+        self.assertFalse([i for i in json.loads(self.out)["items"] if i["job"] == "fix"])
+
     def test_a_folder_job_ends_with_no_change_on_the_users_word(self):
         notes = self.folder("notes")
         self.assertEqual(self.new("notes", "a", "--path", notes), 0, self.err)

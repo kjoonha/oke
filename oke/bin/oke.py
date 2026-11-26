@@ -5299,7 +5299,7 @@ def cmd_take_mail(args):
 
 # ---------------------------------------------------------------- pending
 
-PENDING_RANKS = {"unsent": 0, "unassigned": 0, "split": 0, "after_ready": 0, "after_broken": 1, "report_done": 0, "silent": 1, "question": 1, "blocked": 1, "failed": 1,
+PENDING_RANKS = {"unsent": 0, "unassigned": 0, "split": 0, "after_ready": 0, "after_broken": 1, "report_done": 0, "no_change": 0, "silent": 1, "question": 1, "blocked": 1, "failed": 1,
                  "peer": 1, "plan": 2, "merge": 3}
 ASKING_PHASES = ("planning", "working", "reviewing", "merging")
 
@@ -5343,7 +5343,10 @@ def pending_item(name, job):
     at_gate = gated(job)
     waits, broken = after_blocks(load_state(), name) \
         if at_gate or phase in ("awaiting_merge", "merging") else ([], [])
-    if at_gate:
+    if job.get("no_change"):
+        # the user ended it with no change and a compaction came before `job phase done`
+        kind, since, mark = "no_change", job.get("phase_at"), "end"
+    elif at_gate:
         # held at its start: what an agent reports or a peer asks still shows; the gate
         # itself shows only once it can move, or never will by itself
         if seq is not None and job.get("sent_seq") != seq:
@@ -5398,6 +5401,9 @@ def pending_item(name, job):
         item["text"] = "job %s cannot %s: %s; ask the user: drop it (`$OKE job after %s --drop %s`) or cancel %s" % (
             name, "start" if at_gate else "merge", why, name, other, name)
         item["after"], item["phase"] = other, phase  # merging: the PM's merge waits, tell it after a drop
+    if kind == "no_change":
+        item["text"] = ("job %s ended with no change (the user agreed): do not ask again; finish it as the "
+                        "Flow row says (wiki, `job phase done`, archive)" % name)
     if kind == "unassigned":
         item["text"] = ("job %s is in phase working but its assignment for that (execute, research or curate) "
                         "was never written: write and send it now" % name)
