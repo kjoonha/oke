@@ -127,7 +127,7 @@ Follow the size the orchestrator's execute instruction names. A plan or instruct
 
 An experiment (`output: result` in this instruction or in `$OKE status`): read `${CLAUDE_PLUGIN_ROOT}/skills/pm/references/experiment.md` now; its Execute part replaces the baseline, `$OKE check`, commit and merge steps below.
 
-Size `small`: no worker pane. Do step 1 if the plan uses a worktree, then the baseline (below), then the work subagent; after its answer run `$OKE check <job>` (exit 1: a new subagent call with the new failures), then the review subagent (see Job size), then continue at "verdict: pass" under **Review**.
+Size `small`: no worker pane. Do step 1 if the plan uses a worktree, then the baseline (below), then the work subagent; after its answer (it found nothing to change, already done, cannot reproduce or not needed: the no-change case under Rare cases instead) run `$OKE check <job>` (exit 1: a new subagent call with the new failures), then the review subagent (see Job size), then continue at "verdict: pass" under **Review**.
 
 Baseline, before any work: write the job's report as `waiting` (`on: baseline`, `expect:` how long the 검증 명령 takes), run `$OKE baseline <job>` in the background, end your turn. It runs the 검증 명령 on the untouched worktree (without one, the main checkout) and saves what already fails, so only new failures count later. Exit 2: the message says why (no command in plan.md, or it could not run): fix plan.md and run it again. A baseline that already fails (`exit` not 0): say so in your next report, with the number of failing lines.
 
