@@ -823,13 +823,17 @@ class TestRealPaths(PmBase):
 
 
 class TestBoardAndStatus(PmBase):
-    def test_jobs_show_their_folder_name_or_path_unset(self):
+    def test_jobs_show_where_they_work_or_path_unset(self):
         self.pmc("add", "a")
         self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
         self.assertEqual(self.new("fix-b", "a"), 0, self.err)
         tree = oke.board_tree(oke.load_state(), [])
         self.assertEqual([(t["name"], sorted(t)) for t in tree], [("a", ["jobs", "key", "name", "pm"])])
-        self.assertEqual([j["path"] for j in tree[0]["jobs"]], ["toy", "path?"])
+        self.assertEqual([j["path"] for j in tree[0]["jobs"]], [oke.native_path(oke.load_state()["jobs"]["fix-a"]["path"]), "path?"])
+        st = oke.load_state()
+        st["jobs"]["fix-a"]["worktree"] = {"id": "w", "path": "/c/wt/fix-a"}
+        oke.save_state(st)
+        self.assertEqual(oke.board_tree(oke.load_state(), [])[0]["jobs"][0]["path"], oke.native_path("/c/wt/fix-a"))
         self.assertEqual(self.cli("status"), 0, self.err)
         st = json.loads(self.out)
         self.assertEqual(st["pms"]["a"]["places"], [self.norm(self.repo)])
@@ -1181,7 +1185,7 @@ class TestOutputs(PmBase):
         oke.save_state(st)
 
     def plan(self, job, worktree=True):
-        self.write("home/jobs/%s/plan.md" % job, "job: %s\n---\n## worktree\n%s\n" % (
+        self.write("home/jobs/%s/plan.md" % job, "job: %s\n---\n## 작업 위치\n%s\n" % (
             job, ("oke/" + job) if worktree else u"없음"))
 
     def report(self, job, child, verdict=None):
@@ -1306,8 +1310,8 @@ class TestOutputs(PmBase):
         self.git(self.repo, "add", "x.txt")  # the user's uncommitted change
         self.assertEqual(self.cli("job", "phase", "small", "working"), 1)
         self.assertIn("x.txt", self.err)
-        self.assertIn(u"미커밋: 포함", self.err)
-        self.write("home/jobs/small/plan.md", u"job: small\n---\n## worktree\n없음\n미커밋: 포함: x.txt\n")
+        self.assertIn(u"이어받을 수정", self.err)
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## 작업 위치\nmain 폴더에서 직접\n이어받을 수정: x.txt\n")
         self.assertEqual(oke.plan_uncommitted("small"), ["x.txt"])
         self.assertEqual(self.cli("job", "phase", "small", "working"), 0, self.err)
         self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 1)  # x.txt is the job's now
@@ -1322,17 +1326,27 @@ class TestOutputs(PmBase):
         self.git(self.repo, "add", "README.md")
         self.git(self.repo, "commit", "-qm", "r", "README.md")  # 문서.md stays staged, uncommitted
         self.git(self.repo, "mv", "README.md", "READ ME.md")
-        self.write("home/jobs/small/plan.md", u"job: small\n---\n## worktree\n없음\n미커밋: 포함: 문서.md\n")
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## 작업 위치\nmain 폴더에서 직접\n이어받을 수정: 문서.md\n")
         self.assertEqual(self.cli("job", "phase", "small", "working"), 1)
         self.assertIn("READ ME.md", self.err)
         self.assertNotIn(u"문서", self.err)
         self.write("home/jobs/small/plan.md",
-                   u"job: small\n---\n## worktree\n없음\n미커밋: 포함: `문서.md`, \"READ ME.md\"\n")
+                   u"job: small\n---\n## 작업 위치\nmain 폴더에서 직접\n이어받을 수정: `문서.md`, \"READ ME.md\"\n")
         self.assertEqual(self.cli("job", "phase", "small", "working"), 0, self.err)
+
+    def test_an_old_plan_still_reads(self):
+        self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## worktree\n없음\n미커밋: 포함: a.py, b.py\n")
+        self.assertEqual(oke.plan_uncommitted("small"), ["a.py", "b.py"])
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## worktree\noke/small\n")
+        self.assertTrue(oke.plan_worktree("small"))
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## 작업 위치\nmain 폴더에서 직접\n이어받을 수정: 없음\n")
+        self.assertEqual(oke.plan_uncommitted("small"), [])
+        self.assertFalse(oke.plan_worktree("small"))
 
     def test_a_file_under_oke_slash_job_is_not_a_worktree(self):
         self.assertEqual(self.new("bin", "a", "--path", self.repo), 0, self.err)
-        self.write("home/jobs/bin/plan.md", u"job: bin\n---\n## worktree\n없음\n미커밋: 포함: oke/bin/x.py\n")
+        self.write("home/jobs/bin/plan.md", u"job: bin\n---\n## 작업 위치\nmain 폴더에서 직접\n이어받을 수정: oke/bin/x.py\n")
         self.assertFalse(oke.plan_worktree("bin"))
 
     def test_a_start_in_a_worktree_ignores_the_main_checkout(self):

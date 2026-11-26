@@ -2286,7 +2286,8 @@ def board_tree(state, agents, only_key=None):
                          "size": info.get("size"), "direct": bool(info.get("direct")), "output": job_output(info),
                          "merge": merge, "held": bool(info.get("held")), "subagent": subagent,
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None,
-                         "path": os.path.basename(info["path"].rstrip("/")) or info["path"]
+                         # where it works: its worktree, or the path itself
+                         "path": native_path((info.get("worktree") or {}).get("path") or info["path"])
                          if info.get("path") else "path?",
                          "peer_wait": sorted(peer_waiting(state, job)),
                          "after_wait": after})
@@ -4087,17 +4088,29 @@ def experiment(info):
 
 
 def plan_worktree(job):
-    """Does the job's plan give it a worktree (its `## worktree` section names its branch)?"""
+    """Does the job's plan give it a worktree (its `## 작업 위치` section names its branch)?"""
+    section = plan_place(job)
+    if section is None:
+        return False
+    # the 이어받을 수정 line names files, which may contain oke/<job> too
+    lines = [l for l in section.splitlines() if not TAKEN_LINE.match(l)]
+    return ("oke/" + job) in "\n".join(lines)
+
+
+# a plan's work-place section (`## worktree` in plans written before it was renamed)
+PLACE_SECTION = re.compile(u"^## (?:작업 위치|worktree)[^\n]*\n(.*?)(?=^## |\\Z)", re.M | re.S)
+# its line naming the main checkout's uncommitted changes the job takes over (`미커밋:` before)
+TAKEN_LINE = re.compile(u"^\\s*(?:이어받을 수정|미커밋)\\s*:\\s*(?:포함\\s*:)?\\s*(.*)$", re.M)
+
+
+def plan_place(job):
+    """The text of the job's `## 작업 위치` section, or None."""
     try:
         with io.open(os.path.join(oke_home(), "jobs", job, "plan.md"), encoding="utf-8") as f:
-            section = re.search(r"^## worktree[^\n]*\n(.*?)(?=^## |\Z)", f.read(), re.M | re.S)
+            section = PLACE_SECTION.search(f.read())
     except (OSError, ValueError):
-        return False
-    if not section:
-        return False
-    # the 미커밋 line names files, which may contain oke/<job> too
-    lines = [l for l in section.group(1).splitlines() if not re.match(u"\\s*미커밋:", l)]
-    return ("oke/" + job) in "\n".join(lines)
+        return None
+    return section.group(1) if section else None
 
 
 def uncommitted_tracked(cwd):
@@ -4126,16 +4139,12 @@ def uncommitted_tracked(cwd):
 
 
 def plan_uncommitted(job):
-    """The main checkout's uncommitted files the plan takes in as the job's own change
-    (its `## worktree` section's `미커밋: 포함: <file>, <file>` line), or [] (`미커밋: 없음`,
+    """The main checkout's uncommitted files the plan takes over as the job's own change
+    (its `## 작업 위치` section's `이어받을 수정: <file>, <file>` line), or [] (`이어받을 수정: 없음`,
     or no such line)."""
-    try:
-        with io.open(os.path.join(oke_home(), "jobs", job, "plan.md"), encoding="utf-8") as f:
-            section = re.search(r"^## worktree[^\n]*\n(.*?)(?=^## |\Z)", f.read(), re.M | re.S)
-    except (OSError, ValueError):
-        return []
-    line = re.search(u"^\\s*미커밋:\\s*포함:\\s*(.+)$", section.group(1), re.M) if section else None
-    if not line:
+    section = plan_place(job)
+    line = TAKEN_LINE.search(section) if section is not None else None
+    if not line or line.group(1).strip() in (u"없음", ""):
         return []
     names = [p.strip().strip("`\"'").strip() for p in line.group(1).split(",")]
     return [n.replace("\\", "/") for n in names if n]
@@ -4477,7 +4486,7 @@ def job_locked(args):
         if args.phase == "working" and info.get("size") != "research" and no_path(args.slug, info):
             return fail(no_path(args.slug, info))
         if args.phase == "working" and experiment(info) and not plan_worktree(args.slug):
-            return fail("job %s is an experiment (output result): its plan's `## worktree` must name branch "
+            return fail("job %s is an experiment (output result): its plan's `## 작업 위치` must name branch "
                         "oke/%s, so its edits never reach the main checkout" % (args.slug, args.slug))
         if args.phase == "working" and info.get("git_key") and not info.get("direct") \
                 and info.get("size") != "research" and not plan_worktree(args.slug) and not info.get("worked_in_main") \
@@ -4491,7 +4500,7 @@ def job_locked(args):
             if unnamed:
                 return fail(u"the main checkout %s has uncommitted changes the plan of job %s does not take in "
                             u"(%s): working there, the job would commit them. Ask the user, then give the PM "
-                            u"`kind: plan`: a worktree, or `미커밋: 포함: <files>` naming them as the job's"
+                            u"`kind: plan`: a worktree, or `이어받을 수정: <files>` naming them as the job's"
                             % (main, args.slug, ", ".join(unnamed[:5])))
         if args.phase == "working" and never_merges(info) and info.get("size") != "research" \
                 and now in GATE_PHASES:
