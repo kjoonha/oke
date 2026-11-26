@@ -4160,8 +4160,9 @@ def kept_worktrees():
 
 
 def remove_kept_worktree(job, kept, force):
-    """Remove an archived job's worktree and its branch (only with -d: it holds no commit of
-    its own). Returns (removed, branch_left)."""
+    """Remove an archived job's worktree and its branch. With force (no change was checked, or the
+    user said to throw it away) the branch goes even when it holds commits a revert undid; otherwise
+    only with -d. Returns (removed, branch_left)."""
     wt = native_path(kept["worktree"]["path"])
     main = native_path(repo_dir(kept["git_key"]))
     if os.path.isdir(wt):
@@ -4183,7 +4184,7 @@ def remove_kept_worktree(job, kept, force):
     subprocess.call(["git", "-C", main, "worktree", "prune"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if os.path.isdir(wt):
         return False, None
-    subprocess.call(["git", "-C", main, "branch", "-q", "-d", "oke/" + job],
+    subprocess.call(["git", "-C", main, "branch", "-q", "-D" if force else "-d", "oke/" + job],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     left = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/" + job)[0] == 0
     return True, ("oke/" + job) if left else None

@@ -1327,6 +1327,11 @@ class TestOutputs(PmBase):
         self.plan("fix")
         self.advance("fix", "working")
         wt = self.worktree("fix")
+        with io.open(os.path.join(wt, "f.txt"), "w", encoding="utf-8") as f:
+            f.write(u"f\n")
+        self.git(wt, "add", "f.txt")
+        self.git(wt, "commit", "-q", "-m", "f")
+        self.git(wt, "revert", "--no-edit", "HEAD")  # the PM's undo: commits stay, the change does not
         os.makedirs(os.path.join(wt, "__pycache__"))  # a run's byproduct: git alone would keep the folder
         with io.open(os.path.join(wt, "__pycache__", "a.pyc"), "w", encoding="utf-8") as f:
             f.write(u"x")
