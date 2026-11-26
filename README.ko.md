@@ -18,6 +18,8 @@ PM 은 사용자가 만드는 역할 (`backend`, `docs` 같은 이름) 이다. P
 
 PM, worker, reviewer 는 OKe 홈 안의 자기 폴더 (PM 은 자기 열린 job 의 폴더도. ledger 처럼 OKe 만 쓰는 파일은 제외), OKe 의 `tmp/`, 자기 memory 폴더, 무언가를 바꾸는 열린 job 의 경로 (research 제외) 에만 Edit 나 Write 할 수 있다: git job 은 worktree (없으면 checkout), 폴더 job 은 그 폴더에서 아래의 git 저장소와 밖으로 나가는 링크를 뺀 곳 (`oke path-check`). 폴더 job 은 파일을 그 자리에서 바꾸고 백업은 없다.
 
+job 이 내놓는 것 (`oke status` 의 `output`) 은 세 가지다. `code` 는 main 브랜치에 merge 되는 변경으로, 사용자가 merge 를 승인한다 (`autonomy: full` 이 아니면 크기와 상관없이 따로 묻는다). `files` 는 git 이 아닌 폴더의 파일이 그 자리에서 바뀌는 것이다 (merge 없음). `result` 는 답 (조사 job) 이나 실행 결과 (실험 job: worktree 에서 임시 수정 후 sim 같은 것을 돌림) 다. 실험 job 은 아무것도 merge 하지 않는다. reviewer 가 출력이 계획의 기준을 만족하는지 보고, worktree 는 사용자가 지우라고 할 때까지 남는다 (`oke job clean <job>`). 하다 보니 바꿀 것이 없는 job 은 사용자가 동의하면 실패가 아닌 완료로 끝난다.
+
 PM 관리: "PM 추가", "PM <x> 이름 바꿔", "PM <x> 지워" 라고 말한다. 열린 job 이나 보류 job 이 있는 PM 은 그 job 들을 취소하는 데 동의해야 지운다 (wiki 는 `<name>.removed-<time>` 으로 옮겨 둔다). 이름은 열린 job 이나 보류 job 이 있는 동안에만 못 바꾼다. 끝난 job 은 새 이름을 따라간다. 셸에서는 `oke pm list` 로 본다.
 
 PM 은 계획 초안을 planner subagent 에게 백그라운드로 맡기고, 그것을 검토해 보고한다. agent 에게 가는 메시지는 그 agent 의 inbox (`$OKE_HOME/inbox/<agent>/`) 에서 기다리다가 그 agent 의 턴이 끝나는 즉시 입력된다. 백그라운드 subagent 나 작업이 아직 돌아도 그렇다. 그래서 한 job 의 리뷰를 돌리는 PM 도 다음 job 을 바로 받는다.

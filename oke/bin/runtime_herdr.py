@@ -334,5 +334,17 @@ class HerdrRuntime(object):
         return {"id": ws["workspace_id"], "path": ws["worktree"]["checkout_path"],
                 "place": panes[0]["pane_id"] if panes else None}
 
-    def worktree_remove(self, wid):
-        herdr("worktree", "remove", "--workspace", wid)
+    def worktree_workspace(self, repo, path):
+        """The open workspace of the worktree checked out at `path`, or None. Asked by path:
+        herdr reuses workspace ids after a restart, so a stored id may be another's now."""
+        def norm(p):
+            p = p[4:] if p.startswith("\\\\?\\") else p  # herdr may answer with a \\?\ path
+            return os.path.normcase(os.path.abspath(p)).replace("\\", "/").rstrip("/")
+        want = norm(path)
+        for wt in herdr("worktree", "list", "--cwd", repo).get("worktrees", []):
+            if wt.get("path") and norm(wt["path"]) == want and wt.get("is_linked_worktree"):
+                return wt.get("open_workspace_id")
+        return None
+
+    def worktree_remove(self, wid, force=False):
+        herdr("worktree", "remove", "--workspace", wid, *(["--force"] if force else []))

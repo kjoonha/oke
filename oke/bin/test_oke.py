@@ -31,6 +31,14 @@ def put_pm(s, key, record):
 
 
 class Base(unittest.TestCase):
+    def archive(self, job):
+        """`job archive` of a job these tests leave open: only a finished job is archived."""
+        st = oke.load_state()
+        if job in st["jobs"] and st["jobs"][job].get("phase") not in ("done", "failed"):
+            st["jobs"][job]["phase"] = "done"
+            oke.save_state(st)
+        return self.cli("job", "archive", job)
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.home = os.path.join(self.tmp, "home")
@@ -224,22 +232,21 @@ class TestState(Base):
         self.assertEqual(os.path.normcase(path), os.path.normcase(os.path.join(root, "backend")))
         self.assertTrue(os.path.isdir(path))
         self.assertEqual(oke.wiki_dir("backend"), path)
-    def test_size_is_set_while_planning_and_small_merges_without_a_second_ask(self):
+    def test_size_is_set_while_planning_and_every_merge_is_approved_on_its_own(self):
         repo = self.git_repo("r")
-        for job in ("tiny", "grew", "big"):
+        for job in ("tiny", "big"):
             self.assertEqual(self.cli("job", "new", job, "--repo", repo), 0)
             self.advance(job, "planning")
-        for job in ("tiny", "grew"):
-            self.assertEqual(self.cli("job", "size", job, "small"), 0, self.err)
+        self.assertEqual(self.cli("job", "size", "tiny", "small"), 0, self.err)
         self.assertNotEqual(self.cli("job", "size", "tiny", "huge"), 0)  # not a size
         self.assertEqual(oke.load_state()["jobs"]["tiny"]["size"], "small")
-        for job in ("tiny", "grew", "big"):
+        for job in ("tiny", "big"):
             self.advance(job, "working")
-        self.assertEqual(self.cli("job", "phase", "tiny", "merging"), 0, self.err)
-        self.assertEqual(self.cli("job", "phase", "big", "merging"), 1)  # large: the user approves first
+        for job in ("tiny", "big"):  # small too: the user approves the merge after the review
+            self.assertEqual(self.cli("job", "phase", job, "merging"), 1)
         self.assertEqual(self.cli("job", "size", "big", "normal"), 1)  # no shrinking once work started
-        self.assertEqual(self.cli("job", "size", "grew", "normal"), 0, self.err)  # a size may grow
-        self.assertEqual(self.cli("job", "phase", "grew", "merging"), 1)  # and loses its merge approval
+        self.assertEqual(self.cli("job", "size", "tiny", "normal"), 0, self.err)  # a size may grow
+        self.advance("tiny", "merging")
         self.assertEqual(self.cli("job", "size", "tiny", "large"), 1)  # not once merging
 
     def test_an_old_lane_in_state_json_becomes_a_size(self):
@@ -307,7 +314,7 @@ class TestState(Base):
         for name in ("lean-settings.json", "report.md"):
             with open(os.path.join(self.home, "jobs", "fix-a", "fix-a-w1", name), "w") as f:
                 f.write("{}")
-        self.assertEqual(self.cli("job", "archive", "fix-a"), 0)
+        self.assertEqual(self.archive("fix-a"), 0)
         self.assertNotIn("fix-a", oke.load_state()["jobs"])
         self.assertEqual(len(os.listdir(os.path.join(self.home, "archive"))), 1)
         kept = os.path.join(self.home, "archive", os.listdir(os.path.join(self.home, "archive"))[0], "fix-a-w1")
@@ -1312,12 +1319,12 @@ class TestReviewFixes(SpawnBase):
     # 7. orphan job directories
     def test_archive_moves_an_orphan_job_dir(self):
         os.makedirs(os.path.join(self.home, "jobs", "old-job"))
-        self.assertEqual(self.cli("job", "archive", "old-job"), 0)
+        self.assertEqual(self.archive("old-job"), 0)
         self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "old-job")))
         self.assertEqual(len(os.listdir(os.path.join(self.home, "archive"))), 1)
 
     def test_archive_unknown_job_still_fails(self):
-        self.assertEqual(self.cli("job", "archive", "nope"), 1)
+        self.assertEqual(self.archive("nope"), 1)
 
     # 8. spawn leftovers
     def test_failed_first_prompt_leaves_a_record_and_names_the_pane(self):

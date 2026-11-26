@@ -67,7 +67,7 @@ class TestWiki(SpawnBase):
         self.assertEqual(self.page("index.md", "- [build](build.md)\n- [old](old.md)\n"), 0, self.err)
         self.write("home/jobs/fix-a/fix-a-w1/report.md",
                    "type: done\n---\n## 요약\nok\n## wiki\n- build.md: wrong: it is make check now\n- x.md: ok\n")
-        self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+        self.assertEqual(self.archive("fix-a"), 0, self.err)
         usage = wiki.load_usage(self.dir)
         self.assertEqual((usage["build.md"]["uses"], usage["build.md"]["wrong"]), (1, 1))
         later = wiki.time.time() + 31 * wiki.DAY
@@ -87,11 +87,11 @@ class TestWiki(SpawnBase):
     def test_the_archive_says_when_a_curation_is_due(self):
         for i in range(oke.CURATE_EVERY):
             wiki.log(self.dir, "job%d" % i, "none")
-        self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+        self.assertEqual(self.archive("fix-a"), 0, self.err)
         self.assertIn("kind: curate", self.out)
         wiki.log(self.dir, "curate", "merged two pages")
         self.assertEqual(self.cli("job", "new", "fix-b", "--repo", self.repo), 0, self.err)
-        self.assertEqual(self.cli("job", "archive", "fix-b"), 0, self.err)
+        self.assertEqual(self.archive("fix-b"), 0, self.err)
         self.assertNotIn("curate", self.out)
 
     def test_merging_a_page_may_repeat_its_lines(self):
@@ -114,7 +114,7 @@ class TestWiki(SpawnBase):
         self.advance("calc", "working")
         self.logged("calc")
         self.assertEqual(self.cli("job", "phase", "calc", "done"), 0, self.err)
-        self.assertEqual(self.cli("job", "archive", "calc"), 0, self.err)
+        self.assertEqual(self.archive("calc"), 0, self.err)
         self.assertEqual(self.cli("job", "new", "calc", "--repo", folder), 1)  # an archived name stays taken
         for old in glob.glob(os.path.join(oke.oke_home(), "archive", "calc-*")):
             shutil.rmtree(old)  # the user removed the archive: the name is free, its wiki log line is not
@@ -180,7 +180,7 @@ class TestWiki(SpawnBase):
         for i in range(oke.CURATE_EVERY):
             wiki.log(self.dir, "job%d" % i, "none")
         wiki.log(self.dir, "tidy", "curated: merged two pages")
-        self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+        self.assertEqual(self.archive("fix-a"), 0, self.err)
         self.assertNotIn("curate", self.out)
 
     def test_cancel_closes_the_job_and_drops_only_its_mail(self):
@@ -430,7 +430,7 @@ class TestWiki(SpawnBase):
         real = oke.runtime
         oke.runtime = lambda *a: Stub()
         try:
-            self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+            self.assertEqual(self.archive("fix-a"), 0, self.err)
         finally:
             oke.runtime = real
         # only this job's child, before its folder moves (or its next write brings it back)
@@ -453,7 +453,7 @@ class TestWiki(SpawnBase):
         real = oke.runtime
         oke.runtime = lambda *a: Stub()
         try:
-            self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+            self.assertEqual(self.archive("fix-a"), 0, self.err)
         finally:
             oke.runtime = real
         self.assertIn("not_closed: fix-a-w1", self.out)
@@ -474,7 +474,7 @@ class TestWiki(SpawnBase):
         real = oke.runtime
         oke.runtime = lambda *a: Stub()
         try:
-            self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+            self.assertEqual(self.archive("fix-a"), 0, self.err)
         finally:
             oke.runtime = real
         self.assertIn("not_closed: fix-a-w1", self.out)
@@ -511,7 +511,7 @@ class TestWiki(SpawnBase):
         real = oke.runtime
         oke.runtime = lambda *a: Stub()
         try:
-            self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+            self.assertEqual(self.archive("fix-a"), 0, self.err)
         finally:
             oke.runtime = real
         self.assertNotIn("fix-a", oke.load_state()["jobs"])

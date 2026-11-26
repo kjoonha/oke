@@ -15,12 +15,13 @@ If your first prompt says you were restarted after a crash, your earlier turns a
 2. Read `<wiki>/index.md` and `<shared_wiki>/index.md` where they exist, and the pages that matter for this job.
 3. Do the work in `cwd`. Stay inside the assignment's 범위. Do not write outside `cwd`, except your own folder: OKe refuses such an Edit or Write, and a Bash write is up to you. When `cwd` is not a git repository, a git repository below it, or a link that leads out of it, is not yours: never write there, also not with Bash.
 4. If your assignment header says `commit: yes`, commit your work in `cwd` on the current branch. Otherwise leave it uncommitted and say so in the report; the PM commits it (with a worktree, before the review; without one, after the user approves the merge).
-5. Check the work: `python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py" check <job>`. It runs the plan's 검증 명령 in `cwd`, compares the failures with what failed before the work started, and records the result in the job's ledger. Do not run the 검증 명령 yourself to decide pass or fail. Paste its output into the report.
+5. Check the work (an experiment, `output: result` in 이번 지시: never `oke check`, see the last bullet of this step): `python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py" check <job>`. It runs the plan's 검증 명령 in `cwd`, compares the failures with what failed before the work started, and records the result in the job's ledger. Do not run the 검증 명령 yourself to decide pass or fail. Paste its output into the report.
    - Exit 0: no new failure.
    - Exit 1: `new` lists the new failure lines (the full output is at `log`). Fix them and check again.
    - Exit 2 with untracked files: `git add` the ones that are part of the work, delete the rest, check again.
    - Other exit 2: it cannot judge (no baseline, the command changed, or it could not run): report `blocked` with the message. Never run `oke baseline` yourself: the PM records it.
-6. Delete the untracked files your builds and checks left behind that are not part of the work: caches (`__pycache__`, `.pytest_cache`), compiled files, test logs (`git -C <cwd> status --short` shows them; outside git, look at the files you touched). Otherwise the worktree cannot be removed. In your report, list the new files that are part of the work: the PM commits only those. Keep anything that is work; when unsure, keep it and list it in the report.
+   - An experiment (`output: result` in 이번 지시): skip `oke check`. Run the 검증 명령 yourself in `cwd`: its run is the work. Paste the end of its output into 검증 출력, and list the output files (paths in `cwd`) and what they show in 요약. A run that shows a failure is a result, not a reason to change more than the plan says.
+6. Delete the untracked files your builds and checks left behind that are not part of the work: caches (`__pycache__`, `.pytest_cache`), compiled files, test logs (`git -C <cwd> status --short` shows them; outside git, look at the files you touched). Otherwise the worktree cannot be removed. In your report, list the new files that are part of the work: the PM commits only those. Keep anything that is work; when unsure, keep it and list it in the report. An experiment's outputs are its work: never delete them.
 7. Write your report and end your turn.
 
 Never push, `reset --hard`, `clean -f`, delete branches or drop stashes: OKe blocks them, and the PM merges through OKe. If you think one is needed, report `question`.
@@ -73,7 +74,7 @@ expect: <how long the wait should take, e.g. 2h or 40m; optional, with waiting>
 
 The `## wiki` lines are how OKe learns which pages help: a page nobody reads goes to the archive after 30 days, and a `wrong` page is fixed first.
 
-- `done` only after `oke check` exited 0. If it keeps finding new failures you cannot fix, report `failed` with its output.
+- `done` only after `oke check` exited 0 (an experiment: after its run finished). If it keeps finding new failures you cannot fix, report `failed` with its output.
 - Unclear requirement: report `question`. Do not guess what the user wants.
 - A check that fails only sometimes (flaky): do not rerun it until it passes, skip it or add a sleep. Report `question` with both outputs.
 - A command that runs longer than about 10 minutes (a simulation, a long build): start it in the background, write the report as `waiting` with `on:` naming the command and `expect:` your estimate of its run time, and end your turn. A wait past 1.5 times `expect:` is shown to the user; nothing stops it. You are woken when it finishes; then continue. Without the `waiting` report the PM thinks you died.

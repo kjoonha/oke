@@ -1168,5 +1168,314 @@ class TestMigration(SpawnBase):
         self.assertNotIn("repo", st["jobs"]["fix-a"])
 
 
+class TestOutputs(PmBase):
+    """What a job hands over: code (a merge), files (a folder job), result (an answer or a run)."""
+
+    def setUp(self):
+        PmBase.setUp(self)
+        self.pmc("add", "a")
+
+    def finished(self, job):
+        st = oke.load_state()
+        st["jobs"][job]["phase"] = "done"
+        oke.save_state(st)
+
+    def plan(self, job, worktree=True):
+        self.write("home/jobs/%s/plan.md" % job, "job: %s\n---\n## worktree\n%s\n" % (
+            job, ("oke/" + job) if worktree else u"없음"))
+
+    def report(self, job, child, verdict=None):
+        body = ("verdict: %s\n" % verdict) if verdict else "done\n"
+        self.write("home/jobs/%s/%s/report.md" % (job, child), "agent: %s\ntype: done\n---\n%s" % (child, body))
+
+    def worktree(self, job):
+        wt = self.path("wt-" + job)
+        self.git(self.repo, "worktree", "add", "-q", wt, "-b", "oke/" + job)
+        st = oke.load_state()
+        st["jobs"][job]["worktree"] = {"id": "w-" + job, "path": wt}
+        oke.save_state(st)
+        return wt
+
+    def test_the_output_is_set_while_planning_and_shown(self):
+        self.assertEqual(self.new("sim", "a", "--path", self.repo), 0, self.err)
+        self.assertEqual(oke.job_output(oke.load_state()["jobs"]["sim"]), "code")  # the default
+        self.advance("sim", "planning")
+        self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)
+        self.assertEqual(self.cli("status"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["jobs"]["sim"]["output"], "result")
+        self.assertEqual(self.new("notes", "a", "--path", self.folder("notes")), 0, self.err)
+        self.assertEqual(self.cli("job", "output", "notes", "result"), 1)  # a folder job hands over files
+        self.assertIn("its output is the files", self.err)
+        self.assertEqual(self.new("look", "a", "--research"), 0, self.err)
+        self.assertEqual(self.cli("job", "output", "look", "code"), 1)  # research: its answer
+        self.plan("sim")
+        self.advance("sim", "working")
+        self.assertEqual(self.cli("job", "output", "sim", "code"), 1)  # it stays once it works
+        self.assertIn("has worked on its plan", self.err)
+        self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)  # the same again: fine
+
+    def test_an_experiment_needs_a_worktree_never_merges_and_ends_on_a_passing_review(self):
+        self.assertEqual(self.new("sim", "a", "--path", self.repo), 0, self.err)
+        self.assertEqual(self.new("after-sim", "a", "--path", self.folder("notes")), 0, self.err)
+        self.write("home/jobs/after-sim/plan.md", "job: after-sim\nafter: sim\n---\n")
+        self.advance("sim", "planning")
+        self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)
+        self.plan("sim", worktree=False)
+        self.advance("sim", "awaiting_approval")
+        self.assertEqual(self.cli("job", "phase", "sim", "working"), 1)  # its edits would land in main
+        self.assertIn("must name branch oke/sim", self.err)
+        self.plan("sim")
+        self.assertEqual(self.cli("job", "phase", "sim", "working"), 0, self.err)
+        self.worktree("sim")
+        self.assertEqual(self.cli("job", "phase", "sim", "awaiting_merge"), 1)
+        self.assertEqual(self.cli("job", "merge", "sim"), 1)
+        self.assertIn("nothing to merge", self.err)
+        self.assertEqual(self.cli("wiki", "log", "--job", "sim", "--note", "none"), 0, self.err)
+        self.report("sim", "sim-w1")
+        self.assertEqual(self.cli("job", "phase", "sim", "done"), 1)  # no review yet
+        self.assertIn("verdict: pass", self.err)
+        self.report("sim", "sim-rv", "changes")
+        self.assertEqual(self.cli("job", "phase", "sim", "done"), 1)
+        self.report("sim", "sim-rv", "pass")
+        later = os.path.getmtime(self.path("home/jobs/sim/sim-rv/report.md")) + 5
+        os.utime(self.path("home/jobs/sim/sim-w1/report.md"), (later, later))  # the worker ran again
+        self.assertEqual(self.cli("job", "phase", "sim", "done"), 1)
+        os.utime(self.path("home/jobs/sim/sim-rv/report.md"), (later + 5, later + 5))
+        self.assertEqual(self.cli("job", "phase", "sim", "done"), 0, self.err)
+        self.assertIsNone(oke.after_block(oke.load_state(), "sim"))  # finished for its waiters
+        self.assertTrue(oke.wiki_verified("sim", oke.load_state()["jobs"]["sim"]))
+
+    def test_an_archived_experiment_keeps_its_worktree_until_cleaned(self):
+        self.assertEqual(self.new("sim", "a", "--path", self.repo), 0, self.err)
+        self.advance("sim", "planning")
+        self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)
+        self.plan("sim")
+        self.advance("sim", "awaiting_approval")
+        self.assertEqual(self.cli("job", "phase", "sim", "working"), 0, self.err)
+        wt = self.worktree("sim")
+        self.write("wt-sim/out/run.log", "ok\n")  # an output the repository ignores
+        self.finished("sim")  # done (its review is not what these tests check)
+        self.assertEqual(self.cli("job", "archive", "sim"), 0, self.err)
+        self.assertIn("kept_worktree: " + wt, self.out)
+        self.assertEqual(self.cli("status"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["kept_worktrees"], [{"job": "sim", "path": wt}])
+        self.assertEqual(self.cli("job", "clean", "sim"), 0, self.err)
+        self.assertFalse(os.path.isdir(wt))
+        self.assertNotIn("branch_left", json.loads(self.out))
+        self.assertEqual(subprocess.check_output(["git", "-C", self.repo, "branch", "--list", "oke/sim"]), b"")
+        self.assertEqual(self.cli("status"), 0, self.err)
+        self.assertNotIn("kept_worktrees", json.loads(self.out))
+        self.assertEqual(self.cli("job", "clean", "sim"), 1)  # gone already: the archive says so
+        self.assertEqual(self.cli("job", "clean", "nothing"), 1)
+
+    def test_a_code_job_that_changed_nothing_ends_with_no_change(self):
+        self.assertEqual(self.new("fix", "a", "--path", self.repo), 0, self.err)
+        self.assertEqual(self.new("next", "a", "--path", self.folder("notes")), 0, self.err)
+        self.write("home/jobs/next/plan.md", "job: next\nafter: fix\n---\n")
+        self.plan("fix")
+        self.advance("fix", "working")
+        wt = self.worktree("fix")
+        self.write("wt-fix/new.py", "x = 1\n")
+        self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 1)
+        self.assertIn("new files: new.py", self.err)
+        os.remove(os.path.join(wt, "new.py"))
+        self.write("wt-fix/a.txt", "a\n")
+        self.git(wt, "add", "a.txt")
+        self.git(wt, "commit", "-q", "-m", "a")
+        self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 1)
+        self.assertIn("commits on its branch", self.err)
+        self.git(wt, "revert", "--no-edit", "HEAD")  # undone, with a commit: no change left
+        self.assertEqual(self.cli("job", "output", "fix", "code", "--no-change"), 1)  # it ends as result
+        self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 0, self.err)
+        info = oke.load_state()["jobs"]["fix"]
+        self.assertEqual((oke.job_output(info), info["no_change"]), ("result", True))
+        self.assertEqual([(r["by"], r["check"], r["result"]) for r in oke.ledger_rows("fix")],
+                         [("orchestrator", "no-change", "accept")])
+        self.assertEqual(self.cli("wiki", "log", "--job", "fix", "--note", "none"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "fix", "done"), 0, self.err)  # no review: the user accepted
+        self.assertIsNone(oke.after_block(oke.load_state(), "fix"))
+        self.assertEqual(self.cli("job", "archive", "fix"), 0, self.err)
+        self.assertNotIn("kept_worktree", self.out)  # an experiment only
+        self.assertIsNone(oke.after_block(oke.load_state(), "fix"))  # archived: still finished
+
+    def test_no_change_in_the_main_checkout_and_before_it_worked(self):
+        self.assertEqual(self.new("look", "a", "--path", self.repo), 0, self.err)
+        self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
+        self.advance("look", "awaiting_approval")
+        self.write("toy/x.txt", "x\n")
+        self.git(self.repo, "add", "x.txt")  # someone else's change: look never worked
+        self.assertEqual(self.cli("job", "output", "look", "result", "--no-change"), 0, self.err)
+        self.assertEqual(self.cli("wiki", "log", "--job", "look", "--note", "none"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "look", "done"), 0, self.err)
+        self.plan("small", worktree=False)
+        self.advance("small", "working")  # it works in the main checkout: its changes are there
+        self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 1)
+        self.assertIn("changed files: x.txt", self.err)
+        self.git(self.repo, "rm", "-q", "--cached", "x.txt")
+        os.remove(os.path.join(self.repo, "x.txt"))
+        self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 0, self.err)
+
+    def test_a_no_change_job_leaves_no_worktree_behind(self):
+        self.assertEqual(self.new("fix", "a", "--path", self.repo), 0, self.err)
+        self.plan("fix")
+        self.advance("fix", "working")
+        wt = self.worktree("fix")
+        os.makedirs(os.path.join(wt, "__pycache__"))  # a run's byproduct: git alone would keep the folder
+        with io.open(os.path.join(wt, "__pycache__", "a.pyc"), "w", encoding="utf-8") as f:
+            f.write(u"x")
+        self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 0, self.err)
+        self.assertEqual(self.cli("wiki", "log", "--job", "fix", "--note", "none"), 0, self.err)
+        self.assertEqual(self.cli("job", "archive", "fix"), 1)  # not done yet: it stays open
+        self.assertIn("not done or failed", self.err)
+        self.assertEqual(self.cli("job", "phase", "fix", "done"), 0, self.err)
+        self.assertEqual(self.cli("job", "archive", "fix"), 0, self.err)
+        self.assertFalse(os.path.isdir(wt))
+        self.assertNotIn("kept_worktree", self.out)
+        self.assertEqual(subprocess.check_output(["git", "-C", self.repo, "branch", "--list", "oke/fix"]), b"")
+
+    def test_a_replan_records_the_output_again(self):
+        self.assertEqual(self.new("sim", "a", "--path", self.repo), 0, self.err)
+        self.advance("sim", "planning")
+        self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)
+        self.advance("sim", "awaiting_approval")
+        self.assertEqual(self.cli("job", "phase", "sim", "planning"), 0, self.err)  # the user wants a fix
+        self.assertEqual(self.cli("job", "output", "sim", "code"), 0, self.err)
+        self.assertEqual(oke.job_output(oke.load_state()["jobs"]["sim"]), "code")
+
+    def test_a_replan_after_the_approval_may_change_an_output_nothing_used_yet(self):
+        self.assertEqual(self.new("sim", "a", "--path", self.repo), 0, self.err)
+        self.plan("sim")
+        self.advance("sim", "working")
+        wt = self.worktree("sim")
+        self.assertEqual(self.cli("job", "phase", "sim", "planning"), 0, self.err)  # the user wants another way
+        self.assertEqual(self.cli("job", "output", "sim", "code"), 0, self.err)  # the same: always fine
+        self.write("wt-sim/a.txt", "a\n")
+        self.assertEqual(self.cli("job", "output", "sim", "result"), 1)  # it made a change already
+        self.assertIn("Report a question", self.err)
+        os.remove(os.path.join(wt, "a.txt"))
+        self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)
+        self.assertEqual(oke.job_output(oke.load_state()["jobs"]["sim"]), "result")
+
+    def test_a_job_without_a_path_yet_ends_with_no_change(self):
+        self.assertEqual(self.new("idea", "a"), 0, self.err)
+        self.advance("idea", "planning")
+        self.assertEqual(self.cli("job", "output", "idea", "result"), 1)  # an output needs the path
+        self.assertEqual(self.cli("job", "output", "idea", "result", "--no-change"), 0, self.err)
+        self.assertEqual(self.cli("wiki", "log", "--job", "idea", "--note", "none"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "idea", "done"), 0, self.err)
+
+    def test_clean_removes_through_herdr_the_workspace_found_by_its_path(self):
+        self.assertEqual(self.new("sim", "a", "--path", self.repo), 0, self.err)
+        self.advance("sim", "planning")
+        self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)
+        self.plan("sim")
+        self.advance("sim", "awaiting_approval")
+        self.assertEqual(self.cli("job", "phase", "sim", "working"), 0, self.err)
+        wt = self.worktree("sim")  # stored id w-sim: herdr may give that id to another workspace later
+        self.finished("sim")  # done (its review is not what these tests check)
+        self.assertEqual(self.cli("job", "archive", "sim"), 0, self.err)
+        self.fake({"worktree list": [J({"worktrees": [
+                       {"path": self.repo, "is_linked_worktree": False, "open_workspace_id": "w2"},
+                       {"path": "\\\\?\\" + wt, "is_linked_worktree": True, "open_workspace_id": "w9"}]})],
+                   "worktree remove": [J({})]})
+        self.assertEqual(self.cli("job", "clean", "sim"), 0, self.err)
+        removes = [c for c in self.calls() if c[:2] == ["worktree", "remove"]]
+        self.assertEqual(removes, [["worktree", "remove", "--workspace", "w9", "--force"]])
+        self.assertFalse(os.path.isdir(wt))  # the fake removed nothing: git did
+
+    def test_no_change_writes_the_wiki_line_the_pm_left_out(self):
+        self.assertEqual(self.new("idea", "a", "--path", self.repo), 0, self.err)
+        st = oke.load_state()
+        st["pms"]["a"]["pm"]["agent"] = "a"  # a PM that has run
+        oke.save_state(st)
+        self.advance("idea", "awaiting_approval")
+        self.assertEqual(self.cli("job", "output", "idea", "result", "--no-change"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "idea", "done"), 0, self.err)  # no round to the PM
+        with io.open(os.path.join(oke.wiki_dir("a"), "log.md"), encoding="utf-8") as f:
+            self.assertIn("idea: ended with no change", f.read())
+        self.assertTrue(any("ended with no change" in t for _, t in oke.inbox_messages("a")))  # the PM is told
+
+    def test_no_change_ignores_the_main_checkout_of_a_job_still_without_its_worktree(self):
+        self.assertEqual(self.new("fix", "a", "--path", self.repo), 0, self.err)
+        self.plan("fix")
+        self.advance("fix", "working")  # approved, but `oke worktree` never ran
+        self.write("toy/user.txt", "mine\n")
+        self.git(self.repo, "add", "user.txt")
+        self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 0, self.err)
+
+    def test_a_replan_into_a_worktree_still_sees_the_edits_left_in_the_main_checkout(self):
+        self.assertEqual(self.new("fix", "a", "--path", self.repo), 0, self.err)
+        self.plan("fix", worktree=False)
+        self.advance("fix", "working")  # worked in the main checkout
+        self.write("toy/a.txt", "edited by the job\n")
+        self.git(self.repo, "add", "a.txt")
+        self.plan("fix")  # the replan moves it to a worktree
+        self.advance("fix", "planning")
+        self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 1)
+        self.assertIn("a.txt", self.err)
+        self.worktree("fix")  # its new worktree is clean: the main checkout still counts
+        self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 1)
+        self.assertIn("main checkout: a.txt", self.err)
+        st = oke.load_state()
+        st["jobs"]["fix"].pop("worktree")
+        st["jobs"]["fix"].pop("worked_in_main")  # a job from before the flag, its plan without a worktree
+        oke.save_state(st)
+        self.plan("fix", worktree=False)
+        self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 1)
+
+    def test_a_folder_job_ends_with_no_change_on_the_users_word(self):
+        notes = self.folder("notes")
+        self.assertEqual(self.new("notes", "a", "--path", notes), 0, self.err)
+        self.advance("notes", "working")
+        self.write("notes/a.txt", "a\n")  # outside git: nothing to compare with
+        self.assertEqual(self.cli("job", "output", "notes", "result", "--no-change"), 0, self.err)
+        info = oke.load_state()["jobs"]["notes"]
+        self.assertEqual((oke.job_output(info), info["no_change"]), ("files", True))
+        self.assertEqual(self.cli("wiki", "log", "--job", "notes", "--note", "none"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "notes", "done"), 0, self.err)
+
+    def test_the_no_change_refusal_names_the_files(self):
+        self.write("toy/src/a.py", "a = 1\n")
+        self.git(self.repo, "add", "src/a.py")
+        self.git(self.repo, "commit", "-q", "-m", "a")
+        self.assertEqual(self.new("fix", "a", "--path", self.repo), 0, self.err)
+        self.plan("fix", worktree=False)
+        self.advance("fix", "working")
+        self.write("toy/src/a.py", "a = 2\n")
+        self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 1)
+        self.assertIn("changed files: src/a.py", self.err)
+
+    def test_clean_finds_the_experiment_among_archives_of_one_name(self):
+        self.assertEqual(self.new("sim", "a", "--path", self.repo), 0, self.err)
+        self.advance("sim", "planning")
+        self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)
+        self.plan("sim")
+        self.advance("sim", "awaiting_approval")
+        self.assertEqual(self.cli("job", "phase", "sim", "working"), 0, self.err)
+        wt = self.worktree("sim")
+        self.finished("sim")  # done (its review is not what these tests check)
+        self.assertEqual(self.cli("job", "archive", "sim"), 0, self.err)
+        later = self.path("home/archive/sim-29991231-235959")  # a later archive of that name
+        os.makedirs(later)
+        oke.write_json_atomic(os.path.join(later, "job.json"), {"size": "research", "phase": "done"})
+        self.assertEqual(self.cli("job", "clean", "sim"), 0, self.err)
+        self.assertFalse(os.path.isdir(wt))
+
+    def test_only_the_orchestrator_ends_a_job_with_no_change(self):
+        self.assertEqual(self.new("fix", "a", "--path", self.repo), 0, self.err)
+        self.advance("fix", "planning")
+        st = oke.load_state()
+        st["pms"]["a"]["pm"] = {"agent": "a", "pane": "p-pm"}
+        oke.save_state(st)
+        os.environ["HERDR_PANE_ID"] = "p-pm"
+        self.fake({"agent list": [J({"agents": [AG("a", pane="p-pm")]})]})
+        try:
+            self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 1)
+            self.assertIn("only the orchestrator", self.err)
+            self.assertEqual(self.cli("job", "output", "fix", "result"), 0, self.err)  # planning: the PM's call
+        finally:
+            del os.environ["HERDR_PANE_ID"]
+
+
 if __name__ == "__main__":
     unittest.main()

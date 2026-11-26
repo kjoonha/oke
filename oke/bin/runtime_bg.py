@@ -309,11 +309,14 @@ class BgRuntime(object):
                 f.write(u"\n%s\n" % line)
         return {"id": path, "path": path, "place": path}
 
-    def worktree_remove(self, wid):
-        git_worktree_remove(wid)
+    def worktree_workspace(self, repo, path):
+        return None  # no workspaces: the folder is all there is
+
+    def worktree_remove(self, wid, force=False):
+        git_worktree_remove(wid, force=force)
 
 
-def git_worktree_remove(wid, main=None):
+def git_worktree_remove(wid, main=None, force=False):
     """Remove the git worktree at path `wid`; its branch stays (as herdr does). `main`: the
     main checkout, when known; a folder already gone is then pruned from git's list."""
     if main is None:
@@ -321,7 +324,8 @@ def git_worktree_remove(wid, main=None):
         main = os.path.dirname(os.path.join(wid, common.decode("utf-8").strip()))  # may be relative to wid
     # Run from the main checkout: on Windows git cannot delete the folder it runs in.
     # Without --force, git refuses a worktree with changes, like herdr does.
-    argv = ["worktree", "remove", wid] if os.path.isdir(wid) else ["worktree", "prune"]
+    argv = (["worktree", "remove"] + (["--force"] if force else []) + [wid]) if os.path.isdir(wid) \
+        else ["worktree", "prune"]
     p = subprocess.Popen(["git", "-C", main] + argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, err = p.communicate()
     if p.returncode != 0:
