@@ -1298,6 +1298,52 @@ class TestOutputs(PmBase):
         self.assertNotIn("kept_worktree", self.out)  # an experiment only
         self.assertIsNone(oke.after_block(oke.load_state(), "fix"))  # archived: still finished
 
+    def test_a_start_in_the_main_checkout_takes_in_only_what_the_plan_names(self):
+        self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
+        self.plan("small", worktree=False)
+        self.advance("small", "awaiting_approval")
+        self.write("toy/x.txt", "x\n")
+        self.git(self.repo, "add", "x.txt")  # the user's uncommitted change
+        self.assertEqual(self.cli("job", "phase", "small", "working"), 1)
+        self.assertIn("x.txt", self.err)
+        self.assertIn(u"미커밋: 포함", self.err)
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## worktree\n없음\n미커밋: 포함: x.txt\n")
+        self.assertEqual(oke.plan_uncommitted("small"), ["x.txt"])
+        self.assertEqual(self.cli("job", "phase", "small", "working"), 0, self.err)
+        self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 1)  # x.txt is the job's now
+        self.assertIn("x.txt", self.err)
+
+    def test_the_plan_names_korean_files_and_renames_as_git_stores_them(self):
+        self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
+        self.advance("small", "awaiting_approval")
+        self.write(u"toy/문서.md", "x\n")
+        self.git(self.repo, "add", u"문서.md")
+        self.write("toy/README.md", "r\n")
+        self.git(self.repo, "add", "README.md")
+        self.git(self.repo, "commit", "-qm", "r", "README.md")  # 문서.md stays staged, uncommitted
+        self.git(self.repo, "mv", "README.md", "READ ME.md")
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## worktree\n없음\n미커밋: 포함: 문서.md\n")
+        self.assertEqual(self.cli("job", "phase", "small", "working"), 1)
+        self.assertIn("READ ME.md", self.err)
+        self.assertNotIn(u"문서", self.err)
+        self.write("home/jobs/small/plan.md",
+                   u"job: small\n---\n## worktree\n없음\n미커밋: 포함: `문서.md`, \"READ ME.md\"\n")
+        self.assertEqual(self.cli("job", "phase", "small", "working"), 0, self.err)
+
+    def test_a_file_under_oke_slash_job_is_not_a_worktree(self):
+        self.assertEqual(self.new("bin", "a", "--path", self.repo), 0, self.err)
+        self.write("home/jobs/bin/plan.md", u"job: bin\n---\n## worktree\n없음\n미커밋: 포함: oke/bin/x.py\n")
+        self.assertFalse(oke.plan_worktree("bin"))
+
+    def test_a_start_in_a_worktree_ignores_the_main_checkout(self):
+        self.assertEqual(self.new("fix", "a", "--path", self.repo), 0, self.err)
+        self.plan("fix")
+        self.advance("fix", "awaiting_approval")
+        self.write("toy/x.txt", "x\n")
+        self.git(self.repo, "add", "x.txt")
+        self.advance("fix", "working")
+        self.assertIs(oke.load_state()["jobs"]["fix"]["worked_in_main"], False)
+
     def test_no_change_in_the_main_checkout_and_before_it_worked(self):
         self.assertEqual(self.new("look", "a", "--path", self.repo), 0, self.err)
         self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
@@ -1307,9 +1353,10 @@ class TestOutputs(PmBase):
         self.assertEqual(self.cli("job", "output", "look", "result", "--no-change"), 0, self.err)
         self.assertEqual(self.cli("wiki", "log", "--job", "look", "--note", "none"), 0, self.err)
         self.assertEqual(self.cli("job", "phase", "look", "done"), 0, self.err)
+        self.git(self.repo, "commit", "-qm", "x")  # the user commits it before small starts in the main checkout
         self.plan("small", worktree=False)
         self.advance("small", "working")  # it works in the main checkout: its changes are there
-        self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 0, self.err)  # x.txt: from before it
+        self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 0, self.err)
         st = oke.load_state()
         st["jobs"]["small"].pop("no_change")
         st["jobs"]["small"]["output"] = "code"

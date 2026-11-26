@@ -33,7 +33,7 @@ job: <job>
 after: <job>[, <job>]   (only when the peer talk showed this job must wait for another job, or its intake says so: a job that never merges (a folder job, an experiment) starts, a code job merges, only after it)
 ---
 ## 접근             (first line: size: <size>, output: <output> and one line why)
-## worktree        (with one: its branch, oke/<job>; without: 없음)
+## worktree        (with one: its branch, oke/<job>; without: 없음, and on the next line `미커밋: 없음` or `미커밋: 포함: <file>, <file>`)
 ## 단위 작업        (ordered list for the worker)
 ## 수용 기준        (numbered list: the interview's 성공 기준, one checkable line each)
 ## 검증 명령        (required: `<one bash command>` in backticks on the first line, then what passing looks like)
@@ -47,6 +47,6 @@ after: <job>[, <job>]   (only when the peer talk showed this job must wait for a
 
 **Output.** `code`: the job changes files to keep (the usual case). `result`: what the job hands over is a run's outputs or what they show, and any edit is only for that run (an experiment: change a line, run the simulation, read the output). A result job always has a worktree, at every size: its edits must never reach the main checkout. It is never `small`: its run may take long, and only a worker pane waits for one. A direct job (outside git) is `files`: its folder's files are what it hands over.
 
-**Worktree.** Use no worktree only when the change is small and no other OKe job of this checkout is open: a job without a worktree changes the main checkout that every merge uses. A direct job (the folder is outside git) never has one: 없음.
+**Worktree.** Use no worktree only when the change is small and no other OKe job of this checkout is open: a job without a worktree changes the main checkout that every merge uses. A direct job (the folder is outside git) never has one: 없음. Without a worktree, look at `git -C <path> -c core.quotepath=off status --porcelain -uno`: every uncommitted change to a tracked file there becomes the job's and is committed with it (an untracked file only when the job stages it). Write `미커밋: 없음` when it prints nothing. When it lists files, decide from the request: they are the work the user wants carried on ("finish what I was doing"): `미커밋: 포함:` and every file it lists, as paths relative to the checkout without quotes (a rename: its new path); otherwise use a worktree, which leaves them alone. Unsure: ask in 사용자에게 물을 것. OKe refuses to start the job in the main checkout while it holds an uncommitted change the plan does not name.
 
 **다른 경로 영향.** Leave it for the PM: write what this plan changes that other code may use, or `없음 (nothing other code uses)`. The PM asks the other PMs and fills in their answers.

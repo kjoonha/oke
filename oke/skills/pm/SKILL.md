@@ -101,7 +101,7 @@ A planner subagent finds the job's path, reads it and drafts the plan; you check
 4. `outside:` is not `none`: code outside the job's path may use what changes. Your own other jobs' paths you judge yourself (read them; say what you found in 다른 경로 영향). For other PMs read and follow "Asking" in `${CLAUDE_PLUGIN_ROOT}/skills/pm/references/peers.md`. Work that must change another path is a split job (step 2). Work each answer into the plan yourself; when an answer changes the approach, call the planner again with the answers. `none`: 다른 경로 영향 is `없음 (nothing other code uses)`.
 5. Report `done` with a short summary, or `question` if the plan's 사용자에게 물을 것 is not 없음 (the intake is not enough to plan).
 
-Whether the main checkout already holds the user's own changes is your call when the plan has no worktree: without one, `$OKE job merge` commits every tracked change there (new files only as you stage them).
+Where the job works is your call, and the user approves it with the plan: without a worktree, `$OKE job merge` commits every tracked change in the main checkout (new files only as you stage them), so the plan's `## worktree` section says `미커밋: 없음`, or `미커밋: 포함: <files>` for the user's uncommitted changes it takes in as its own (the user's "finish what I was doing"). `$OKE job phase <job> working` refuses while the main checkout holds an uncommitted change the plan does not name: the orchestrator asks the user and gives you `kind: plan`.
 
 ### Job size
 

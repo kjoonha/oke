@@ -4093,7 +4093,52 @@ def plan_worktree(job):
             section = re.search(r"^## worktree[^\n]*\n(.*?)(?=^## |\Z)", f.read(), re.M | re.S)
     except (OSError, ValueError):
         return False
-    return bool(section) and ("oke/" + job) in section.group(1)
+    if not section:
+        return False
+    # the 미커밋 line names files, which may contain oke/<job> too
+    lines = [l for l in section.group(1).splitlines() if not re.match(u"\\s*미커밋:", l)]
+    return ("oke/" + job) in "\n".join(lines)
+
+
+def uncommitted_tracked(cwd):
+    """The checkout's uncommitted changes to tracked files, each as the list of its paths
+    (a rename or copy: the new path, then the old one), exactly as git stores them, or None
+    when git fails."""
+    try:
+        p = subprocess.run(["git", "-C", cwd, "status", "--porcelain", "-z", "-uno"],
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    if p.returncode != 0:
+        return None
+    fields, out, i = p.stdout.decode("utf-8", "replace").split("\0"), [], 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        paths = [entry[3:]]
+        if "R" in entry[:2] or "C" in entry[:2]:
+            paths.append(fields[i] if i < len(fields) else "")
+            i += 1
+        out.append(paths)
+    return out
+
+
+def plan_uncommitted(job):
+    """The main checkout's uncommitted files the plan takes in as the job's own change
+    (its `## worktree` section's `미커밋: 포함: <file>, <file>` line), or [] (`미커밋: 없음`,
+    or no such line)."""
+    try:
+        with io.open(os.path.join(oke_home(), "jobs", job, "plan.md"), encoding="utf-8") as f:
+            section = re.search(r"^## worktree[^\n]*\n(.*?)(?=^## |\Z)", f.read(), re.M | re.S)
+    except (OSError, ValueError):
+        return []
+    line = re.search(u"^\\s*미커밋:\\s*포함:\\s*(.+)$", section.group(1), re.M) if section else None
+    if not line:
+        return []
+    names = [p.strip().strip("`\"'").strip() for p in line.group(1).split(",")]
+    return [n.replace("\\", "/") for n in names if n]
 
 
 PHASE_FROM = {
@@ -4434,6 +4479,20 @@ def job_locked(args):
         if args.phase == "working" and experiment(info) and not plan_worktree(args.slug):
             return fail("job %s is an experiment (output result): its plan's `## worktree` must name branch "
                         "oke/%s, so its edits never reach the main checkout" % (args.slug, args.slug))
+        if args.phase == "working" and info.get("git_key") and not info.get("direct") \
+                and info.get("size") != "research" and not plan_worktree(args.slug) and not info.get("worked_in_main") \
+                and not ("worked_in_main" not in info and info.get("worked")):
+            # it starts in the main checkout: every uncommitted change there becomes the job's,
+            # so the plan must name each one it takes in (the user approved that)
+            main = native_path(repo_dir(info["git_key"]))
+            named = set(plan_uncommitted(args.slug))
+            unnamed = [" <- ".join(paths) for paths in (uncommitted_tracked(main) or [])
+                       if not named.intersection(paths)]
+            if unnamed:
+                return fail(u"the main checkout %s has uncommitted changes the plan of job %s does not take in "
+                            u"(%s): working there, the job would commit them. Ask the user, then give the PM "
+                            u"`kind: plan`: a worktree, or `미커밋: 포함: <files>` naming them as the job's"
+                            % (main, args.slug, ", ".join(unnamed[:5])))
         if args.phase == "working" and never_merges(info) and info.get("size") != "research" \
                 and now in GATE_PHASES:
             # it never merges, so `after:` holds its start instead of its merge (a move back
@@ -4484,10 +4543,8 @@ def job_locked(args):
             info["worked"] = True  # a later re-plan does not undo the edits already made
             if not plan_worktree(args.slug):
                 info["worked_in_main"] = True  # its edits may sit in the main checkout, whatever a re-plan says
-                if "main_before" not in info and info.get("git_key") and not info.get("direct"):
-                    # the user's own edits there before the job started are not the job's change
-                    code, dirty = git_out(native_path(repo_dir(info["git_key"])), "status", "--porcelain", "-uno")
-                    info["main_before"] = [l.strip() for l in dirty.splitlines()] if code == 0 else []
+            else:
+                info.setdefault("worked_in_main", False)  # new state: never read as an old job's
         if args.phase not in ("intake", "planning", "awaiting_approval", "failed"):
             info["approved"] = True  # past its approval once: its path stays
         save_state(state)
