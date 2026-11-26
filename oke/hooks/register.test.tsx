@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { THEME_NAMES, framesOf, keyDenied, orchestratorDenied, paletteOf, promptRole, workerDenied, writeVerdict } from './register'
+import { THEME_NAMES, framesOf, keyDenied, orchestratorDenied, paletteOf, promptRole, withBriefs, workerDenied, writeVerdict } from './register'
 
 type Run = { argv: readonly string[] }
 
@@ -1045,4 +1045,15 @@ test('the board names each PM and each job its path', async ($, on) => {
   await ui.unmount()
   tickBoard = BOARD
   tickRole = 'worker'
+})
+
+test('the plan approval question shows the job brief as its first option preview', () => {
+  const briefs = [{ job: 'k-to-c', path: 'c:/work/conv', brief: 'job: k-to-c\npath: c:/work/conv' }]
+  const ask = [{ question: 'C:\\Work\\conv 에서 작업합니다. 승인할까요?', header: 'Plan',
+    options: [{ label: '승인', preview: 'short' }, { label: '고쳐' }] }]
+  const out = withBriefs(ask, briefs)!
+  expect(out[0].options[0].preview).toBe(briefs[0].brief)
+  expect(out[0].options[1].preview).toBeUndefined()
+  expect(withBriefs([{ question: 'PM 이름?', header: 'PM', options: [{ label: 'a' }] }], briefs)).toBeNull()
+  expect(withBriefs([{ ...ask[0], multiSelect: true }], briefs)).toBeNull()
 })

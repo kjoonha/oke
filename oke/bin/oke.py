@@ -2747,6 +2747,15 @@ def job_brief(job):
 
 def cmd_job(args):
     if args.action == "brief":
+        if args.json:  # the mod: every job awaiting approval, for the approval popup's preview
+            jobs = load_state()["jobs"]
+            print(json.dumps({"briefs": [{"job": j, "path": native_path(info["path"]) if info.get("path") else "",
+                                     "brief": job_brief(j)}
+                                    for j, info in sorted(jobs.items())
+                                    if info.get("phase") == "awaiting_approval"]}))
+            return 0
+        if not args.slug:
+            return fail("name the job")
         try:
             text = job_brief(args.slug)
         except StateError as e:
@@ -5590,7 +5599,8 @@ def build_parser():
     new.add_argument("--path", help="the folder the job changes, only when the user said it")
     new.add_argument("--research", action="store_true", help="look and report: no change, no merge")
     jb = job_sub.add_parser("brief", help="the plan as the user reads it before approving")
-    jb.add_argument("slug")
+    jb.add_argument("slug", nargs="?")
+    jb.add_argument("--json", action="store_true", help="every job awaiting approval, as JSON")
     jp = job_sub.add_parser("path", help="the PM sets the job's one path while planning")
     jp.add_argument("slug")
     jp.add_argument("path")

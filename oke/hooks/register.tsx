@@ -492,6 +492,27 @@ export function workerDenied(tool: string, input: any, own: string | null): stri
  * Every request becomes a job, so plan approval, review and the merge gate are never
  * skipped. It writes only OKe's home outside the wikis (those change through `oke wiki`)
  * and its own memory (<claude config>/projects/<project>/memory/). */
+export type Brief = { job: string, path: string, brief: string }
+
+/** The plan approval popup shows the plan itself: a question that names a job awaiting
+ * approval (its path or its name) gets that job's `oke job brief` as its first option's
+ * preview. Seen live: orchestrators wrote only a line of summary there and in the chat.
+ * null when no question names one. */
+export function withBriefs(questions: any[], briefs: Brief[]): any[] | null {
+  const norm = (s: string) => s.toLowerCase().replace(/\\/g, '/')
+  let changed = false
+  const out = questions.map(q => {
+    if (!q || q.multiSelect || !Array.isArray(q.options) || !q.options.length) return q
+    const text = norm(`${q.question ?? ''} ${q.header ?? ''}`)
+    const hit = briefs.filter(b => (b.path && text.includes(norm(b.path))) || text.includes(b.job.toLowerCase()))
+    if (!hit.length) return q
+    changed = true
+    const preview = hit.map(b => b.brief).join('\n\n')
+    return { ...q, options: q.options.map((o: any, i: number) => (i === 0 ? { ...o, preview } : o)) }
+  })
+  return changed ? out : null
+}
+
 export function orchestratorDenied(tool: string, input: any,
   dirs: { home: string | null, wiki?: string | null, claude?: string | null, root?: string | null }): string | null {
   const why = 'OKe orchestrators never do the work: make it a job (`oke job new`) and give it to the PM.'
@@ -1202,6 +1223,12 @@ export const register: Register = on => {
         }
         const denied = orchestratorDenied(e.tool, e, { home, wiki, claude: claudeDir, root })
         if (denied) return { deny: denied }
+        if (e.tool === 'AskUserQuestion' && Array.isArray((e as any).questions)) {
+          const out = await oke($, ['job', 'brief', '--json'])
+          const questions = Array.isArray(out?.briefs) && out.briefs.length
+            ? withBriefs((e as any).questions, out.briefs) : null
+          if (questions) return next({ ...e, questions } as any)
+        }
       }
       const ran: any = await next(e)
       // /oke:start in a session older than a minute: an unknown pane ticks only every 60 s,

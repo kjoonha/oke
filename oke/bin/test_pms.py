@@ -1346,6 +1346,16 @@ class TestOutputs(PmBase):
         self.assertIn("## Check command", self.out)
         self.assertNotIn("Impact elsewhere", self.out)
         self.assertTrue(lines[-1].startswith("plan: "))
+        # the mod's form: only jobs awaiting approval
+        self.assertEqual(self.cli("job", "brief", "--json"), 0, self.err)
+        self.assertEqual(json.loads(self.out.splitlines()[-1]), {"briefs": []})
+        st = oke.load_state()
+        st["jobs"]["small"]["phase"] = "awaiting_approval"
+        oke.save_state(st)
+        self.assertEqual(self.cli("job", "brief", "--json"), 0, self.err)
+        briefs = json.loads(self.out.splitlines()[-1])["briefs"]
+        self.assertEqual([b["job"] for b in briefs], ["small"])
+        self.assertIn(u"1. 고친다", briefs[0]["brief"])
 
     def test_the_workspace_section(self):
         self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
