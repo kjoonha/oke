@@ -2765,6 +2765,10 @@ def cmd_job(args):
                   "user says so)" % (wt, args.slug))
         if branch_left:
             print("branch_left: %s" % branch_left)
+    if code == 0 and getattr(args, "drop_branch", None):
+        # -d only: git keeps a branch that is not merged, or that a worktree still has checked out
+        subprocess.call(["git", "-C", native_path(repo_dir(args.drop_branch["git_key"])), "branch", "-q", "-d",
+                         "oke/" + args.slug], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if code == 0 and key and args.action == "unhold":
         drop_job_mail(args.slug, key, HOLD_NOTICE.split(":")[0] % args.slug)  # if the PM has not read it
     if code == 0 and left:
@@ -4617,6 +4621,8 @@ def job_locked(args):
         wt = (info_was.get("worktree") or {}).get("path")
         if info_was.get("no_change") and wt and info_was.get("git_key"):
             args.drop_worktree = (dst, info_was)  # removed after the state lock: runtime and git are slow
+        elif job_output(info_was) == "code" and info_was.get("git_key") and info_was.get("phase") == "done":
+            args.drop_branch = info_was  # merged: its branch goes too, after the lock
         if experiment(info_was) and wt:
             print("kept_worktree: %s (the experiment's outputs: remove it with `$OKE job clean %s` when the user "
                   "says so)" % (wt, args.slug))

@@ -374,6 +374,23 @@ class TestLedgerAndVerify(MergeBase):
         self.assertEqual(self.verify("exit 1"), 0)  # verified stays verified
         self.assertTrue(json.loads(self.out)["already"])
 
+    def test_archive_deletes_the_merged_branch_and_keeps_an_unmerged_one(self):
+        self.merge()
+        self.assertEqual(self.verify("test -f a.txt"), 0, self.err)
+        self.assertEqual(self.cli("wiki", "log", "--job", "fix-a", "--note", "none"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
+        self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
+        self.assertEqual(self.git_out(self.repo, "branch", "--list", "oke/fix-a"), "")
+        self.job("fix-b", "working")
+        self.git(self.repo, "branch", "oke/fix-b")
+        self.git(self.repo, "checkout", "-q", "oke/fix-b")
+        self.write("toy/b.txt", "b\n")
+        self.git(self.repo, "add", "-A")
+        self.git(self.repo, "commit", "-q", "-m", "b")
+        self.git(self.repo, "checkout", "-q", "-")
+        self.assertEqual(self.archive("fix-b"), 0, self.err)  # done without its merge: the work stays
+        self.assertIn("oke/fix-b", self.git_out(self.repo, "branch", "--list", "oke/fix-b"))
+
     def test_a_failing_check_rolls_the_merge_back(self):
         pre = self.git_out(self.repo, "rev-parse", "HEAD").strip()
         self.merge()

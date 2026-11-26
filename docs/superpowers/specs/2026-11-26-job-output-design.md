@@ -69,6 +69,9 @@ never has to go back to the PM.
 Archive removes a no-change job's clean worktree and its branch (`git branch -d`); one it cannot remove
 is listed like an experiment's and removed with `job clean`.
 
+Archive of a finished code job deletes its branch `oke/<job>` with `git branch -d`, which git refuses
+for a branch that is not merged or still checked out in a worktree: those stay.
+
 ## Experiment job (result in a worktree)
 
 - Plan approval follows `autonomy` as for any job.
