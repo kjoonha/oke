@@ -1056,4 +1056,14 @@ test('the plan approval question shows the job brief as its first option preview
   expect(out[0].options[1].preview).toBeUndefined()
   expect(withBriefs([{ question: 'PM 이름?', header: 'PM', options: [{ label: 'a' }] }], briefs)).toBeNull()
   expect(withBriefs([{ ...ask[0], multiSelect: true }], briefs)).toBeNull()
+  // a name only whole, a path only whole
+  const q = (question: string) => [{ question, header: 'x', options: [{ label: 'a' }] }]
+  expect(withBriefs(q('add k-to-cx now'), briefs)).toBeNull()
+  expect(withBriefs(q('c:/work/conv2 에서'), briefs)).toBeNull()
+  expect(withBriefs(q('job k-to-c: 승인?'), briefs)).not.toBeNull()
+  // another job named, or two awaiting jobs on that path: the path alone names none
+  expect(withBriefs(q('c:/work/conv 의 fix-b 를 merge 할까요?'), briefs, ['k-to-c', 'fix-b'])).toBeNull()
+  const two = [...briefs, { job: 'docs', path: 'c:/work/conv', brief: 'docs brief' }]
+  expect(withBriefs(q('c:/work/conv 에서 작업합니다'), two)).toBeNull()
+  expect(withBriefs(q('c:/work/conv 의 docs 계획'), two)![0].options[0].preview).toBe('docs brief')
 })

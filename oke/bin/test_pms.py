@@ -1348,7 +1348,7 @@ class TestOutputs(PmBase):
         self.assertTrue(lines[-1].startswith("plan: "))
         # the mod's form: only jobs awaiting approval
         self.assertEqual(self.cli("job", "brief", "--json"), 0, self.err)
-        self.assertEqual(json.loads(self.out.splitlines()[-1]), {"briefs": []})
+        self.assertEqual(json.loads(self.out.splitlines()[-1]), {"briefs": [], "jobs": ["small"]})
         st = oke.load_state()
         st["jobs"]["small"]["phase"] = "awaiting_approval"
         oke.save_state(st)

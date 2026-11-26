@@ -494,17 +494,28 @@ export function workerDenied(tool: string, input: any, own: string | null): stri
  * and its own memory (<claude config>/projects/<project>/memory/). */
 export type Brief = { job: string, path: string, brief: string }
 
+/** Whether `text` holds `word` whole: not inside a longer name or path. */
+function holdsWord(text: string, word: string): boolean {
+  const esc = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|[^a-z0-9_.-])${esc}(?![a-z0-9_.-])`).test(text)
+}
+
 /** The plan approval popup shows the plan itself: a question that names a job awaiting
- * approval (its path or its name) gets that job's `oke job brief` as its first option's
- * preview. Seen live: orchestrators wrote only a line of summary there and in the chat.
- * null when no question names one. */
-export function withBriefs(questions: any[], briefs: Brief[]): any[] | null {
+ * approval gets that job's `oke job brief` as its first option's preview. Seen live:
+ * orchestrators wrote only a line of summary there and in the chat. A question names a job
+ * by its name; by its path only when no other job's name is in it and no other awaiting
+ * job shares that path (jobs in one repo share it). null when no question names one. */
+export function withBriefs(questions: any[], briefs: Brief[], jobs: string[] = []): any[] | null {
   const norm = (s: string) => s.toLowerCase().replace(/\\/g, '/')
   let changed = false
   const out = questions.map(q => {
     if (!q || q.multiSelect || !Array.isArray(q.options) || !q.options.length) return q
     const text = norm(`${q.question ?? ''} ${q.header ?? ''}`)
-    const hit = briefs.filter(b => (b.path && text.includes(norm(b.path))) || text.includes(b.job.toLowerCase()))
+    let hit = briefs.filter(b => holdsWord(text, b.job.toLowerCase()))
+    if (!hit.length && !jobs.some(j => holdsWord(text, j.toLowerCase()))) {
+      const byPath = briefs.filter(b => b.path && holdsWord(text, norm(b.path)))
+      if (byPath.length === 1) hit = byPath
+    }
     if (!hit.length) return q
     changed = true
     const preview = hit.map(b => b.brief).join('\n\n')
@@ -1226,7 +1237,7 @@ export const register: Register = on => {
         if (e.tool === 'AskUserQuestion' && Array.isArray((e as any).questions)) {
           const out = await oke($, ['job', 'brief', '--json'])
           const questions = Array.isArray(out?.briefs) && out.briefs.length
-            ? withBriefs((e as any).questions, out.briefs) : null
+            ? withBriefs((e as any).questions, out.briefs, Array.isArray(out.jobs) ? out.jobs : []) : null
           if (questions) return next({ ...e, questions } as any)
         }
       }

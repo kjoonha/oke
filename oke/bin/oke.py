@@ -2752,7 +2752,8 @@ def cmd_job(args):
             print(json.dumps({"briefs": [{"job": j, "path": native_path(info["path"]) if info.get("path") else "",
                                      "brief": job_brief(j)}
                                     for j, info in sorted(jobs.items())
-                                    if info.get("phase") == "awaiting_approval"]}))
+                                    if info.get("phase") == "awaiting_approval"],
+                              "jobs": sorted(jobs)}))
             return 0
         if not args.slug:
             return fail("name the job")
