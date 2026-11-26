@@ -26,7 +26,7 @@ from runtime_herdr import DialogError, HerdrError, herdr, herdr_text, replace_fi
 
 PHASES = ("intake", "planning", "awaiting_approval", "working", "reviewing",
           "awaiting_merge", "merging", "done", "failed")
-EMPTY_STATE = {"orchestrator": {}, "repos": {}, "jobs": {}}
+EMPTY_STATE = {"orchestrator": {}, "pms": {}, "jobs": {}}
 
 
 def fail(message):
@@ -53,7 +53,10 @@ def normalize_path(path, windows=None):
     p = native_path(path.replace("\\", "/"), windows)
     if windows:
         p = p.lower()
-    return p.rstrip("/") or "/"
+    p = p.rstrip("/") or "/"
+    if windows and re.match(r"^[a-z]:$", p):
+        p += "/"  # "c:" alone is the current folder on drive c, not its root
+    return p
 
 
 def oke_home():
@@ -163,7 +166,7 @@ def load_state(recover=False):
             raise ValueError("not an object")
     except ValueError:
         if not recover:
-            raise StateError("state.json is unreadable: run `oke status` in the orchestrator")
+            raise StateError("state.json is unreadable: run `$OKE status` in the orchestrator")
         os.replace(path, path + ".bad")
         state["_recovered"] = True
         return state
@@ -177,6 +180,18 @@ def load_state(recover=False):
                 job["size"] = OLD_LANES[lane]
     if loaded.get("runtime") in RUNTIMES:
         state["runtime"] = loaded["runtime"]
+    # an OKe with one PM per repository wrote jobs with "repo" and no "pm": its finished
+    # jobs stay, its PMs ("repos") go, its open jobs it must finish itself
+    old = sorted(n for n, j in state["jobs"].items()
+                 if isinstance(j, dict) and "repo" in j and not j.get("pm")
+                 and j.get("phase") not in ("done", "failed"))
+    if old:
+        raise StateError("state.json is from an OKe with one PM per repository and still has open "
+                         "jobs: %s. Finish or cancel them with that OKe, or move %s aside"
+                         % (", ".join(old), path.replace("\\", "/")))
+    for job in state["jobs"].values():  # finished jobs of that OKe: their key is "repo"
+        if isinstance(job, dict) and "repo" in job and "git_key" not in job:
+            job["git_key"] = job.pop("repo")
     return state
 
 
@@ -381,10 +396,13 @@ def bank_usage(folder):
 
 
 def agent_command(role, config, home, plugin_dir, folder, resume=None):
-    """The claude arguments for one worker or reviewer."""
+    """The claude arguments for one agent. A PM also reads the whole file system."""
     bank_usage(folder)
     header = read_header(os.path.join(folder, "assignment.md")) if folder else None
-    return launch_args(role, config, home, plugin_dir, resume, folder, header)
+    extra = []
+    if role == "pm" and header and header.get("agent"):
+        extra = fs_roots()
+    return launch_args(role, config, home, plugin_dir, resume, folder, header, extra)
 REVIEWER_TOOLS = ["Read", "Grep", "Glob", "Skill", "Bash(git diff:*)", "Bash(git log:*)",
                   "Bash(git show:*)", "Bash(git status:*)"]
 # shortcut: relies on `*` matching anywhere in a Bash rule (not probed live, see
@@ -540,11 +558,17 @@ USAGE_FIELDS = ("input", "output", "cache_read", "cache_write")
 def usage_totals(home):
     """Token totals per place from every usage.csv under `home` (the mod adds a line per
     turn): {place: {"turns", "input", "output", "cache_read", "cache_write", "models"}}.
-    A place is a job (jobs/<job>, archive/<job>-<time>), a repository's PM or the orchestrator."""
+    A place is a job (jobs/<job>, archive/<job>-<time>), a PM (pms/<name>), `old PMs` (an
+    OKe with one PM per repository kept them under repos/) or the orchestrator."""
     out = {}
     for path in glob.glob(os.path.join(glob.escape(home), "**", "usage.csv"), recursive=True):
         parts = os.path.relpath(path, home).replace("\\", "/").split("/")
-        place = "/".join(parts[:2]) if parts[0] in ("jobs", "archive", "repos") else "orchestrator"
+        if parts[0] in ("jobs", "archive", "pms"):
+            place = "/".join(parts[:2])
+        elif parts[0] == "repos":
+            place = "old PMs"  # never the orchestrator's
+        else:
+            place = "orchestrator"
         row = out.setdefault(place, dict([("turns", 0), ("models", [])] + [(f, 0) for f in USAGE_FIELDS]))
         try:
             with io.open(path, encoding="utf-8") as f:
@@ -621,10 +645,12 @@ def cmd_rt(args):
             print(json.dumps({"closed": closed, "failed": failed}, ensure_ascii=False))
             return 1 if failed else 0
     elif args.rt == "place":
-        repo = native_path(args.repo)
-        if not os.path.isdir(repo):  # herdr opens a missing --cwd in the home folder
-            return fail("place needs the repository's path, not its id: %s is no directory" % args.repo)
-        out = {"place": rt.place_for_repo(repo, os.path.basename(repo.rstrip("/\\")))}
+        if args.pm not in load_state()["pms"]:
+            return fail("no PM %s: `$OKE pm add %s` first" % (args.pm, args.pm))
+        folder = pm_dir(args.pm)
+        if not os.path.isdir(folder):
+            os.makedirs(folder)
+        out = {"place": rt.place_for_repo(folder, args.pm)}
     elif args.rt == "worktree":
         if args.remove:
             # herdr reuses workspace ids after a restart: never another job's (--job), or
@@ -647,21 +673,26 @@ def cmd_rt(args):
                 if e.code != "workspace_not_found" or len(found) != 1:  # never a guess between jobs
                     raise
                 job, info = found[0]
-                if not info.get("repo"):
+                if not info.get("git_key"):
                     raise
                 # revived children run outside the workspace, in the checkout: on Windows git
                 # cannot delete a folder a shell sits in (half deleted, then "Permission denied")
-                close_children(job, info["repo"])
+                close_children(job, info.get("pm"))
                 runtime_bg.git_worktree_remove(native_path(info["worktree"]["path"]),
-                                               native_path(repo_dir(info["repo"])))
+                                               native_path(repo_dir(info["git_key"])))
             out = {"removed": args.remove}
         else:
-            if not args.job or not args.repo:
-                return fail("worktree needs <job> and --repo (or --remove <id>)")
-            if not os.path.isdir(native_path(args.repo)):
-                return fail("worktree --repo needs the repository's path: %s is no directory" % args.repo)
+            if not args.job:
+                return fail("worktree needs <job> (or --remove <id>)")
+            info = load_state()["jobs"].get(args.job)
+            if info is None:
+                return fail("unknown job: %s" % args.job)
+            if no_path(args.job, info):
+                return fail(no_path(args.job, info))
+            if info.get("direct"):
+                return fail("job %s changes a folder outside git: no worktree" % args.job)
             # shortcut: `oke job merge` merges only oke/<job>, so the branch name is fixed here
-            out = rt.worktree_create(native_path(args.repo), "oke/" + args.job, args.job)
+            out = rt.worktree_create(native_path(info["path"]), "oke/" + args.job, args.job)
             with locked():
                 state = load_state()
                 if args.job in state["jobs"]:  # for --remove once its id is gone
@@ -677,7 +708,7 @@ def cmd_rt(args):
 EFFORTS = ("low", "medium", "high", "xhigh", "max")  # `claude --effort`
 
 
-def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header=None):
+def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header=None, extra_dirs=()):
     """`header` is the agent's assignment header: its `tools:`, `mcp:` and `plugins:`
     (comma separated) are what the PM switched on for this job."""
     model = (header or {}).get("model") or config["models"].get(role, "opus")
@@ -685,13 +716,14 @@ def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header
     # Measured: the user's plugins, hooks and MCP servers add about 36k tokens to every
     # child's context. Without a settings file, start as before so the herdr hook stays.
     folder = folder or home
-    dirs = [home, config["wiki_path"]]
+    dirs = [home, config["wiki_path"]] + [d for d in extra_dirs if d not in (home, config["wiki_path"])]
     effort = (config.get("effort") or {}).get(role)
     if effort in EFFORTS:
         args += ["--effort", effort]  # config.json `effort`; a role left out keeps the user's setting
     settings = config.get("lean_launch", True) and write_lean_settings(folder, header_list(header, "plugins"), dirs)
     if not settings:
-        args += ["--add-dir", home, "--add-dir", config["wiki_path"]]
+        for d in dirs:
+            args += ["--add-dir", d]
     if settings:
         args += ["--setting-sources", "project,local", "--strict-mcp-config", "--settings", settings]
         tools = ROLE_TOOLS.get(role, ROLE_TOOLS["worker"])
@@ -747,53 +779,102 @@ def repo_name(key):
     return "%s-%s" % (slug(name, 18), hashlib.sha1(key.encode("utf-8")).hexdigest()[:6])
 
 
-def remote_url(key):
-    """The repository's origin URL, or "" without one."""
-    p = subprocess.run(["git", "--git-dir", native_path(key), "config", "--get", "remote.origin.url"],
-                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    return p.stdout.decode("utf-8", "replace").strip() if p.returncode == 0 else ""
+def set_old_wiki_aside(name):
+    """A wiki folder `name` left by an OKe with one PM per repository (its `.oke-repo`
+    marker, or no log.md a PM wrote) is moved to `<name>.old-<time>`, unread. Returns
+    the new place, or None."""
+    path = os.path.join(load_config()["wiki_path"], name)
+    if not os.path.isdir(path):
+        return None
+    if not os.path.exists(os.path.join(path, ".oke-repo")) and (
+            os.path.exists(os.path.join(path, "log.md")) or not os.listdir(path)):
+        return None
+    aside = "%s.old-%s" % (path, time.strftime("%Y%m%d-%H%M%S"))
+    os.rename(path, aside)
+    return aside
 
 
-def wiki_name(key, url):
-    """A repository's wiki folder name, the same on every machine and checkout path:
-    `owner-repo` from the origin URL, else the repository's own name."""
-    parts = [x for x in re.split(r"[/:]", re.sub(r"(\.git)?/*$", "", url)) if x] if url else []
-    if len(parts) >= 2:
-        return "%s-%s" % (slug(parts[-2], 18), slug(parts[-1]))
-    return re.sub(r"-[0-9a-f]{6}$", "", repo_name(key))
-
-
-WIKI_MARK = ".oke-repo"
-
-
-def wiki_dir(key):
-    """The repository's wiki folder, made if missing. The folder notes whose it is:
-    another repository with the same name gets the name plus a hash instead. A wiki
-    under the older `<name>-<hash>` folder moves to the new name."""
-    root = load_config()["wiki_path"]
-    url = remote_url(key)
-    owner = url or key
-    path = os.path.join(root, wiki_name(key, url))
-    try:
-        with io.open(os.path.join(path, WIKI_MARK), encoding="utf-8") as f:
-            if f.read().strip() != owner:
-                path = os.path.join(root, repo_name(key))  # the name is taken
-    except (IOError, OSError):
-        pass
-    old = os.path.join(root, repo_name(key))
-    if old != path and os.path.isdir(old) and not os.path.exists(path):
-        os.rename(old, path)
+def wiki_dir(name):
+    """The PM's wiki folder (one per PM), made if missing."""
+    path = os.path.join(load_config()["wiki_path"], name)
     if not os.path.isdir(path):
         os.makedirs(path)
-    mark = os.path.join(path, WIKI_MARK)
-    if not os.path.exists(mark):
-        with io.open(mark, "w", encoding="utf-8") as f:
-            f.write(owner + "\n")
     return path
 
 
-def pm_dir(key):
-    return os.path.join(oke_home(), "repos", repo_name(key), "pm")
+def pm_dir(name):
+    """A PM's own folder, also its session's working folder."""
+    return os.path.join(oke_home(), "pms", name)
+
+
+PM_NAME = re.compile(r"^[a-z][a-z0-9-]{0,23}$")
+
+
+def pm_name_problem(name):
+    """Why `name` cannot name a PM, or None."""
+    if not PM_NAME.match(name or ""):
+        return "bad PM name %r: lowercase letters, digits and -, at most 24, starting with a letter" % name
+    if name in ("orchestrator", ORCH_NAME) or re.search(r"-(w\d+|rv\d*)$", name):
+        return "PM name %r is taken by OKe (the orchestrator, or a worker or reviewer name)" % name
+    return None
+
+
+def under(path, folder):
+    path, folder = path.rstrip("/"), folder.rstrip("/")  # a drive root c:/ compares as c:
+    return path == folder or path.startswith(folder + "/")
+
+
+def real_dir(path):
+    """`path` normalized with its links resolved, as git resolves a checkout's top, and on
+    Windows its 8.3 short names (KNOWLE~1) made long."""
+    return normalize_path(long_path(os.path.realpath(os.path.abspath(native_path(path)))))
+
+
+def long_path(p):
+    """On Windows, `p` with the short names of its longest existing part made long
+    (Python 3.6's realpath leaves them); elsewhere `p`."""
+    if os.name != "nt":
+        return p
+    head, tail = p, []
+    while head and not os.path.exists(head):
+        head, part = os.path.split(head)
+        if not part:
+            return p
+        tail.insert(0, part)
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        buf = ctypes.create_unicode_buffer(32768)
+        # the final path resolves junctions and links too (Python 3.6's realpath does not)
+        k32.CreateFileW.restype = wintypes.HANDLE
+        k32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                    wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        k32.GetFinalPathNameByHandleW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        # no access needed, any sharing, FILE_FLAG_BACKUP_SEMANTICS so a folder opens too
+        h = k32.CreateFileW(head, 0, 7, None, 3, 0x02000000, None)
+        if h and h != wintypes.HANDLE(-1).value:
+            try:
+                n = k32.GetFinalPathNameByHandleW(h, buf, 32768, 0)
+            finally:
+                k32.CloseHandle(h)
+            if 0 < n < 32768:
+                final = buf.value
+                if final.startswith("\\\\?\\UNC\\"):
+                    final = "\\\\" + final[8:]
+                elif final.startswith("\\\\?\\"):
+                    final = final[4:]
+                return os.path.join(final, *tail) if tail else final
+        n = k32.GetLongPathNameW(head, buf, 32768)
+        if 0 < n < 32768:
+            head = buf.value
+    except (ImportError, AttributeError, OSError, ValueError):
+        pass
+    return os.path.join(head, *tail) if tail else head
+
+
+SPLIT_PHASES = ("intake", "planning", "awaiting_approval")  # a job splits only before it works
 
 
 def pm_job_dir(job):
@@ -801,13 +882,485 @@ def pm_job_dir(job):
     return os.path.join(oke_home(), "jobs", job, "pm")
 
 
+def path_facts(path):
+    """(git_key, folder, direct) for a job path. git_key is OKe's private lock and git
+    key: the git common dir, or `<folder>/.git` for a folder outside git. A file stands
+    for its folder. Raises ValueError."""
+    p = native_path(path)
+    if os.path.isfile(p):
+        p = os.path.dirname(os.path.abspath(p))
+    key = repo_key(p)
+    if os.path.exists(key):
+        folder = repo_dir(key)
+        if folder is None:
+            raise ValueError("%s is a bare repository (no working folder): give a checkout's folder" % path)
+        return key, normalize_path(folder), False
+    return key, normalize_path(os.path.dirname(key)), True
+
+
+def set_job_path(state, name, path, branch_taken=None):
+    """Give job `name` its one path (state is not saved): git or direct, one open direct
+    job per folder, the PM's places. Returns the job. Raises ValueError; `branch_taken`
+    is the advice when branch oke/<name> exists already (default: pick another name)."""
+    job = state["jobs"][name]
+    key, folder, direct = path_facts(path)
+    if direct and job.get("size") != "research":
+        # research changes nothing: never in the way. A folder inside another's, or holding
+        # it, is the same files
+        busy = sorted(n for n, j in state["jobs"].items()
+                      if n != name and j.get("direct") and j.get("path") and j.get("size") != "research"
+                      and j.get("phase") not in DONE_PHASES
+                      and (under(folder, j["path"]) or under(j["path"], folder)))
+        if busy:
+            raise ValueError("job %s already changes %s in place (no git, no undo), which overlaps %s: "
+                             "finish or archive it first" % (busy[0], state["jobs"][busy[0]]["path"], folder))
+    if not direct and job.get("size") != "research" and subprocess.call(["git", "-C", native_path(folder), "show-ref", "--verify", "--quiet",
+                                       "refs/heads/oke/" + name]) == 0:
+        raise ValueError(branch_taken % {"job": name, "checkout": folder} if branch_taken else
+                         "branch oke/%s already exists in %s (an earlier job): pick another job name"
+                         % (name, folder))
+    # the branch the main checkout is on now: `job merge` merges only into it
+    base = None if direct else git_out(native_path(folder), "symbolic-ref", "-q", "--short", "HEAD")[1]
+    job.update(path=folder, git_key=key, base=base or None)
+    if direct:
+        job["direct"] = True
+    else:
+        job.pop("direct", None)
+    places = state["pms"][job["pm"]].setdefault("places", [])
+    if folder in places:
+        places.remove(folder)
+    places.insert(0, folder)
+    return job
+
+
+def pm_fields(pm, job):
+    """What a job's PM assignment header needs, as `job new` prints it."""
+    return {"pm_agent": pm, "pm_dir": pm_dir(pm).replace("\\", "/"),
+            "pm_job_dir": pm_job_dir(job).replace("\\", "/"),
+            "wiki": wiki_dir(pm).replace("\\", "/"),
+            "shared_wiki": shared_wiki().replace("\\", "/")}
+
+
+def no_path(name, info):
+    """The refusal for a job that has no path yet, else None."""
+    if info.get("path") and info.get("git_key"):
+        return None
+    return ("job %s has no path yet: its PM sets it while planning (`$OKE job path %s <path>`)" % (name, name))
+
+
+def fs_roots():
+    """The file system's roots: `/`, or on Windows every drive that exists. A PM's session
+    reads all of them (it finds each job's path itself); writes stay with the guard."""
+    if os.name != "nt":
+        return ["/"]
+    return [d + ":/" for d in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(d + ":/")]
+
+
+def write_areas(state, role, pm, job=None):
+    """Where an agent's Edit and Write may land in its jobs: [{"path", "direct"}]. A git
+    job: its worktree, else its main checkout. A direct job: its folder."""
+    names = [n for n, j in state["jobs"].items() if j.get("pm") == pm] if role == "pm" else [job]
+    out = []
+    for n in names:
+        j = state["jobs"].get(n) or {}
+        if j.get("phase") in DONE_PHASES or not j.get("path") or j.get("size") == "research" or j.get("held"):
+            continue  # research changes nothing, a held job is not worked on: no write area
+        if j.get("direct"):
+            out.append({"path": j["path"], "direct": True})
+        else:
+            out.append({"path": normalize_path((j.get("worktree") or {}).get("path") or j["path"]), "direct": False})
+    return out
+
+
+def memory_dir(cwd):
+    """The Claude Code memory folder of a session started in `cwd`."""
+    folder = re.sub(r"[^A-Za-z0-9]", "-", os.path.abspath(native_path(cwd)))
+    return os.path.join(os.path.abspath(native_path(claude_config_dir())), "projects", folder, "memory")
+
+
+def memory_dirs(cwd):
+    """Every memory folder a session in `cwd` may use: the one named after `cwd`, and, in
+    git, the one Claude Code shares across a repository's worktrees and subfolders, named
+    after the main checkout's root (the folder that holds the git common dir)."""
+    out = [memory_dir(cwd)]
+    code, common = git_out(native_path(cwd), "rev-parse", "--git-common-dir")
+    if code == 0 and common:
+        common = os.path.normpath(os.path.join(native_path(cwd), native_path(common)))
+        if os.path.basename(common) == ".git":  # a bare repository has no main checkout
+            main = memory_dir(os.path.dirname(common))
+            if main not in out:
+                out.append(main)
+    return out
+
+
+def agent_cwd(me):
+    folder = agent_folder(*me)
+    return (read_header(os.path.join(folder, "assignment.md")) or {}).get("cwd") if folder else None
+
+
+# files under $OKE_HOME only OKe writes, also inside a folder an agent may write: the merge
+# gate, the interview, the peer talk, a PM's children and every agent's launch settings
+GATE_FILE = re.compile(r"^(ledger\.(tsv|head)|baseline\.(json|log)|interview\.json|peers\.(json|md)|intake\.md|"
+                       r"children\.json|(lean-|bg-)?settings\.json|mcp\.json|(check|verify)-\d+\.log)$")
+
+
+def home_areas(state, me):
+    """The folders under $OKE_HOME agent `me` may Edit or Write: its own folder, a PM's
+    open jobs' folders (not held ones), and tmp/. Never state.json, config.json, another PM's folder,
+    automations/ or the wikis."""
+    role, name, pm, record = me
+    out = [agent_folder(role, name, pm, record), os.path.join(oke_home(), "tmp")]
+    if role == "pm":
+        out += [os.path.join(oke_home(), "jobs", n) for n in open_jobs(state, pm)]  # not held ones
+    return [real_dir(d) for d in out if d]
+
+
+def next_step(me):
+    """What an agent does about a write it may not make."""
+    return {"pm": "If a job must change it: while the job plans, set its path with `$OKE job path`, or split "
+                  "a new job for that folder with `$OKE job split`; once it works, report a question for it.",
+            "worker": "If the job needs it changed, report a question to your PM.",
+            "reviewer": "Reviewers change nothing: name it in your review."}.get(me[0], "")
+
+
+def may_write(state, me):
+    """The agent's write areas, for a refusal."""
+    cwd = agent_cwd(me)
+    places = [d.replace("\\", "/") for d in home_areas(state, me)]
+    if cwd:
+        places += [m.replace("\\", "/") for m in memory_dirs(cwd)]
+    places += [a["path"] for a in write_areas(state, me[0], me[2], me[3].get("job"))]
+    return ", ".join(places)
+
+
+def write_problem(state, me, target):
+    """Why the agent `me` may not Edit or Write `target`, or None. Every check uses the
+    path with links and short names resolved, so neither leads past it."""
+    role, name, pm, record = me
+    raw = normalize_path(os.path.abspath(native_path(target)))
+    p = real_dir(target)
+    wikis = real_dir(load_config()["wiki_path"])
+    if under(p, wikis) or under(raw, wikis):
+        return "%s is in a wiki: change wiki pages with `$OKE wiki` (read it, then write it --from a file)" % target
+    home = real_dir(oke_home())
+    if under(p, home) or under(raw, home):
+        if not any(under(p, d) for d in home_areas(state, me)):
+            return ("%s is OKe's own file, not this agent's to write. It may write in: %s. %s"
+                    % (target, may_write(state, me), next_step(me)))
+        if GATE_FILE.match(os.path.basename(p)):
+            return ("%s is written only by OKe (`oke` commands keep it; the merge gate trusts it): leave it. %s"
+                    % (target, next_step(me)))
+        return None
+    cwd = agent_cwd(me)
+    if cwd and any(under(p, real_dir(m)) for m in memory_dirs(cwd)):
+        return None
+    # allowed when any area allows it; else the most specific area's reason
+    areas = sorted((a for a in write_areas(state, role, pm, record.get("job"))
+                    if under(raw, a["path"]) or under(p, real_dir(a["path"]))), key=lambda a: -len(a["path"]))
+    reasons = [area_problem(p, target, a) for a in areas]
+    if areas:
+        return None if None in reasons else reasons[0]
+    return ("%s is outside what this agent may write. It may write in: %s. %s"
+            % (target, may_write(state, me), next_step(me)))
+
+
+def area_problem(p, target, area):
+    """Why `target` (resolved: `p`) under `area` is not that job's to write, or None."""
+    top = real_dir(area["path"])
+    if not under(p, top):
+        return ("%s leads outside the job's folder %s (a link to %s): not this job's to change; change it "
+                "as its own job at %s" % (target, area["path"], p, p))
+    if not area["direct"]:
+        return None
+    folder = os.path.dirname(p)
+    while folder != top and under(folder, top):  # the resolved parents: a junction cannot skip one
+        if os.path.exists(os.path.join(native_path(folder), ".git")):
+            return ("%s is inside the git repository %s, which is not this job's folder %s: change it as "
+                    "its own job at %s" % (target, folder, area["path"], folder))
+        folder = os.path.dirname(folder)
+    return None
+
+
+def write_pm_assignment(state, name):
+    """The PM's standing assignment, which OKe keeps: who it is and its wiki."""
+    folder = pm_dir(name)
+    if not os.path.isdir(folder):
+        os.makedirs(folder)
+    path = os.path.join(folder, "assignment.md")
+    old = (read_header(path) or {}).get("seq")
+    lines = [u"agent: %s" % name, u"role: pm", u"parent: orchestrator",
+             u"cwd: %s" % folder.replace("\\", "/"),
+             u"wiki: %s" % wiki_dir(name).replace("\\", "/"),
+             u"shared_wiki: %s" % shared_wiki().replace("\\", "/"),
+             u"seq: %d" % ((old + 1) if isinstance(old, int) else 1), u"---", u"## 목표",
+             u"You are PM %s. Each job has one path, which you find while planning (the paths of your" % name,
+             u"jobs so far are your places: `$OKE pm list`). Each job has its own assignment at",
+             u"$OKE_HOME/jobs/<job>/pm/assignment.md and its own report at $OKE_HOME/jobs/<job>/pm/report.md.",
+             u'New instructions arrive as messages that start with "OKe inbox:".']
+    with io.open(path + ".tmp", "w", encoding="utf-8", newline="\n") as f:
+        f.write(u"\n".join(lines) + u"\n")
+    replace_file(path + ".tmp", path)
+    return path
+
+
+def pm_alive(state, name):
+    record = (state["pms"].get(name) or {}).get("pm") or {}
+    try:
+        return bool(record.get("agent") and live_agent(record, list_agents()))
+    except HerdrError:
+        return False
+
+
+def stop_pm(state, name):
+    """Close a PM's session (best effort). Returns its pane when it may still run (the runtime
+    did not answer or did not close it), else None."""
+    record = (state["pms"].get(name) or {}).get("pm") or {}
+    if not record.get("pane") or not record.get("agent"):
+        return None
+    try:
+        if not live_agent(record, list_agents()):
+            return None
+    except HerdrError:
+        return record["pane"]  # the runtime did not say: it may still run
+    try:
+        runtime().close(record["pane"])
+    except HerdrError as e:
+        if e.code == "herdr_unavailable":
+            raise
+        return record["pane"]
+    return None
+
+
+def cancel_for_pm(name, jobs):
+    """Cancel `jobs` of PM `name` (the user confirmed). Returns ([the jobs that could not be],
+    [panes of the cancelled jobs the runtime did not close])."""
+    refused, panes = [], []
+    for job in jobs:
+        out = io.StringIO()
+        old, sys.stderr = sys.stderr, out
+        try:
+            with locked():
+                code = job_locked(argparse.Namespace(action="cancel", slug=job))
+        finally:
+            sys.stderr = old
+        if code:
+            refused.append("%s (%s)" % (job, out.getvalue().strip()))
+            continue
+        try:
+            _, left, kept = close_children(job, name)
+            panes.extend(left + kept)
+        except Exception:  # noqa: BLE001 - an outage: the cancel stands, the panes are named
+            panes.append("the panes of %s" % job)
+        drop_job_mail(job, name)
+    return refused, panes
+
+
+def cancel_problem(state, job):
+    """Why `job cancel` refuses `job`, or None."""
+    info = state["jobs"][job]
+    merged = merge_state(job)[0]
+    if info.get("phase") == "done" or merged in ("unverified", "verified"):
+        return ("job %s is %s: its merge is in main or under way. Let it finish (verify, or "
+                "roll it back), not cancel" % (job, info.get("phase") if merged == "none" else
+                                               "merged (%s)" % merged))
+    return None
+
+
+def move_folders(pairs):
+    """Rename each (old, new) folder; an `old` already gone was moved by an earlier try.
+    All or nothing: on a failure the ones moved here go back, and OSError names the folder."""
+    done = []
+    try:
+        for old, new in pairs:
+            if not os.path.isdir(old):
+                continue
+            if os.path.isdir(new) and not os.listdir(new):
+                os.rmdir(new)
+            if os.path.exists(new):
+                raise OSError("%s exists already" % new.replace("\\", "/"))
+            if not os.path.isdir(os.path.dirname(new)):
+                os.makedirs(os.path.dirname(new))
+            os.rename(old, new)
+            done.append((old, new))
+    except OSError as e:
+        failed = old
+        for back, moved in reversed(done):
+            try:
+                os.rename(moved, back)
+            except OSError:
+                pass
+        raise OSError("could not move %s: %s" % (failed.replace("\\", "/"), e))
+
+
+def pm_jobs(state, name):
+    """Open and held jobs of PM `name`."""
+    return sorted(n for n, j in state["jobs"].items() if j.get("pm") == name and j.get("phase") not in DONE_PHASES)
+
+
+def cmd_pm(args):
+    if args.action == "list":
+        state = load_state()
+        want = real_dir(args.path) if args.path else None  # resolved, as places are
+        out, best = [], (0, None)
+        for name in sorted(state["pms"]):
+            places = state["pms"][name].get("places") or []
+            entry = {"name": name, "places": places, "alive": pm_alive(state, name),
+                     "open_jobs": sorted(open_jobs(state, name)), "held_jobs": held_jobs(state, name),
+                     "pm_dir": pm_dir(name).replace("\\", "/")}
+            for place in places if want else []:
+                if under(want, place) and len(place) > best[0]:
+                    best = (len(place), name)
+            out.append(entry)
+        if want:  # the PM whose places hold the path the user said, most specific first
+            for entry in out:
+                entry["recommended"] = entry["name"] == best[1]
+        print(json.dumps(out, ensure_ascii=False))
+        return 0
+    with locked():
+        state = load_state()
+        if args.action == "add":
+            problem = pm_name_problem(args.name)
+            if problem:
+                return fail(problem)
+            if args.name in state["pms"]:
+                return fail("PM %s exists already" % args.name)
+            try:
+                aside = set_old_wiki_aside(args.name)
+            except OSError as e:
+                return fail("an old wiki named %s is in the way and could not be moved aside: %s. Close what "
+                            "holds it and run this again" % (args.name, e))
+            state["pms"][args.name] = {"pm": {}, "places": []}
+            save_state(state)
+            write_pm_assignment(state, args.name)
+            out = {"name": args.name, "pm_dir": pm_dir(args.name).replace("\\", "/"),
+                   "wiki": wiki_dir(args.name).replace("\\", "/")}
+            if aside:
+                out["old_wiki"] = aside.replace("\\", "/")  # an older OKe's wiki of this name, set aside
+            print(json.dumps(out, ensure_ascii=False))
+            return 0
+        if args.name not in state["pms"]:
+            return fail("no PM %s" % args.name)
+        if args.action == "rename":
+            problem = pm_name_problem(args.new)
+            if problem:
+                return fail(problem)
+            # a folder of the new name left by an earlier try is fine while the old one is gone
+            if args.new in state["pms"] or (os.path.exists(pm_dir(args.new)) and os.path.exists(pm_dir(args.name))):
+                return fail("PM %s exists already" % args.new)
+            busy = pm_jobs(state, args.name)
+            if busy:
+                return fail("PM %s has open or held jobs: %s. Rename it when they are done or cancelled"
+                            % (args.name, ", ".join(busy)))
+            wikis = load_config()["wiki_path"]
+            try:
+                aside = set_old_wiki_aside(args.new)
+            except OSError as e:
+                return fail("an old wiki named %s is in the way and could not be moved aside: %s. Close what "
+                            "holds it and run this again" % (args.new, e))
+            if os.path.exists(os.path.join(wikis, args.new)) and os.path.exists(os.path.join(wikis, args.name)) \
+                    and os.listdir(os.path.join(wikis, args.new)):
+                return fail("a wiki named %s exists already" % args.new)
+            left = stop_pm(state, args.name)
+            try:
+                move_folders([(pm_dir(args.name), pm_dir(args.new)), (inbox_dir(args.name), inbox_dir(args.new)),
+                              (os.path.join(wikis, args.name), os.path.join(wikis, args.new))])
+            except OSError as e:
+                return fail("PM %s was not renamed, nothing changed: %s. Close what holds it and run this "
+                            "again" % (args.name, e))
+            entry = state["pms"].pop(args.name)
+            entry["pm"] = {}  # a new name starts a new session
+            state["pms"][args.new] = entry
+            for j in state["jobs"].values():
+                if j.get("pm") == args.name:
+                    j["pm"] = args.new
+            save_state(state)
+            write_pm_assignment(state, args.new)
+            out = {"name": args.new, "pm_dir": pm_dir(args.new).replace("\\", "/")}
+            if aside:
+                out["old_wiki"] = aside.replace("\\", "/")
+            if left:
+                out["not_closed"] = [left]  # the old session may still run: the user closes it
+            print(json.dumps(out, ensure_ascii=False))
+            return 0
+        if args.action != "remove":
+            return fail("unknown action")
+        busy = pm_jobs(state, args.name)
+        if busy and not args.cancel:
+            return fail("PM %s has open or held jobs: %s. Ask the user; with their yes, run this again "
+                        "with --cancel (cancels them)" % (args.name, ", ".join(busy)))
+        # all or nothing: a job that cannot be cancelled stops the remove before any cancel
+        refused = [p for p in (cancel_problem(state, j) for j in busy) if p]
+        if refused:
+            return fail("cannot cancel every job of PM %s, so nothing was cancelled or removed: %s"
+                        % (args.name, "; ".join(refused)))
+    # cancels run outside this lock (they take it themselves)
+    refused, panes = cancel_for_pm(args.name, busy)
+    if refused:
+        return fail("could not cancel: %s. Nothing was removed; jobs cancelled so far stay cancelled "
+                    "(`$OKE pm remove` lists them under `archive` once it succeeds)%s"
+                    % ("; ".join(refused), "; not closed: " + ", ".join(panes) if panes else ""))
+    with locked():
+        state = load_state()
+        new = sorted(set(pm_jobs(state, args.name)) - set(busy))
+        if new:  # the PM made them while its jobs were cancelled (a split)
+            return fail("PM %s got new jobs meanwhile: %s. Nothing was removed; jobs cancelled so far stay "
+                        "cancelled. Ask the user again, then run this again" % (args.name, ", ".join(new)))
+        left = stop_pm(state, args.name)
+        if left:
+            panes.append(left)
+        # a later PM of this name starts clean and gets none of this one's mail; the
+        # folders move first, so a failed move leaves the PM as it was (run it again)
+        gone = pm_dir(args.name) + ".removed-" + time.strftime("%Y%m%d-%H%M%S")
+        try:
+            wiki_old = os.path.join(load_config()["wiki_path"], args.name)
+            move_folders([(pm_dir(args.name), gone), (inbox_dir(args.name), os.path.join(gone, "inbox")),
+                          (wiki_old, wiki_old + gone[len(pm_dir(args.name)):])])  # <name>.removed-<time>
+        except OSError as e:
+            return fail("PM %s was not removed (its cancelled jobs stay cancelled): %s. Close what holds "
+                        "it and run this again; it lists them under `archive` once it succeeds" % (args.name, e))
+        # every job of this PM left unarchived as failed: this run's cancels and an earlier,
+        # failed run's alike, so none is left behind
+        archive = sorted(j for j, i in state["jobs"].items()
+                         if i.get("pm") == args.name and i.get("phase") == "failed")
+        state["pms"].pop(args.name, None)
+        save_state(state)
+    out = {"removed": args.name, "cancelled": busy, "archive": archive}
+    if panes:
+        out["not_closed"] = panes  # the runtime did not close them: the user closes them
+    print(json.dumps(out))
+    return 0
+
+
+def cmd_path_check(args):
+    """May the agent in `pane` Edit or Write `path`? See write_problem."""
+    # the mod asks only for a PM, worker or reviewer: whatever goes wrong refuses
+    try:
+        state = load_state()
+        me = whoami(state, args.pane)[0]
+        if not me or me[0] not in ("pm", "worker", "reviewer"):
+            problem = cannot_check("pane %s is no OKe PM, worker or reviewer OKe knows" % args.pane)
+        elif me[2] not in state["pms"]:
+            problem = cannot_check("PM %s is not in state.json" % me[2])
+        else:
+            problem = write_problem(state, me, args.path)
+    except Exception as e:  # noqa: BLE001 - refuse, never allow by accident
+        problem = cannot_check("%s: %s" % (type(e).__name__, e))
+    print(json.dumps({"allow": problem is None, "reason": problem}, ensure_ascii=False))
+    return 0
+
+
+def cannot_check(reason):
+    return ("OKe could not check this write (%s): try again; if it keeps failing, report a question"
+            % reason)
+
+
 def children_path(key):
-    return os.path.join(pm_dir(key), "children.json")
+    return os.path.join(pm_dir(key), "children.json") if key else os.path.join(oke_home(), "pms", ".none")
 
 
 def read_children(key):
     """{agent: record}. Only spawn writes this file, but a PM once rewrote it as a list of records."""
-    data = read_json(children_path(key), {})
+    data = read_json(children_path(key), {}) if key else {}
     if isinstance(data, list):
         data = dict((r["agent"], r) for r in data if isinstance(r, dict) and r.get("agent"))
     return data if isinstance(data, dict) else {}
@@ -829,15 +1382,14 @@ def cmd_spawn(args):
     config = load_config()
 
     state = load_state()
-    known_keys = set(state["repos"]) | set(j.get("repo") for j in state["jobs"].values())
+    git_key = None
     if role == "pm":
         if "job" in header:
             # a pre-slice-3 PM folder held one job's instruction here
             return fail("%s is an old per-job PM assignment; rewrite it as the standing assignment" % path)
-        try:
-            key = repo_key(cwd)
-        except ValueError as e:
-            return fail(str(e))
+        if agent not in state["pms"]:
+            return fail("no PM %s: `$OKE pm add %s` first" % (agent, agent))
+        key = agent
     else:
         job = state["jobs"].get(header.get("job"))
         if job is None:
@@ -849,7 +1401,11 @@ def cmd_spawn(args):
         over = role == "reviewer" and over_rounds(header["job"], job, config, int(header["seq"]))
         if over:
             return fail(over)
-        key = job["repo"]
+        key, git_key = job.get("pm"), job.get("git_key")
+        if not key:
+            return fail("job %s has no PM" % header["job"])
+        if no_path(header["job"], job):
+            return fail(no_path(header["job"], job))
 
     if any(a.get("name") == agent for a in list_agents()):
         return fail("agent name in use: %s" % agent)
@@ -872,7 +1428,9 @@ def cmd_spawn(args):
         with locked():
             current = load_state()
             if role == "pm":
-                current["repos"].setdefault(key, {})["pm"] = record
+                if key not in current["pms"]:
+                    return False  # removed meanwhile
+                current["pms"][key]["pm"] = record
                 save_state(current)
                 return True
             children = read_children(key)
@@ -881,23 +1439,32 @@ def cmd_spawn(args):
             now = current["jobs"].get(record["job"]) or {}
             return not now.get("held") and now.get("phase") in ("working", "reviewing", "merging")
 
+    def gone_pm(place):
+        """The PM was removed while it started: close its new pane (best effort)."""
+        try:
+            runtime().close(place)
+        except HerdrError:
+            return fail("PM %s was removed while it started; close pane %s" % (agent, place))
+        return fail("PM %s was removed while it started: closed it" % agent)
+
     def stopped():
         close_children(record["job"], key)
         return fail("job %s went on hold or was cancelled while %s started: closed it"
                     % (record["job"], agent))
 
     def trusted_folder():
-        """The trust dialog is answered only for a repository OKe already works on,
-        and only when the pane really sits in it."""
-        if key not in known_keys:
-            return False
+        """The trust dialog is answered only for a PM's own folder, or a child's job's
+        folder (its checkout or worktree), and only when the pane really sits in it."""
         try:
-            if repo_key(cwd) != key:
+            if role == "pm":
+                if real_dir(cwd) != real_dir(pm_dir(key)):
+                    return False
+                return not args.pane or real_dir(runtime().place_cwd(pane)) == real_dir(pm_dir(key))
+            if repo_key(cwd) != git_key:
                 return False
             if args.pane:
-                where = runtime().place_cwd(pane)
-                return repo_key(where) == key
-        except (ValueError, HerdrError):
+                return repo_key(runtime().place_cwd(pane)) == git_key
+        except (ValueError, HerdrError, TypeError):
             return False
         return True
 
@@ -914,7 +1481,7 @@ def cmd_spawn(args):
         # pane only when it knows this terminal.
         record["terminal"] = runtime().place_id(pane)
         if not save_record():
-            return stopped()
+            return stopped() if role != "pm" else gone_pm(pane)
         return fail("agent %s is stopped at a dialog in pane %s:\n%s" % (agent, pane, e))
     except HerdrError as e:
         if e.code == "herdr_unavailable":
@@ -924,6 +1491,8 @@ def cmd_spawn(args):
     record["session"] = session_of(info)
     record["terminal"] = runtime().place_id(record["pane"])  # lets a revive close this pane safely
     if not save_record():
+        if role == "pm":
+            return gone_pm(record["pane"])
         return stopped()
     print(json.dumps({"agent": agent, "pane": record["pane"], "session": record["session"]}))
     return 0
@@ -1276,7 +1845,7 @@ def cmd_wait(args):
         args.poll = 2 if runtime().name == "herdr" else 10
     if args.jobs:
         state = load_state()
-        keys = [k for k, r in state["repos"].items() if (r.get("pm") or {}).get("agent") == args.agent]
+        keys = [k for k, r in state["pms"].items() if (r.get("pm") or {}).get("agent") == args.agent]
         if not keys:
             return fail("--jobs needs a PM agent: %s is not one" % args.agent)
         print(wait_loop(args.agent, None, None, poll=args.poll,
@@ -1315,23 +1884,24 @@ def open_jobs(state, key=None):
     """Jobs with work left. A job the user put on hold (`job hold`) is not one: nothing
     revives or watches agents for it until `job unhold`."""
     return [n for n, j in state["jobs"].items()
-            if j.get("phase") not in DONE_PHASES and not j.get("held") and (key is None or j.get("repo") == key)]
+            if j.get("phase") not in DONE_PHASES and not j.get("held") and (key is None or j.get("pm") == key)]
 
 
 def held_jobs(state, key=None):
     return sorted(n for n, j in state["jobs"].items()
-                  if j.get("held") and j.get("phase") not in DONE_PHASES and (key is None or j.get("repo") == key))
+                  if j.get("held") and j.get("phase") not in DONE_PHASES and (key is None or j.get("pm") == key))
 
 
 def all_keys(state):
-    return sorted(set(state["repos"]) | set(j.get("repo") for j in state["jobs"].values() if j.get("repo")))
+    """Every PM name: those that exist, and those a job still names."""
+    return sorted(set(state["pms"]) | set(j.get("pm") for j in state["jobs"].values() if j.get("pm")))
 
 
 def records(state):
     """Every recorded OKe agent as (role, name, key, record)."""
     out = [("orchestrator", "orchestrator", None, state["orchestrator"])]
     for key in all_keys(state):
-        pm = (state["repos"].get(key) or {}).get("pm")
+        pm = (state["pms"].get(key) or {}).get("pm")
         if pm and pm.get("agent"):
             out.append(("pm", pm["agent"], key, pm))
         for name, rec in sorted(read_children(key).items()):
@@ -1358,7 +1928,7 @@ def over_rounds(job, info, config, seq):
     if limit is None or seq <= limit:
         return None
     return ("job %s: review round %d is past its limit of %d: report a question with the open "
-            "findings; the user may allow more (`oke job rounds %s <n>`)" % (job, seq, limit, job))
+            "findings; the user may allow more (`$OKE job rounds %s <n>`)" % (job, seq, limit, job))
 
 
 def find_target(state, name):
@@ -1430,7 +2000,8 @@ def update_record(role, key, name, fields):
             save_state(state)
         elif role == "pm":
             state = load_state()
-            state["repos"].setdefault(key, {}).setdefault("pm", {}).update(fields)
+            if key in state["pms"]:  # a PM removed meanwhile stays removed
+                state["pms"][key].setdefault("pm", {}).update(fields)
             save_state(state)
         else:
             children = read_children(key)
@@ -1448,11 +2019,12 @@ def report_mtime(folder):
 def new_pane(state, role, key, cwd):
     """A pane next to the agent's parent; a new workspace when no parent pane is left."""
     if role == "orchestrator":
-        parents = [(r.get("pm") or {}).get("pane") for r in state["repos"].values()]
+        parents = [(r.get("pm") or {}).get("pane") for r in state["pms"].values()]
     elif role == "pm":
-        parents = [state["orchestrator"].get("pane")]
+        # its own place, labelled with its name, as `oke place` gives it: never beside the orchestrator
+        return runtime().place_for_repo(cwd, key)
     else:
-        parents = [((state["repos"].get(key) or {}).get("pm") or {}).get("pane")]
+        parents = [((state["pms"].get(key) or {}).get("pm") or {}).get("pane")]
     return runtime().new_place(parents, cwd)
 
 
@@ -1682,10 +2254,14 @@ def board_tree(state, agents, only_key=None):
     for key in all_keys(state):
         if only_key and key != only_key:
             continue
-        pm = (state["repos"].get(key) or {}).get("pm")
+        if key not in state["pms"] and not any(j.get("pm") == key and j.get("phase") not in DONE_PHASES
+                                               for j in state["jobs"].values()):
+            continue  # a removed PM's closed jobs: no line for it
+        entry = state["pms"].get(key) or {}
+        pm = entry.get("pm")
         children = read_children(key)
         jobs = []
-        for job in sorted(n for n, j in state["jobs"].items() if j.get("repo") == key):
+        for job in sorted(n for n, j in state["jobs"].items() if j.get("pm") == key):
             nodes = [board_node(rec.get("role") or "worker", name, key, rec, agents)
                      for name, rec in sorted(children.items()) if rec.get("job") == job]
             info = state["jobs"][job]
@@ -1699,20 +2275,23 @@ def board_tree(state, agents, only_key=None):
             subagent = pm_report.get("type") == "waiting" and "subagent" in str(pm_report.get("on") or "")
             try:
                 merge = merge_state(job)[0]
-                after = [o for o in after_jobs(job) if o != job and after_block(state, o)] \
-                    if info.get("phase") in ("awaiting_merge", "merging") else []
+                after = [o for o in after_jobs(job) if after_block(state, o)] \
+                    if info.get("phase") in ("awaiting_merge", "merging") else \
+                    start_after(state, job) if gated(info) else []
             except StateError:  # the ledger key is missing or damaged: the board still shows the rest
                 merge, after = "unreadable", []
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
                          "size": info.get("size"), "direct": bool(info.get("direct")),
                          "merge": merge, "held": bool(info.get("held")), "subagent": subagent,
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None,
-                         "peer_wait": sorted(repo_name(e["repo"]) for e in peer_waiting(state, job).values()),
+                         "path": os.path.basename(info["path"].rstrip("/")) or info["path"]
+                         if info.get("path") else "path?",
+                         "peer_wait": sorted(peer_waiting(state, job)),
                          "after_wait": after})
         node = board_node("pm", pm["agent"], key, pm, agents) if pm and pm.get("agent") else None
         if node and node["status"] == "dead" and not open_jobs(state, key):
             node["status"] = "off"  # nothing for it to do (its jobs are done or on hold): not stuck
-        tree.append({"repo": repo_name(key), "key": key, "jobs": jobs, "pm": node})
+        tree.append({"name": key, "key": key, "jobs": jobs, "pm": node})
     return tree
 
 
@@ -1731,7 +2310,7 @@ def board_lines(tree):
             out.append((depth + 1, "%s %s" % (TODO_MARKS.get(t["status"], "o"), t["content"])))
 
     for repo in tree:
-        out.append((0, "repo " + repo["repo"]))
+        out.append((0, "PM %s" % repo["name"]))
         if repo["pm"]:
             agent(repo["pm"], 1)
         for job in repo["jobs"]:
@@ -1741,7 +2320,7 @@ def board_lines(tree):
                 job["job"], job["phase"], ", on hold" if job.get("held") else "",
                 ", waiting for you (%s)" % job["pending"] if job["pending"] else "",
                 ", waiting for PM %s" % ", ".join(job["peer_wait"]) if job.get("peer_wait") else "",
-                ", waiting for %s to merge" % ", ".join(job["after_wait"]) if job.get("after_wait") else "")))
+                ", waiting for after-job %s" % ", ".join(job["after_wait"]) if job.get("after_wait") else "")))
             for n in job["agents"]:
                 agent(n, 2)
     return out or [(0, "no OKe agents yet")]
@@ -1770,6 +2349,13 @@ def cmd_tick(args):
         config = load_config()
         out["wiki"], out["theme"] = config["wiki_path"], config["theme"]
         out["claude_dir"] = os.path.abspath(native_path(claude_config_dir()))
+        if role in ("pm", "worker", "reviewer"):
+            # what the mod allows without asking `oke path-check`: home (not the wikis), the
+            # memory folder, the git write areas; under a direct one it asks
+            out["write_areas"] = write_areas(state, role, key, record.get("job"))
+            cwd = agent_cwd(me)
+            # its cwd's memory folder and, in git, the repository's shared one (all its worktrees use it)
+            out["memories"] = [m.replace("\\", "/") for m in memory_dirs(cwd)] if cwd else []
         if role in ("worker", "reviewer"):  # for the status line
             out["job"] = record.get("job")
             out["seq"] = (read_header(os.path.join(out["folder"], "assignment.md")) or {}).get("seq")                 if out["folder"] else None
@@ -1814,7 +2400,7 @@ def cmd_boundary(args):
         role, name, key, record = me
         out["role"] = role
         if role == "pm":
-            jobs = sorted(n for n, j in state["jobs"].items() if j.get("repo") == key)
+            jobs = sorted(n for n, j in state["jobs"].items() if j.get("pm") == key)
             channels = [(job, pm_job_dir(job)) for job in jobs]
         elif role in ("worker", "reviewer") and record.get("job"):
             channels = [(record["job"], agent_folder(role, name, key, record))]
@@ -1891,9 +2477,9 @@ def cmd_api_retry(args):
 
 # ---------------------------------------------------------------- status
 
-def find_agent(record, agents, key):
-    """Find a recorded agent among live ones: by name, then pane, then session.
-    A match whose cwd is not in the repository `key` is someone else's work."""
+def find_agent(record, agents, folder):
+    """Find a recorded PM among live ones: by name, then pane, then session.
+    A match whose cwd is not the PM's folder is someone else's work."""
     tests = (
         lambda a: record.get("agent") and a.get("name") == record.get("agent"),
         lambda a: record.get("pane") and a.get("pane_id") == record.get("pane"),
@@ -1902,11 +2488,8 @@ def find_agent(record, agents, key):
     for test in tests:
         for a in agents:
             if test(a):
-                try:
-                    if repo_key(a.get("cwd") or "") == key:
-                        return a
-                except ValueError:
-                    pass
+                if a.get("cwd") and real_dir(a["cwd"]) == real_dir(folder):
+                    return a
                 return None
     return None
 
@@ -1959,7 +2542,7 @@ def status_locked(args, herdr_info):
     home = oke_home()
     result = {"herdr": {"inside": runtime().inside(), "missing": []},
               "state_recovered": bool(state.get("_recovered")),
-              "orchestrator_conflict": None, "repos": {}, "jobs": {}, "orphan_job_dirs": []}
+              "orchestrator_conflict": None, "pms": {}, "jobs": {}, "orphan_job_dirs": []}
     jobs_dir = os.path.join(home, "jobs")
     if os.path.isdir(jobs_dir):
         result["orphan_job_dirs"] = sorted(d for d in os.listdir(jobs_dir) if d not in state["jobs"])
@@ -1970,9 +2553,9 @@ def status_locked(args, herdr_info):
     names = set(a.get("name") for a in agents if a.get("name"))
     changed = False
 
-    for key, repo in state["repos"].items():
-        record = repo.get("pm") or {}
-        found = find_agent(record, agents, key)
+    for key, repo in state["pms"].items():
+        record = repo.setdefault("pm", {})
+        found = find_agent(record, agents, pm_dir(key)) if record else None
         if found:
             name, pane = found.get("name") or record.get("agent"), found.get("pane_id")
             if (name, pane) != (record.get("agent"), record.get("pane")):
@@ -1982,29 +2565,34 @@ def status_locked(args, herdr_info):
             if session_of(found) and session_of(found) != record.get("session"):
                 record["session"] = session_of(found)
                 changed = True
-        result["repos"][key] = {"pm": "alive" if found else dead,
-                                "agent": record.get("agent"), "pane": record.get("pane"),
-                                "session": record.get("session"),
-                                "pm_dir": pm_dir(key).replace("\\", "/")}
+        result["pms"][key] = {"pm": "alive" if found else (dead if record.get("agent") else "never"),
+                              "agent": record.get("agent") or key, "pane": record.get("pane"),
+                              "session": record.get("session"),
+                              "pm_dir": pm_dir(key).replace("\\", "/"),
+                              "places": repo.get("places") or []}
 
     for name, job in state["jobs"].items():
-        key = job.get("repo")
+        key = job.get("pm")
         children = read_children(key) if key else {}
         job_agents = dict((a, "alive" if a in names else dead)
                           for a, rec in children.items() if rec.get("job") == name)
-        if job.get("held") and job.get("phase") not in DONE_PHASES:
+        if job.get("phase") in DONE_PHASES and (not key or key not in state["pms"]):
+            cls = "closed"  # nothing to resume: its PM is gone (or it is an old OKe's job)
+        elif job.get("held") and job.get("phase") not in DONE_PHASES:
             cls = "held"
         elif job.get("phase") in ("awaiting_approval", "awaiting_merge"):
             cls = "awaiting_user"
-        elif result["repos"].get(key, {}).get("pm") == "alive":
+        elif result["pms"].get(key, {}).get("pm") == "alive":
             cls = "alive"
         else:
             cls = "disconnected" if dead == "dead" else "unknown"
-        result["jobs"][name] = {"phase": job.get("phase"), "class": cls, "agents": job_agents,
+        result["jobs"][name] = {"phase": job.get("phase"), "class": cls, "agents": job_agents, "pm": key,
+                                "path": job.get("path"),
                                 "pm_seq": pm_job_report(name)[0],
                                 "pm_job_dir": pm_job_dir(name).replace("\\", "/"),
                                 "size": job.get("size"), "direct": bool(job.get("direct")),
-                                "held": job.get("held"), "base": job.get("base")}
+                                "held": job.get("held"), "base": job.get("base"),
+                                "split_from": job.get("split_from")}
 
     here = runtime().whoami()
     recorded = state["orchestrator"].get("pane")
@@ -2056,8 +2644,8 @@ def compact_message():
                 % state_path().replace("\\", "/"))
     folder = None
     note = ""
-    repos = state.get("repos") or {}
-    keys = set(repos) | set(j.get("repo") for j in (state.get("jobs") or {}).values() if j.get("repo"))
+    repos = state.get("pms") or {}
+    keys = set(repos) | set(j.get("pm") for j in (state.get("jobs") or {}).values() if j.get("pm"))
     for key in sorted(keys):
         if mine((repos.get(key) or {}).get("pm") or {}):
             folder = pm_dir(key)
@@ -2089,16 +2677,30 @@ def cmd_compact_hook(args):
 # ---------------------------------------------------------------- job
 
 def cmd_job(args):
+    if args.action == "phase":
+        # only the orchestrator moves a job: a PM's report does (seen live: a PM set its own job
+        # done and never reported it, so nobody archived it)
+        pane = runtime().whoami()
+        if pane:
+            try:
+                me = whoami(load_state(), pane)[0]
+            except HerdrError:
+                me = None
+            if me and me[0] != "orchestrator":
+                return fail("only the orchestrator sets a job's phase: write your report (`type: done`) "
+                            "and the orchestrator moves the job")
     if args.action == "merge":
-        # git can take a while: not under the state lock, but one merge per repository at a time
-        repo = (load_state()["jobs"].get(args.slug) or {}).get("repo")
-        with locked("merge-" + repo_name(repo) if repo else "merge", timeout=120):
+        # git can take a while: not under the state lock, but one merge per git key at a time
+        key = (load_state()["jobs"].get(args.slug) or {}).get("git_key")
+        with locked("merge-" + repo_name(key) if key else "merge", timeout=120):
             return merge_job(args.slug)
     if args.action == "tree":
         info = load_state()["jobs"].get(args.slug)
         if not info:
             return fail("unknown job: %s" % args.slug)
-        tree = pending_tree(native_path(repo_dir(info["repo"])))
+        if no_path(args.slug, info):
+            return fail(no_path(args.slug, info))
+        tree = pending_tree(native_path(repo_dir(info["git_key"])))
         if not tree:
             return fail("git could not read the main checkout of %s" % args.slug)
         print(json.dumps({"job": args.slug, "tree": tree}))
@@ -2108,7 +2710,7 @@ def cmd_job(args):
             code = job_locked(args)
         if code:
             return code
-        return cancel_children(args.slug, load_state()["jobs"][args.slug].get("repo"))
+        return cancel_children(args.slug, load_state()["jobs"][args.slug].get("pm"))
     if args.action == "hold":
         with locked():
             code = job_locked(args)
@@ -2116,7 +2718,7 @@ def cmd_job(args):
             return code
         info = load_state()["jobs"][args.slug]
         # closes its agents, drops its queued mail but not the hold notice job_locked queued
-        return cancel_children(args.slug, info.get("repo"))
+        return cancel_children(args.slug, info.get("pm"))
     if args.action == "verify":
         if len([x for x in (args.command, args.accept, args.skip, args.run) if x]) > 1:
             return fail("give at most one of: the 검증 명령, --accept, --skip, --run")
@@ -2125,7 +2727,7 @@ def cmd_job(args):
         return verify_job(args.slug, args.command, args.accept, args.skip, args.run)  # can take hours
     key = left = None
     if args.action in ("archive", "unhold"):
-        key = (load_state()["jobs"].get(args.slug) or {}).get("repo")
+        key = (load_state()["jobs"].get(args.slug) or {}).get("pm")
     if args.action == "archive" and key:
         # a PM can forget to close a finished job's worker (seen live): archive does it,
         # before the folder moves (its next write would bring the folder back) and outside
@@ -2179,9 +2781,14 @@ def git_out(cwd, *args):
 
 
 def after_jobs(job):
-    """The jobs that must be merged and verified before `job` merges: its plan's `after:`."""
+    """The jobs that must be finished before `job` merges (or, for a job that never merges, starts):
+    its plan's `after:` and its split's `--after`."""
     header = read_header(os.path.join(oke_home(), "jobs", job, "plan.md")) or {}
-    return [n.strip() for n in str(header.get("after") or "").split(",") if n.strip()]
+    names = [n.strip() for n in str(header.get("after") or "").split(",") if n.strip()]
+    split = (load_state()["jobs"].get(job) or {}).get("after")  # `job split --after`
+    if split and split not in names:
+        names.append(split)
+    return [n for n in names if n != job]  # a job never waits for itself
 
 
 def after_block(state, other):
@@ -2189,30 +2796,81 @@ def after_block(state, other):
     info = state["jobs"].get(other)
     if info is not None:
         if info.get("phase") == "failed":
-            return "after %s was cancelled: ask the user" % other
+            return "after-job %s was cancelled" % other
+        if info.get("direct") or info.get("size") == "research":
+            # it never merges: done is all it does
+            return None if info.get("phase") == "done" else "waiting for %s to be done" % other
         if merge_state(other)[0] != "verified":
             return "waiting for %s to merge" % other
         return None
     archived = sorted(glob.glob(os.path.join(oke_home(), "archive", glob.escape(other) + "-*")))
     archived = [d for d in archived if re.match(re.escape(other) + r"-\d{8}-\d{6}$", os.path.basename(d))]
     if not archived:
-        return "after %s is no known job: fix the plan" % other
+        return "after-job %s is no known job" % other
+    kept = read_json(os.path.join(archived[-1], "job.json"), {})  # its state entry, kept at the archive
+    if isinstance(kept, dict) and (kept.get("direct") or kept.get("size") == "research") \
+            and kept.get("phase") == "done":
+        return None
     if merge_state(other, os.path.join(archived[-1], "ledger.tsv"))[0] == "verified":
         return None
-    return "after %s was archived without a verified merge: ask the user" % other
+    return "after-job %s was archived without a verified merge" % other
 
 
-AFTER_VERIFIED = "is merged and verified. Run the merge again."
+AFTER_FINISHED = "is finished"
+
+
+GATE_PHASES = ("intake", "planning", "awaiting_approval")  # a job held at its start is in one
+
+
+def gated(job):
+    """True for a job the start gate refused that has not started since."""
+    return bool(job.get("start_after")) and job.get("phase") in GATE_PHASES
+
+
+def after_blocks(state, job):
+    """(waits, broken) for `job`'s after-jobs: [(after-job, reason)] of those it still plainly
+    waits for, and of those that can never clear by themselves (cancelled, unknown,
+    archived without a verified merge), which the user decides."""
+    waits, broken = [], []
+    for other in after_jobs(job):
+        why = after_block(state, other)
+        if why and why.startswith("waiting for ") and waits_on(other, job):
+            why = "after-job %s itself waits for %s (a cycle)" % (other, job)
+        if why:
+            (waits if why.startswith("waiting for ") else broken).append((other, why))
+    return waits, broken
+
+
+def waits_on(job, target):
+    """Does `job` wait, through its after-jobs and theirs, for `target`?"""
+    seen, todo = set(), [job]
+    while todo:
+        cur = todo.pop()
+        for other in after_jobs(cur):
+            if other == target:
+                return True
+            if other not in seen:
+                seen.add(other)
+                todo.append(other)
+    return False
+
+
+def start_after(state, job):
+    """The after-jobs a folder job still waits for at its start: [] when none."""
+    if not (state["jobs"].get(job) or {}).get("direct"):
+        return []
+    return [o for o, _ in after_blocks(state, job)[0] + after_blocks(state, job)[1]]
 
 
 def tell_after_waiters(state, job, news, phases=None):
     """Queue `news` about `job` to the PM of every open job whose plan says `after: <job>`
-    (only jobs in `phases`, when given)."""
+    (only jobs in `phases`, when given). A job held at its start gate needs no mail: its
+    `after_ready` item shows up in `oke pending` once nothing holds it."""
     for other in sorted(open_jobs(state)):
         if phases and state["jobs"][other].get("phase") not in phases:
             continue
         if other != job and job in after_jobs(other):
-            pm = (state["repos"].get(state["jobs"][other].get("repo")) or {}).get("pm") or {}
+            pm = (state["pms"].get(state["jobs"][other].get("pm")) or {}).get("pm") or {}
             if pm.get("agent"):
                 queue_mail(pm["agent"], "oke", "Job %s: after-job %s %s" % (other, job, news))
 
@@ -2228,7 +2886,7 @@ def quality_block(job, review_asg, target):
                 % (job, rev))
     rows = [r for r in ledger_rows(job) if r["check"] == "check" and r["commit"] == target]
     if not rows or rows[-1]["result"] != "pass" or rows[-1]["detail"].split()[:1] != [rev]:
-        return "no passing `oke check` on %s with the current criteria: run `oke check %s`" % (target, job)
+        return "no passing `oke check` on %s with the current criteria: run `$OKE check %s`" % (target, job)
     return None
 
 
@@ -2244,24 +2902,27 @@ def merge_job(job):
         return fail("job %s is on hold: no merge until it is back" % job)
     if not info:
         return fail("unknown job: %s" % job)
+    if no_path(job, info) and info.get("size") != "research":
+        return fail(no_path(job, info))
     if info.get("size") == "research" or info.get("direct"):
         return fail("job %s: %s" % (job, NO_MERGE))
     if info.get("phase") != "merging":
         return fail("job %s is in phase %s: set phase merging after the user approves the merge"
                     % (job, info.get("phase")))
-    for other in [o for o in after_jobs(job) if o != job]:
-        why = after_block(state, other)
-        if why:
-            return fail("job %s: %s" % (job, why))
+    waits, broken = after_blocks(state, job)
+    if broken:
+        return fail("job %s: %s: the orchestrator asks the user; keep the job waiting" % (job, broken[0][1]))
+    if waits:
+        return fail("job %s: %s" % (job, waits[0][1]))
     already = merge_state(job)[0]
     if already in ("unverified", "verified"):
-        return fail("job %s is already merged (%s): run `oke job verify %s`, not a second merge"
+        return fail("job %s is already merged (%s): run `$OKE job verify %s`, not a second merge"
                     % (job, already, job))
-    # every job of this repository, a failed or cancelled one too: its merge is still in main
-    for other in [n for n, j in state["jobs"].items() if j.get("repo") == info["repo"]]:
+    # every job of this checkout, a failed or cancelled one too: its merge is still in main
+    for other in [n for n, j in state["jobs"].items() if j.get("git_key") == info["git_key"]]:
         other_state, row = merge_state(other)
         if other != job and other_state == "unverified":
-            return fail("the merge of %s is not verified yet: run `oke job verify %s` first"
+            return fail("the merge of %s is not verified yet: run `$OKE job verify %s` first"
                         % (other, other))
         if other != job and other_state == "rolled_back" and "already-in" in row["detail"].split():
             # its failing code is still in main (nothing could be undone): a check here would fail on it
@@ -2277,7 +2938,7 @@ def merge_job(job):
     if worker and worker[0] > review[0]:
         return fail("the worker reported after the last review (a rebase or a fix): give the reviewer "
                     "a new instruction to review it, then merge")
-    main = native_path(repo_dir(info["repo"]))
+    main = native_path(repo_dir(info["git_key"]))
     # The review counts only for the commit its assignment named, and only once the
     # report answers that assignment: commits added after it were never reviewed.
     review_asg = read_header(os.path.join(os.path.dirname(review[1]), "assignment.md")) or {}
@@ -2457,7 +3118,7 @@ def commit_direct(job, info, main, review, reviewed):
     if git_out(main, "rev-parse", "HEAD^{tree}")[1] != reviewed:  # changed between the check and the commit
         subprocess.call(["git", "-C", main, "reset", "-q", "--soft", pre])
         subprocess.call(["git", "-C", main, "reset", "-q"])
-        return fail("the changes in %s moved during the commit: run `oke job merge %s` again" % (main, job))
+        return fail("the changes in %s moved during the commit: run `$OKE job merge %s` again" % (main, job))
     merged = git_out(main, "rev-parse", "HEAD")[1]
     ledger_add(job, os.path.basename(os.path.dirname(review)), merged, "review", "pass",
                review.replace("\\", "/"))
@@ -2919,7 +3580,7 @@ def check_dir(info):
             return cwd, "tree:" + tree if tree else None
         code, head = git_out(cwd, "rev-parse", "HEAD")
         return cwd, head if code == 0 else None
-    main = native_path(repo_dir(info["repo"]))
+    main = native_path(repo_dir(info["git_key"]))
     tree = pending_tree(main)
     return main, "tree:" + tree if tree else None
 
@@ -2931,6 +3592,8 @@ def quality_target(job):
         return fail("unknown job: %s" % job)
     if info.get("size") == "research" or info.get("direct"):
         return fail("job %s has nothing to merge (research or direct): no baseline or check" % job)
+    if no_path(job, info):
+        return fail(no_path(job, info))
     command = plan_command(job)
     if not command:
         fail(u"plan.md of %s names no 검증 명령: its section's first line is the command in backticks" % job)
@@ -2950,7 +3613,7 @@ def untracked_work(cwd):
 def base_point(info, cwd):
     """The commit the job's work starts from: in a worktree, where its branch leaves the
     base branch; without one, the main checkout's HEAD."""
-    main = native_path(repo_dir(info["repo"]))
+    main = native_path(repo_dir(info["git_key"]))
     code, head = git_out(main, "rev-parse", "HEAD")
     if not (info.get("worktree") or {}).get("path"):
         return head if code == 0 else None
@@ -3008,7 +3671,7 @@ def reread_baseline(job, info, old):
             text = f.read()
     except (IOError, OSError, ValueError, OverflowError):
         return None
-    folders = [(info.get("worktree") or {}).get("path"), repo_dir(info["repo"]),
+    folders = [(info.get("worktree") or {}).get("path"), repo_dir(info["git_key"]),
                os.path.join(oke_home(), "jobs", job, "baseline-checkout")]
     sigs = []
     for where in [f for f in folders if f]:
@@ -3046,7 +3709,7 @@ def cmd_baseline(args):
                 return 2
         if now["unrunnable"]:  # the previous baseline stays
             fail(u"the 검증 명령 could not run (exit %d, see %s): fix the command in plan.md, then "
-                 u"`oke baseline %s` again" % (now["exit"], log.replace("\\", "/"), args.job))
+                 u"`$OKE baseline %s` again" % (now["exit"], log.replace("\\", "/"), args.job))
             return 2
         target = point
         path = os.path.join(job_dir, "baseline.json")
@@ -3093,13 +3756,13 @@ def cmd_check(args):
         if read_baseline(args.job, any_version=True) is not None:
             merged = merge_state(args.job)[0] in ("unverified", "verified")
             fail("the baseline of %s was recorded by an older OKe, which read failures differently: %s"
-                 % (args.job, "`oke job verify %s` reads its log again" % args.job if merged
-                    else "run `oke baseline %s` again" % args.job))
+                 % (args.job, "`$OKE job verify %s` reads its log again" % args.job if merged
+                    else "run `$OKE baseline %s` again" % args.job))
         else:
-            fail("job %s has no baseline: run `oke baseline %s` before the work starts" % (args.job, args.job))
+            fail("job %s has no baseline: run `$OKE baseline %s` before the work starts" % (args.job, args.job))
         return 2
     if base.get("criteria_rev") != rev:
-        fail(u"the 검증 명령 or the criteria of %s changed since the baseline: run `oke baseline %s` again"
+        fail(u"the 검증 명령 or the criteria of %s changed since the baseline: run `$OKE baseline %s` again"
              % (args.job, args.job))
         return 2
     lock = "check-" + args.job
@@ -3195,20 +3858,20 @@ def verify_locked(job, command, accept, info, skip=None, run=False):
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "already": True}))
         return 0
     if status != "unverified":
-        return fail("job %s has no merge to verify (%s): run `oke job merge %s` first" % (job, status, job))
+        return fail("job %s has no merge to verify (%s): run `$OKE job merge %s` first" % (job, status, job))
     if accept:
         # the user's call, e.g. after the main branch moved on: recorded as such
         ledger_add(job, "user", row["commit"], "verify", "pass", "accepted: " + accept)
-        tell_after_waiters(load_state(), job, AFTER_VERIFIED, ("merging",))
+        tell_after_waiters(load_state(), job, AFTER_FINISHED, ("merging", "awaiting_merge"))
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "accepted": True}))
         return 0
-    main = native_path(repo_dir(info["repo"]))
+    main = native_path(repo_dir(info["git_key"]))
     if git_out(main, "rev-parse", "HEAD")[1] != row["commit"]:
         return fail("the main checkout moved past the merge of %s (%s): ask the user; if they accept "
-                    "the merge as it is, `oke job verify %s --accept \"<why>\"`" % (job, row["commit"][:12], job))
+                    "the merge as it is, `$OKE job verify %s --accept \"<why>\"`" % (job, row["commit"][:12], job))
     planned = plan_command(job)
     if command and planned and command != planned:
-        return fail(u"the 검증 명령 given (%s) differs from plan.md's (%s): run `oke job verify %s` "
+        return fail(u"the 검증 명령 given (%s) differs from plan.md's (%s): run `$OKE job verify %s` "
                     u"without a command" % (command, planned, job))
     command = planned or command
     if not command:
@@ -3219,13 +3882,13 @@ def verify_locked(job, command, accept, info, skip=None, run=False):
     if same:
         # the merged code is exactly what `oke check` passed on: running it again proves nothing new
         ledger_add(job, "oke", row["commit"], "verify", "pass", "same tree as " + same)
-        tell_after_waiters(load_state(), job, AFTER_VERIFIED, ("merging",))
+        tell_after_waiters(load_state(), job, AFTER_FINISHED, ("merging", "awaiting_merge"))
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "skipped": True,
                           "same_tree_as": same}))
         return 0
     since = None if run else changed_since_check(job, main, row["commit"], rev)
     if skip and not since:
-        return fail("nothing to skip: no passing `oke check` under the current plan; run `oke job verify %s --run`"
+        return fail("nothing to skip: no passing `oke check` under the current plan; run `$OKE job verify %s --run`"
                     % job)
     if since and skip:
         # the PM judged that what other merges brought in cannot change the check's result
@@ -3233,7 +3896,7 @@ def verify_locked(job, command, accept, info, skip=None, run=False):
         shown = ", ".join(files[:20]) + (" (+%d more)" % (len(files) - 20) if len(files) > 20 else "")
         ledger_add(job, "pm", row["commit"], "verify", "pass",
                    "skipped by PM: %s (checked %s; changed: %s)" % (" ".join(skip.split()), target, shown))
-        tell_after_waiters(load_state(), job, AFTER_VERIFIED, ("merging",))
+        tell_after_waiters(load_state(), job, AFTER_FINISHED, ("merging", "awaiting_merge"))
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "skipped": True,
                           "skipped_by": "pm", "checked": target, "changed": files}))
         return 0
@@ -3254,7 +3917,7 @@ def verify_locked(job, command, accept, info, skip=None, run=False):
         base = reread_baseline(job, info, old)
         if not base:
             return fail("the baseline of %s was recorded by an older OKe and its log is gone: ask the user; "
-                        "if they accept the merge as it is, `oke job verify %s --accept \"<why>\"`" % (job, job))
+                        "if they accept the merge as it is, `$OKE job verify %s --accept \"<why>\"`" % (job, job))
     if (base or {}).get("criteria_rev") != rev:
         base = None  # another command's failures say nothing about this one's
     now = run_signatures(command, main, log)
@@ -3268,7 +3931,7 @@ def verify_locked(job, command, accept, info, skip=None, run=False):
                     % (code, log))
     if not new:
         ledger_add(job, "oke", row["commit"], "verify", "pass", command)
-        tell_after_waiters(load_state(), job, AFTER_VERIFIED, ("merging",))
+        tell_after_waiters(load_state(), job, AFTER_FINISHED, ("merging", "awaiting_merge"))
         print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "log": log}))
         return 0
     ledger_add(job, "oke", row["commit"], "verify", "fail", "exit %d: %s" % (code, command))
@@ -3355,7 +4018,7 @@ def interview_problem(job):
     """Why job `job` may not start planning yet, or None."""
     data = read_json(interview_path(job), None)
     if not isinstance(data, dict) or not data.get("done"):
-        return ("job %s has no finished interview: run `oke interview %s --goal .. --constraints .. "
+        return ("job %s has no finished interview: run `$OKE interview %s --goal .. --constraints .. "
                 "--criteria ..` until it says done" % (job, job))
     return None
 
@@ -3365,7 +4028,7 @@ def cmd_interview(args):
     (and the question just answered), compute ambiguity, say what to ask next."""
     path = interview_path(args.job)
     if args.job != slug(args.job) or not os.path.isdir(os.path.dirname(path)):
-        return fail("unknown job: %s (run `oke job new` first)" % args.job)
+        return fail("unknown job: %s (run `$OKE job new` first)" % args.job)
     scores = {}
     for name, _ in DIMENSIONS:
         value = getattr(args, name)
@@ -3426,45 +4089,125 @@ def job_locked(args):
                for d in glob.glob(os.path.join(home, "archive", glob.escape(args.slug) + "-*"))):
             # never a name again: an archived ledger copied in would carry valid signatures
             return fail("job %s was archived before: pick another job name" % args.slug)
-        try:
-            key = repo_key(args.repo)
-        except ValueError as e:
-            return fail(str(e))
-        direct = not os.path.exists(key)
-        path = repo_dir(key)
-        if path is None:
-            return fail("%s is a bare repository (no working folder): give a checkout's folder" % args.repo)
-        busy = [n for n, j in state["jobs"].items()  # research changes nothing: never in the way
-                if direct and not args.research and j.get("repo") == key and j.get("size") != "research"
-                and j.get("phase") not in DONE_PHASES]
-        if busy:
-            return fail("job %s already changes %s in place (no git, no undo): finish or archive it first"
-                        % (busy[0], args.repo))
-        branch = "refs/heads/oke/" + args.slug
-        if not direct and subprocess.call(["git", "-C", native_path(args.repo), "show-ref", "--verify",
-                                           "--quiet", branch]) == 0:
-            return fail("branch oke/%s already exists (an earlier job): pick another job name" % args.slug)
+        if args.pm not in state["pms"]:
+            return fail("no PM %s: pick one of %s, or `$OKE pm add` a new one"
+                        % (args.pm, ", ".join(sorted(state["pms"])) or "(none yet)"))
         os.makedirs(job_dir)
-        # the branch the main checkout is on now: `job merge` merges only into it
-        base = None if direct else git_out(native_path(path), "symbolic-ref", "-q", "--short", "HEAD")[1]
-        state["jobs"][args.slug] = {"repo": key, "phase": "intake", "worktree": None,
-                                    "phase_at": time.time(), "created": time.time(), "base": base or None}
+        state["jobs"][args.slug] = {"pm": args.pm, "path": None, "phase": "intake", "worktree": None,
+                                    "phase_at": time.time(), "created": time.time(), "base": None}
         if args.research:
             state["jobs"][args.slug]["size"] = "research"
-        if direct:
-            state["jobs"][args.slug]["direct"] = True
+        if args.path:
+            try:
+                set_job_path(state, args.slug, args.path)
+            except ValueError as e:
+                os.rmdir(job_dir)
+                return fail(str(e))
         save_state(state)
-        print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "repo": key, "path": path,
-                          "size": "research" if args.research else None, "direct": direct,
+        info = state["jobs"][args.slug]
+        print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "path": info.get("path"),
+                          "size": "research" if args.research else None,
+                          "direct": bool(info.get("direct")) if info.get("path") else None,
                           "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
-                          "pm_dir": pm_dir(key).replace("\\", "/"),
-                          "pm_agent": "pm-" + repo_name(key),
-                          "wiki": wiki_dir(key).replace("\\", "/"),
+                          "pm_dir": pm_dir(args.pm).replace("\\", "/"),
+                          "pm_agent": args.pm,
+                          "wiki": wiki_dir(args.pm).replace("\\", "/"),
                           "shared_wiki": os.path.join(load_config()["wiki_path"], "_shared").replace("\\", "/")},
                          ensure_ascii=False))
         return 0
     if args.slug not in state["jobs"]:
         return fail("unknown job: %s" % args.slug)
+    if args.action == "path":
+        info = state["jobs"][args.slug]
+        try:
+            folder = path_facts(args.path)[1]
+        except ValueError as e:
+            return fail(str(e))
+        if info.get("path") and normalize_path(folder) == normalize_path(info["path"]):
+            # the same folder (case, slashes): nothing to do, and safe to call at any time
+            print(json.dumps({"job": args.slug, "path": info["path"], "direct": bool(info.get("direct")),
+                              "unchanged": True}, ensure_ascii=False))
+            return 0
+        research = info.get("size") == "research" and not info.get("path") \
+            and info.get("phase") not in DONE_PHASES  # no plan: it finds its path while it works
+        started = info.get("worked") or info.get("worktree") or info.get("approved")
+        if (info.get("phase") not in ("intake", "planning", "awaiting_approval") or started) and not research:
+            if info.get("size") == "research":
+                return fail("job %s is research and has its path %s: a research job keeps its path; report a "
+                            "question" % (args.slug, info.get("path")))
+            if info.get("phase") in SPLIT_PHASES:
+                return fail("job %s has worked in %s (or was approved): its path stays. For work in %s split a "
+                            "new job: `$OKE job split %s <new job> --path %s`"
+                            % (args.slug, info.get("path"), folder, args.slug, args.path))
+            return fail("job %s has worked in %s and is past planning: its path stays, and it is too late to "
+                        "split. Report a question: the user decides on work in %s"
+                        % (args.slug, info.get("path"), folder))
+        if info.get("held"):
+            return fail("job %s is on hold: leave it until a message says it is back" % args.slug)
+        if not info.get("pm") or info["pm"] not in state["pms"]:
+            return fail("job %s has no PM" % args.slug)
+        try:
+            set_job_path(state, args.slug, args.path, branch_taken=(
+                "report a question: branch oke/%(job)s already exists in %(checkout)s (an earlier job); the user "
+                "decides: delete that branch, or cancel this job and start it under another name"))
+        except ValueError as e:
+            return fail(str(e))
+        save_state(state)
+        print(json.dumps({"job": args.slug, "path": info["path"], "direct": bool(info.get("direct"))},
+                         ensure_ascii=False))
+        return 0
+    if args.action == "split":
+        info = state["jobs"][args.slug]
+        if info.get("size") == "research":
+            return fail("job %s is research: research jobs are not split (it changes nothing)" % args.slug)
+        new = args.new
+        if new != slug(new):
+            return fail("bad job name %r: use %r" % (new, slug(new)))
+        new_dir = os.path.join(home, "jobs", new)
+        if new in state["jobs"] or os.path.exists(new_dir) or any(
+                re.match(re.escape(new) + r"-\d{8}-\d{6}$", os.path.basename(d))
+                for d in glob.glob(os.path.join(home, "archive", glob.escape(new) + "-*"))):
+            return fail("job %s exists already (or was archived): pick another name" % new)
+        if info.get("phase") not in SPLIT_PHASES or info.get("held"):
+            return fail("job %s is past planning (%s): split it only while planning" % (args.slug, info.get("phase")))
+        if args.after and args.after not in state["jobs"]:
+            return fail("unknown job for --after: %s" % args.after)
+        try:
+            folder = path_facts(args.path)[1]
+        except ValueError as e:
+            return fail(str(e))
+        twins = sorted(n for n, j in state["jobs"].items() if j.get("split_from") == args.slug
+                       and j.get("path") == folder and j.get("phase") not in DONE_PHASES)
+        if twins:  # a revived or re-planning PM splits again: reuse the job it made
+            print(json.dumps({"existing": twins[0], "path": folder}, ensure_ascii=False))
+            return fail("job %s already split %s off as job %s: use that job" % (args.slug, folder, twins[0]))
+        state["jobs"][new] = {"pm": info.get("pm"), "path": None, "phase": "intake", "worktree": None,
+                              "phase_at": time.time(), "created": time.time(), "base": None,
+                              "split_from": args.slug}
+        try:
+            set_job_path(state, new, args.path)
+        except ValueError as e:
+            return fail(str(e))
+        os.makedirs(new_dir)
+        src = os.path.join(home, "jobs", args.slug, "intake.md")
+        intake = io.open(src, encoding="utf-8").read() if os.path.exists(src) else u""
+        never_merges = state["jobs"][new].get("direct")
+        intake += u"\n## 분할\nSplit from job %s by its PM: this job changes only %s.%s\n" % (
+            args.slug, state["jobs"][new]["path"],
+            (u" It starts its work only after job %s (plan `after: %s`)." if never_merges else
+             u" It merges only after job %s (plan `after: %s`).") % (args.after, args.after) if args.after else u"")
+        with io.open(os.path.join(new_dir, "intake.md"), "w", encoding="utf-8", newline="\n") as f:
+            f.write(intake)
+        if os.path.exists(interview_path(args.slug)):
+            shutil.copyfile(interview_path(args.slug), interview_path(new))
+        if args.after:
+            state["jobs"][new]["after"] = args.after
+        save_state(state)
+        out = {"job": new, "split_from": args.slug, "path": state["jobs"][new]["path"],
+               "direct": bool(state["jobs"][new].get("direct")), "after": args.after}
+        out.update(pm_fields(info.get("pm"), new))
+        print(json.dumps(out, ensure_ascii=False))
+        return 0
     if args.action == "phase":
         if state["jobs"][args.slug].get("held"):
             return fail("job %s is on hold: leave it until a message says it is back" % args.slug)
@@ -3486,23 +4229,86 @@ def job_locked(args):
         if allowed is not None and now not in allowed:
             return fail("job %s cannot go from %s to %s: allowed only from %s"
                         % (args.slug, now, args.phase, ", ".join(allowed)))
+        if args.phase == "working" and info.get("size") != "research" and no_path(args.slug, info):
+            return fail(no_path(args.slug, info))
+        if args.phase == "working" and info.get("direct") and now in GATE_PHASES:
+            # it never merges, so `after:` holds its start instead of its merge (a move back
+            # from reviewing has started already: no gate)
+            for other in after_jobs(args.slug):
+                block = after_block(state, other)
+                if block:
+                    info["start_after"] = True  # `oke pending` names it as after_ready once free
+                    if now == "awaiting_approval":
+                        info["approved"] = True  # the user approved the plan; it only waits
+                    save_state(state)
+                    return fail("job %s: %s (it starts its work only after job %s). Write no assignment: "
+                                "`$OKE pending` shows it as after_ready when it may start, or after_broken if "
+                                "the after-job can never finish"
+                                % (args.slug, block, other))
         if args.phase == "done" and not no_merge and merge_state(args.slug)[0] != "verified":
             # done tells the user the work is in: only after OKe's merge and its verify
-            return fail("job %s: its merge is %s: `oke job merge`, then `oke job verify`, before done"
+            return fail("job %s: its merge is %s: `$OKE job merge`, then `$OKE job verify`, before done"
                         % (args.slug, merge_state(args.slug)[0]))
-        if args.phase == "done" and info.get("repo") and not wiki.logged(wiki_dir(info["repo"]), args.slug,
+        if args.phase == "done" and info.get("pm") and not wiki.logged(wiki_dir(info["pm"]), args.slug,
                                                                          info.get("created")):
             return fail("job %s: the PM has not recorded what it taught. It writes the lessons with "
-                        "`oke wiki write --job %s`, or `oke wiki log --job %s --note none`"
+                        "`$OKE wiki write --job %s`, or `$OKE wiki log --job %s --note none`"
                         % (args.slug, args.slug, args.slug))
         if args.phase in ("planning", "working") and now == "intake":  # a re-plan needs no new interview
             problem = interview_problem(args.slug)
             if problem:
                 return fail(problem)
         state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
+        if args.phase == "working" and now not in ("working", "reviewing"):
+            # set before its execute (curate) assignment is written: until a newer seq is,
+            # whatever the PM reports is about the plan (or an answer to it), not the work.
+            # Set after it (a research start, a misordered approval): no mark.
+            seq = pm_job_report(args.slug)[0]
+            if assignment_kind(args.slug) not in WORK_KINDS:
+                state["jobs"][args.slug]["start_seq"] = seq
+            else:
+                state["jobs"][args.slug].pop("start_seq", None)
+        info.pop("start_after", None)
         if args.phase == "working":
             info["worked"] = True  # a later re-plan does not undo the edits already made
+        if args.phase not in ("intake", "planning", "awaiting_approval", "failed"):
+            info["approved"] = True  # past its approval once: its path stays
         save_state(state)
+        if args.phase == "done" and no_merge:  # it never merges: done finishes it for `after:`
+            tell_after_waiters(state, args.slug, AFTER_FINISHED, ("merging", "awaiting_merge"))
+        return 0
+    if args.action == "after":
+        info = state["jobs"][args.slug]
+        if info.get("phase") in DONE_PHASES:
+            return fail("job %s is finished" % args.slug)
+        if args.drop not in after_jobs(args.slug):
+            return fail("job %s does not wait for %s (after: %s)"
+                        % (args.slug, args.drop, ", ".join(after_jobs(args.slug)) or "none"))
+        plan = os.path.join(home, "jobs", args.slug, "plan.md")
+        try:
+            with io.open(plan, encoding="utf-8") as f:
+                text = f.read()
+        except (IOError, OSError):
+            text = None
+        if text is not None:
+            head, sep, body = text.partition("\n---\n")
+            lines = []
+            for line in head.split("\n"):
+                m = re.match(r"^after:(.*)$", line)
+                if m:
+                    left = [n.strip() for n in m.group(1).split(",") if n.strip() and n.strip() != args.drop]
+                    if not left:
+                        continue
+                    line = "after: " + ", ".join(left)
+                lines.append(line)
+            tmp = "%s.%d.tmp" % (plan, os.getpid())
+            with io.open(tmp, "w", encoding="utf-8", newline="") as f:
+                f.write("\n".join(lines) + sep + body)
+            replace_file(tmp, plan)
+        if info.get("after") == args.drop:
+            info.pop("after")
+        save_state(state)
+        print(json.dumps({"job": args.slug, "after": after_jobs(args.slug)}, ensure_ascii=False))
         return 0
     if args.action == "rounds":
         info = state["jobs"][args.slug]
@@ -3543,14 +4349,14 @@ def job_locked(args):
                         % (args.slug, info.get("phase")))
         merged, row = merge_state(args.slug)
         if merged == "rolled_back" and "already-in" in row["detail"].split():
-            return fail("job %s blocks the merges of its repository (its failing code is in main): fix "
+            return fail("job %s blocks the merges into its git checkout (its failing code is in main): fix "
                         "it, or cancel and archive it, not hold it" % args.slug)
         early = info.get("size") == "research" or (
             info.get("phase") in ("intake", "planning", "awaiting_approval") and not info.get("worked"))
         if info.get("direct") and not early:
             return fail("job %s changes its folder in place (no git): cancel it, or let it finish, not hold it"
                         % args.slug)
-        main = native_path(os.path.dirname(info.get("repo") or ""))
+        main = native_path(os.path.dirname(info.get("git_key") or ""))
         try:
             with open(os.path.join(oke_home(), "jobs", args.slug, "plan.md"), encoding="utf-8") as f:
                 section = re.search(r"^## worktree[^\n]*\n(.*?)(?=^## |\Z)", f.read(), re.M | re.S)
@@ -3558,14 +4364,14 @@ def job_locked(args):
             section = None
         # a plan with a worktree names its branch: main's changes are the user's, not this job's
         uses_worktree = bool(section) and ("oke/" + args.slug) in section.group(1)
-        if not early and not uses_worktree and info.get("repo") \
+        if not early and not uses_worktree and info.get("git_key") \
                 and git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/" + args.slug)[0] != 0:
             # no branch: its edits (a worker's or the PM's own) sit uncommitted in the main
             # checkout, in every other job's way. Not judged by main's state: a PM subagent the
             # hold cannot close may still write there after it
             return fail("job %s works in the main checkout (no branch oke/%s): cancel it, or let it "
                         "finish, not hold it" % (args.slug, args.slug))
-        pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}
+        pm = (state["pms"].get(info.get("pm")) or {}).get("pm") or {}
         if pm.get("agent"):
             # queued before held is saved: a PM wait that sees the job gone sees this mail
             # and does not end with no_jobs. Not "Job X:", so the mail drop keeps it.
@@ -3587,31 +4393,32 @@ def job_locked(args):
         info.pop("held_at", None)
         info.pop("deferred", None)  # what it waits on the user for is asked again
         save_state(state)
-        pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}
+        pm = (state["pms"].get(info.get("pm")) or {}).get("pm") or {}
         print(json.dumps({"job": args.slug, "pm": pm.get("agent"),
                           "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/")}))
         return 0
     if args.action == "cancel":
         info = state["jobs"][args.slug]
-        merged = merge_state(args.slug)[0]
-        if info.get("phase") == "done" or merged in ("unverified", "verified"):
-            return fail("job %s is %s: its merge is in main or under way. Let it finish (verify, or "
-                        "roll it back), not cancel" % (args.slug, info.get("phase") if merged == "none" else
-                                                       "merged (%s)" % merged))
-        pm = (state["repos"].get(info.get("repo")) or {}).get("pm") or {}
+        if cancel_problem(state, args.slug):
+            return fail(cancel_problem(state, args.slug))
+        pm = (state["pms"].get(info.get("pm")) or {}).get("pm") or {}
         if pm.get("agent"):
             # queued before the phase changes: the PM's wait delivers it before it can say no_jobs
             queue_mail(pm["agent"], "oke", "Job %s was cancelled by the user. Forget it, close what is "
                        "left of it, and write no report for it." % args.slug)
-        tell_after_waiters(state, args.slug, "was cancelled. Report question to the user.")
+        # only a job at its merge waits on it now (after_broken asks the user); one still
+        # working sees it at its merge, and a folder job past its start never waits
+        tell_after_waiters(state, args.slug, "was cancelled: the orchestrator asks the user; keep the job waiting",
+                           ("awaiting_merge", "merging"))
         info.update(phase="failed", phase_at=time.time(), cancelled=True)
         save_state(state)  # nothing may start for this job from here on
         return 0
     if args.action == "archive":
         src = os.path.join(home, "jobs", args.slug)
         dst = os.path.join(home, "archive", "%s-%s" % (args.slug, time.strftime("%Y%m%d-%H%M%S")))
-        key = state["jobs"][args.slug].get("repo")
-        hint = record_wiki_use(src, key) if key and os.path.isdir(src) else None
+        key = state["jobs"][args.slug].get("pm")
+        # a removed PM has no wiki to count in or curate: none is made again for it
+        hint = record_wiki_use(src, key) if key in state["pms"] and os.path.isdir(src) else None
         if os.path.isdir(src):
             if not os.path.isdir(os.path.dirname(dst)):
                 os.makedirs(os.path.dirname(dst))
@@ -3623,6 +4430,10 @@ def job_locked(args):
                         os.remove(path)
                     except OSError:
                         pass
+            try:  # what it was (direct, research, done): a job after it still asks
+                write_json_atomic(os.path.join(dst, "job.json"), state["jobs"][args.slug])
+            except (IOError, OSError):
+                pass
         del state["jobs"][args.slug]
         save_state(state)
         if key:  # a later job of the same name must not inherit its agents
@@ -3693,7 +4504,7 @@ HOLD_NOTICE = ("Job %s is on hold: the user put it on hold. Stop working on it, 
 def drop_job_mail(job, key, also=None):
     """Move the queued messages about `job` out of its PM's and children's inboxes, so a
     later agent never acts on a closed job (OMC deletes a finished team's mailboxes)."""
-    names = ["pm-" + repo_name(key)] + [n for n, r in read_children(key).items() if r.get("job") == job]
+    names = [key] + [n for n, r in read_children(key).items() if r.get("job") == job]
     mark = ("Job %s:" % job,) + ((also,) if also else ())
     dropped = 0
     for agent in names:
@@ -3728,8 +4539,8 @@ def shared_wiki():
 
 def record_wiki_use(job_dir, key):
     """Count what the job's reports said about wiki pages (`## wiki`); a page is the
-    repository's if it has one by that name, else the shared wiki's. Says when the
-    repository's wiki is due for a curation."""
+    PM's if its wiki has one by that name, else the shared wiki's. Says when the PM's
+    wiki is due for a curation."""
     entries = []
     for name in sorted(os.listdir(job_dir)):
         try:
@@ -3754,8 +4565,8 @@ def record_wiki_use(job_dir, key):
             break
         jobs.add(m.group(1))
     if len(jobs) >= CURATE_EVERY:
-        return ("curate: the wiki of %s took %d jobs since its last curation: give its PM `kind: curate`"
-                % (os.path.dirname(key), len(jobs)))
+        return ("curate: the wiki of PM %s took %d jobs since its last curation: give it `kind: curate`"
+                % (key, len(jobs)))
     return None
 
 
@@ -3787,14 +4598,15 @@ def wiki_locked(args):
     if args.shared:
         where = shared_wiki()
     elif args.job:
-        where = wiki_dir(state["jobs"][args.job]["repo"])
-    elif args.repo:
-        try:
-            where = wiki_dir(repo_key(args.repo))
-        except ValueError as e:
-            return fail(str(e))
+        if not state["jobs"][args.job].get("pm"):
+            return fail("job %s has no PM" % args.job)
+        where = wiki_dir(state["jobs"][args.job]["pm"])
+    elif args.pm:
+        if args.pm not in state["pms"]:
+            return fail("no PM %s" % args.pm)
+        where = wiki_dir(args.pm)
     else:
-        return fail("name the wiki: --job <job>, --repo <path> or --shared")
+        return fail("name the wiki: --job <job>, --pm <name> or --shared")
     try:
         if args.action == "read":
             out = wiki.read(where, args.page)
@@ -3811,13 +4623,12 @@ def wiki_locked(args):
                 text = f.read()
             if args.shared:
                 low = text.replace("\\", "/").lower()
-                keys = set(state["repos"]) | set(j.get("repo") for j in state["jobs"].values() if j.get("repo"))
-                for key in keys:
-                    checkout = os.path.dirname(key).lower()
+                for checkout in set(j["path"].lower() for j in state["jobs"].values()
+                                    if j.get("path") and j.get("phase") not in DONE_PHASES):
                     bash = re.sub(r"^([a-z]):/", r"/\1/", checkout)  # c:/x as Git Bash writes it: /c/x
                     if len(checkout) > 3 and (checkout in low or bash in low):
-                        return fail("the shared wiki holds what is true beyond one repository: drop the "
-                                    "path %s" % os.path.dirname(key))
+                        return fail("the shared wiki holds what is true beyond one PM: drop the "
+                                    "path %s" % checkout)
             print(json.dumps(wiki.write(where, args.page, text, args.base, label, args.note, args.dup_ok,
                                         merging=args.merging or ())))
             return 0
@@ -3966,13 +4777,13 @@ def read_peers(job):
 
 
 def peer_waiting(state, job):
-    """The PMs that still owe `job` an answer. Left out: a PM whose repository has no open
+    """The PMs that still owe `job` an answer. Left out: a PM that has no open
     job left (done, archived, cancelled or held: nothing revives or watches it), and one
     the user was asked about already (nudged 2: its late answer still counts)."""
     waiting = read_peers(job).get("waiting") or {}
     return dict((pm, e) for pm, e in waiting.items()
                 if isinstance(e, dict) and e.get("nudged", 0) < 2 and not e.get("closed")
-                and open_jobs(state, e.get("repo")))
+                and open_jobs(state, e.get("pm")))
 
 
 def peer_ruling(state, job):
@@ -3981,7 +4792,7 @@ def peer_ruling(state, job):
     seq = state["jobs"].get(job, {}).get("sent_seq")
     return sorted(pm for pm, e in (read_peers(job).get("waiting") or {}).items()
                   if isinstance(e, dict) and not e.get("closed") and "ruled_seq" in e and e["ruled_seq"] == seq
-                  and open_jobs(state, e.get("repo")))
+                  and open_jobs(state, e.get("pm")))
 
 
 def peers_hold(state, job):
@@ -4061,14 +4872,14 @@ def cmd_peer(args):
     with locked():
         state = load_state()
         if args.action == "ask":
-            if me[2] != info.get("repo"):
-                return fail("job %s belongs to another repository's PM" % args.job)
+            if me[2] != info.get("pm"):
+                return fail("job %s belongs to another PM" % args.job)
             n = read_peers(args.job).get("round", 0) + 1
             waiting = {}
             for key in all_keys(state):
-                pm = (state["repos"].get(key) or {}).get("pm") or {}
+                pm = (state["pms"].get(key) or {}).get("pm") or {}
                 if key != me[2] and pm.get("agent") and open_jobs(state, key):
-                    waiting[pm["agent"]] = {"repo": key, "nudged": 0}
+                    waiting[pm["agent"]] = {"pm": key, "nudged": 0}
             write_json_atomic(peers_path(args.job), {"round": n, "asker": name, "waiting": waiting})
             peer_log(args.job, u"## round %d (%s)" % (n, time.strftime("%Y-%m-%d %H:%M")))
             peer_log(args.job, u"- ask (%s): %s" % (name, text))
@@ -4083,7 +4894,7 @@ def cmd_peer(args):
         data["waiting"].pop(name, None)
         write_json_atomic(peers_path(args.job), data)
         peer_log(args.job, u"- answer (%s): %s" % (name, text))
-        asker = data.get("asker") or ((state["repos"].get(info.get("repo")) or {}).get("pm") or {}).get("agent")
+        asker = data.get("asker") or ((state["pms"].get(info.get("pm")) or {}).get("pm") or {}).get("agent")
         if asker:
             queue_mail(asker, name, "Job %s: peer answer from %s (round %d): %s"
                        % (args.job, name, data.get("round", 1), text))
@@ -4201,9 +5012,24 @@ def cmd_take_mail(args):
 
 # ---------------------------------------------------------------- pending
 
-PENDING_RANKS = {"legacy": 0, "unsent": 0, "report_done": 0, "silent": 1, "question": 1, "blocked": 1, "failed": 1,
+PENDING_RANKS = {"unsent": 0, "unassigned": 0, "split": 0, "after_ready": 0, "after_broken": 1, "report_done": 0, "silent": 1, "question": 1, "blocked": 1, "failed": 1,
                  "peer": 1, "plan": 2, "merge": 3}
 ASKING_PHASES = ("planning", "working", "reviewing", "merging")
+
+
+WORK_KINDS = ("execute", "research", "curate")  # assignments that start a job's work
+
+
+def assignment_kind(job):
+    """The `kind:` of a job's current PM assignment (its first line under `## 이번 지시`), or None."""
+    try:
+        with io.open(os.path.join(pm_job_dir(job), "assignment.md"), encoding="utf-8") as f:
+            text = f.read()
+    except (IOError, OSError, ValueError):
+        return None
+    body = text.split("\n---", 1)[1] if "\n---" in text else ""
+    m = re.search(r"^kind:\s*([a-z]+)", body, re.M)
+    return m.group(1) if m else None
 
 
 def pm_job_report(job):
@@ -4227,8 +5053,31 @@ def pending_item(name, job):
     seq, report, mtime = pm_job_report(name)
     rtype = report.get("type") if seq is not None and report.get("seq") == seq else None
     ruling = peer_ruling(load_state(), name) if os.path.exists(peers_path(name)) else []
-    if seq is None and phase in ("planning", "working", "reviewing", "merging"):
-        kind, since, mark = "legacy", job.get("phase_at"), phase  # started before slice 3
+    at_gate = gated(job)
+    waits, broken = after_blocks(load_state(), name) \
+        if at_gate or phase in ("awaiting_merge", "merging") else ([], [])
+    if at_gate:
+        # held at its start: what an agent reports or a peer asks still shows; the gate
+        # itself shows only once it can move, or never will by itself
+        if seq is not None and job.get("sent_seq") != seq:
+            kind, since, mark = "unsent", job.get("phase_at"), seq
+        elif rtype in ("question", "blocked", "failed"):
+            kind, since, mark = rtype, mtime, seq
+        elif ruling:
+            kind, since, mark = "peer", os.path.getmtime(peers_path(name)), "%s:%s" % (
+                job.get("sent_seq"), ",".join(ruling))
+        elif broken:
+            kind, since, mark = "after_broken", job.get("phase_at"), broken[0][0]
+        elif waits:
+            return None  # approved, waiting for an after-job: nothing to ask yet
+        else:
+            kind, since, mark = "after_ready", job.get("phase_at"), "start"
+    elif phase == "working" and "start_seq" in job and job["start_seq"] == seq:
+        # phase set first (approval, after_ready, a curate start), its assignment never
+        # written: the report is not the work's, and this job must not look done
+        kind, since, mark = "unassigned", job.get("phase_at"), seq
+    elif seq is None and phase == "intake" and job.get("split_from"):
+        kind, since, mark = "split", job.get("phase_at"), job.get("split_from")  # a PM split it off
     elif seq is not None and job.get("sent_seq") != seq:
         kind, since, mark = "unsent", job.get("phase_at"), seq  # written, never sent
     elif rtype in ("question", "blocked", "failed"):
@@ -4238,6 +5087,8 @@ def pending_item(name, job):
     elif ruling:
         # the PMs are in the mark: a later missing answer is a new item, even after a deferral
         kind, since, mark = "peer", os.path.getmtime(peers_path(name)), "%s:%s" % (job.get("sent_seq"), ",".join(ruling))
+    elif broken:  # at its merge: an after-job that will never finish is the user's call
+        kind, since, mark = "after_broken", job.get("phase_at"), broken[0][0]
     elif rtype == "done" and phase in ASKING_PHASES:
         kind, since, mark = "report_done", mtime, seq
     elif phase == "awaiting_approval":
@@ -4251,6 +5102,22 @@ def pending_item(name, job):
             "key": key, "deferred": job.get("deferred") == key}
     if ruling and kind in ("peer", "question", "blocked", "failed"):
         item["peers"] = ruling  # the answer that settles this item must settle these too
+    if kind == "after_ready":
+        left = after_jobs(name)
+        item["text"] = ("job %s may start: after-job %s %s" % (name, ", ".join(left), AFTER_FINISHED) if left
+                        else "job %s may start: its after-jobs were dropped" % name)
+    if kind == "after_broken":
+        other, why = broken[0]
+        item["text"] = "job %s cannot %s: %s; ask the user: drop it (`$OKE job after %s --drop %s`) or cancel %s" % (
+            name, "start" if at_gate else "merge", why, name, other, name)
+        item["after"], item["phase"] = other, phase  # merging: the PM's merge waits, tell it after a drop
+    if kind == "unassigned":
+        item["text"] = ("job %s is in phase working but its assignment for that (execute, research or curate) "
+                        "was never written: write and send it now" % name)
+    if kind == "split":
+        item["text"] = "PM %s split job %s: new job %s (%s)" % (job.get("pm"), job["split_from"], name,
+                                                                job.get("path"))
+        item.update(pm_fields(job.get("pm"), name))  # for the new job's PM assignment header
     return item
 
 
@@ -4277,8 +5144,17 @@ def build_parser():
     job_sub.required = True
     new = job_sub.add_parser("new")
     new.add_argument("slug")
-    new.add_argument("--repo", required=True, help="a git checkout, or any folder for a direct job")
+    new.add_argument("--pm", required=True, help="the PM the user picked")
+    new.add_argument("--path", help="the folder the job changes, only when the user said it")
     new.add_argument("--research", action="store_true", help="look and report: no change, no merge")
+    jp = job_sub.add_parser("path", help="the PM sets the job's one path while planning")
+    jp.add_argument("slug")
+    jp.add_argument("path")
+    sp = job_sub.add_parser("split", help="the PM splits work on another path into a new job")
+    sp.add_argument("slug")
+    sp.add_argument("new")
+    sp.add_argument("--path", required=True)
+    sp.add_argument("--after", help="the new job starts (folder) or merges (git) only after this job")
     phase = job_sub.add_parser("phase")
     phase.add_argument("slug")
     phase.add_argument("phase")
@@ -4291,6 +5167,9 @@ def build_parser():
     archive.add_argument("slug")
     defer = job_sub.add_parser("defer")
     defer.add_argument("slug")
+    af = job_sub.add_parser("after", help="drop a job from a job's after: (the user's call)")
+    af.add_argument("slug")
+    af.add_argument("--drop", required=True)
     rounds = job_sub.add_parser("rounds", help="show a job's review round and limit, or set the limit")
     rounds.add_argument("slug")
     rounds.add_argument("n", nargs="?", type=int)
@@ -4317,8 +5196,8 @@ def build_parser():
         p = wk_sub.add_parser(name)
         if name in ("read", "write", "archive", "pin", "unpin"):
             p.add_argument("page")
-        p.add_argument("--job", help="the job's repository wiki; with write and log, the job the lines are for")
-        p.add_argument("--repo", help="the wiki of this repository (curation)")
+        p.add_argument("--job", help="the wiki of the job's PM; with write and log, the job the lines are for")
+        p.add_argument("--pm", help="the wiki of this PM (curation)")
         p.add_argument("--shared", action="store_true", help="the shared wiki (only the orchestrator writes it)")
         if name == "write":
             p.add_argument("--from", dest="source", required=True, help="a file holding the whole new page")
@@ -4426,7 +5305,7 @@ def build_parser():
     for name, helptext in (("agents", "names of the running agents"),
                            ("read", "the agent's screen"), ("keys", "press keys in the agent"),
                            ("attach", "show the agent to the user"), ("close", "close a place"),
-                           ("place", "a place for a new PM in a repository"),
+                           ("place", "a place for a PM that never ran"),
                            ("worktree", "create or remove a job's worktree")):
         p = sub.add_parser(name, help=helptext)
         p.set_defaults(func=cmd_rt, rt=name)
@@ -4437,12 +5316,30 @@ def build_parser():
         if name == "close":
             p.add_argument("place", nargs="+")
         if name == "place":
-            p.add_argument("repo", help="the repository's path")
+            p.add_argument("pm", help="the PM's name")
         if name == "worktree":
             p.add_argument("job", nargs="?")
-            p.add_argument("--repo")
             p.add_argument("--remove", metavar="ID")
             p.add_argument("--job", dest="remove_job", help="with --remove: the job the worktree is for")
+
+    pm = sub.add_parser("pm", help="the PMs: named roles, each with its own wiki")
+    pm_sub = pm.add_subparsers(dest="action")
+    pm_sub.required = True
+    pm_sub.add_parser("add").add_argument("name")
+    pl = pm_sub.add_parser("list")
+    pl.add_argument("--path", help="mark the PM whose places hold this path as recommended")
+    p = pm_sub.add_parser("rename")
+    p.add_argument("name")
+    p.add_argument("new")
+    p = pm_sub.add_parser("remove")
+    p.add_argument("name")
+    p.add_argument("--cancel", action="store_true", help="the user agreed: cancel its open and held jobs")
+    pm.set_defaults(func=cmd_pm)
+
+    pc = sub.add_parser("path-check", help="may this agent write the file (mod)")
+    pc.add_argument("--pane", required=True)
+    pc.add_argument("--path", required=True)
+    pc.set_defaults(func=cmd_path_check)
 
     board = sub.add_parser("board", help="the board as text, for hosts without the mod pane")
     board.set_defaults(func=cmd_board)
@@ -4453,7 +5350,7 @@ def build_parser():
     send.add_argument("--job")
     send.set_defaults(func=cmd_send)
 
-    peer = sub.add_parser("peer", help="PMs ask each other about cross-repo impact")
+    peer = sub.add_parser("peer", help="PMs ask each other about the impact of a change")
     peer.add_argument("action", choices=["ask", "answer", "status"])
     peer.add_argument("job")
     peer.add_argument("text", nargs="*")

@@ -49,24 +49,29 @@ class TestRuntimeCommands(SpawnBase):
         self.assertEqual(self.cli("close", "w1:p9"), 1)
         self.assertIn("herdr error: pane_not_found", self.err)
 
-    def test_place_splits_next_to_a_pane_in_the_repo(self):
-        self.fake({"pane list": [J({"panes": [{"pane_id": "w1:p1", "cwd": "/elsewhere"},
-                                              {"pane_id": "w2:p3", "cwd": self.repo}]})],
+    def test_place_splits_next_to_a_pane_in_the_pm_folder(self):
+        self.assertEqual(self.cli("pm", "add", "pm-toy"), 0, self.err)
+        self.fake({"pane list": [J({"panes": [{"pane_id": "w1:p1", "cwd": self.repo},
+                                              {"pane_id": "w2:p3", "cwd": oke.pm_dir("pm-toy")}]})],
                    "pane split": [J({"pane": {"pane_id": "w2:p4"}})]})
-        self.assertEqual(self.cli("place", self.repo), 0)
+        self.assertEqual(self.cli("place", "pm-toy"), 0, self.err)
         self.assertEqual(json.loads(self.out), {"place": "w2:p4"})
         self.assertIn("--pane w2:p3", " ".join(self.argv()[-1]))
 
-    def test_place_opens_a_workspace_when_no_pane_is_in_the_repo(self):
+    def test_place_opens_a_workspace_labelled_with_the_pm(self):
+        self.assertEqual(self.cli("pm", "add", "backend"), 0, self.err)
         self.fake({"pane list": [J({"panes": []})],
                    "workspace create": [J({"root_pane": {"pane_id": "w5:p1"}})]})
-        self.assertEqual(self.cli("place", self.repo), 0)
+        self.assertEqual(self.cli("place", "backend"), 0, self.err)
         self.assertEqual(json.loads(self.out), {"place": "w5:p1"})
+        create = [a for a in self.argv() if a[:2] == ["workspace", "create"]][0]
+        self.assertEqual(create[create.index("--label") + 1], "backend")
+        self.assertEqual(oke.normalize_path(create[create.index("--cwd") + 1]), oke.normalize_path(oke.pm_dir("backend")))
 
-    def test_place_refuses_a_repo_id(self):
+    def test_place_refuses_an_unknown_pm(self):
         self.fake({})
-        self.assertEqual(self.cli("place", "calc-1b3776"), 1)
-        self.assertIn("path", self.err)
+        self.assertEqual(self.cli("place", self.repo), 1)
+        self.assertIn("pm add", self.err)
         self.assertEqual(self.argv(), [])
 
     def test_worktree_create_and_remove(self):
@@ -74,10 +79,12 @@ class TestRuntimeCommands(SpawnBase):
         self.fake({"worktree create": [J({"type": "worktree_created", "workspace": ws})],
                    "pane list": [J({"panes": [{"pane_id": "w7:p1"}]})],
                    "worktree remove": [J({})]})
-        self.assertEqual(self.cli("worktree", "fix-a", "--repo", self.repo), 0)
+        self.assertEqual(self.cli("worktree", "fix-a"), 1)  # no such job
+        self.job("fix-a", "working")
+        self.assertEqual(self.cli("worktree", "fix-a"), 0, self.err)
         self.assertEqual(json.loads(self.out), {"id": "w7", "path": "/wt/fix-a", "place": "w7:p1"})
         self.assertIn("--branch oke/fix-a", " ".join(self.argv()[0]))
-        self.assertEqual(self.cli("worktree", "--remove", "w7"), 0)
+        self.assertEqual(self.cli("worktree", "--remove", "w7", "--job", "fix-a"), 0, self.err)
         self.assertEqual(self.argv()[-1][-2:], ["--workspace", "w7"])
 
     def test_worktree_remove_after_its_workspace_closed(self):
@@ -89,9 +96,9 @@ class TestRuntimeCommands(SpawnBase):
         self.fake({"worktree create": [J({"type": "worktree_created", "workspace": ws})],
                    "pane list": [J({"panes": [{"pane_id": "w7:p1"}]})],
                    "worktree remove": [E("workspace_not_found", "workspace w7 not found")]})
-        self.assertEqual(self.cli("worktree", "fix-a", "--repo", self.repo), 0, self.err)
+        self.assertEqual(self.cli("worktree", "fix-a"), 0, self.err)
         # a worker revived after the unhold: its shell sits in the checkout, outside the workspace
-        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)), {
+        oke.write_json_atomic(oke.children_path(self.pm), {
             "fix-a-w1": {"job": "fix-a", "role": "worker", "pane": "w1:p8", "terminal": "term-8"}})
         self.fake({"worktree remove": [E("workspace_not_found", "workspace w7 not found")],
                    "pane get": [J({"pane": {"pane_id": "w1:p8", "terminal_id": "term-8"}})],
@@ -101,7 +108,7 @@ class TestRuntimeCommands(SpawnBase):
         oke.runtime_bg.git_worktree_remove = lambda *a: closed_first.append(
             ["pane", "close", "w1:p8"] in self.argv()) or remove(*a)
         self.addCleanup(setattr, oke.runtime_bg, "git_worktree_remove", remove)
-        self.assertEqual(self.cli("worktree", "--remove", "w7"), 0, self.err)
+        self.assertEqual(self.cli("worktree", "--remove", "w7", "--job", "fix-a"), 0, self.err)
         self.assertEqual(closed_first, [True])  # Windows: git cannot delete a folder a shell is in
         self.assertFalse(os.path.exists(wt))
         self.assertEqual(oke.git_out(self.repo, "rev-parse", "-q", "--verify", "oke/fix-a")[0], 0)  # the branch stays, as herdr leaves it
@@ -117,7 +124,7 @@ class TestRuntimeCommands(SpawnBase):
         oke.save_state(state)
         shutil.rmtree(wt)
         self.fake({"worktree remove": [E("workspace_not_found", "workspace w7 not found")]})
-        self.assertEqual(self.cli("worktree", "--remove", "w7"), 0, self.err)
+        self.assertEqual(self.cli("worktree", "--remove", "w7", "--job", "fix-a"), 0, self.err)
         self.assertNotIn("wt-fix-a", oke.git_out(self.repo, "worktree", "list")[1])
 
     def test_a_workspace_id_another_job_works_in_is_never_removed(self):
@@ -156,7 +163,7 @@ class TestRuntimeCommands(SpawnBase):
         self.fake({"worktree create": [J({"type": "worktree_created", "workspace": ws})],
                    "pane list": [J({"panes": [{"pane_id": "w7:p1"}]})],
                    "worktree remove": [E("workspace_not_found", "workspace w7 not found")]})
-        self.assertEqual(self.cli("worktree", "fix-b", "--repo", self.repo), 0, self.err)
+        self.assertEqual(self.cli("worktree", "fix-b"), 0, self.err)
         self.assertNotIn("worktree", oke.load_state()["jobs"]["fix-a"])  # the stale one is dropped
         # two jobs naming one id (an older state): refused, nothing removed
         state = oke.load_state()

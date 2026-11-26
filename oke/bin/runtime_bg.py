@@ -103,6 +103,31 @@ def run_claude(args, cwd=None):
     return out
 
 
+def trusted_by_claude(folder):
+    """Has the user accepted Claude Code's trust dialog for `folder` or a folder above it
+    (the home folder itself does not count)? None when ~/.claude.json cannot be read."""
+    conf = os.environ.get("CLAUDE_CONFIG_DIR")
+    path = os.path.join(conf, ".claude.json") if conf else os.path.join(os.path.expanduser("~"), ".claude.json")
+    try:
+        with io.open(path, encoding="utf-8") as f:
+            projects = json.load(f).get("projects") or {}
+    except (IOError, OSError, ValueError, AttributeError):
+        return None
+
+    def norm(p):
+        p = os.path.normcase(os.path.abspath(p)).replace("\\", "/")
+        return p.rstrip("/") or "/"
+    trusted = set(norm(k) for k, v in projects.items() if isinstance(v, dict) and v.get("hasTrustDialogAccepted"))
+    home, here = norm(os.path.expanduser("~")), os.path.abspath(folder)
+    while True:
+        if norm(here) in trusted and norm(here) != home:
+            return True
+        up = os.path.dirname(here)
+        if up == here:  # a drive or filesystem root
+            return False
+        here = up
+
+
 def as_agent(a):
     """One `claude agents --json` row in herdr's agent shape."""
     return {"name": a.get("name"), "pane_id": a.get("id"), "terminal_id": a.get("id"),
@@ -188,16 +213,23 @@ class BgRuntime(object):
             folder = os.path.dirname(settings)  # OKe's agent folder
         # The prompt goes first: --allowedTools takes every word after it (seen live).
         argv = without_bypass(with_bg_settings(argv, folder))
-        run_claude([prompt, "--bg", "--name", name] + argv, cwd=place)
-        registered()
-        for _ in range(START_POLLS):
-            try:
-                return self.agent(name)
-            except HerdrError as e:
-                if e.code != "agent_not_found":
-                    raise
-            time.sleep(1)
-        raise HerdrError("agent_not_ready", "%s did not show up in claude agents" % name)
+        try:
+            run_claude([prompt, "--bg", "--name", name] + argv, cwd=place)
+            registered()
+            for _ in range(START_POLLS):
+                try:
+                    return self.agent(name)
+                except HerdrError as e:
+                    if e.code != "agent_not_found":
+                        raise
+                time.sleep(1)
+            raise HerdrError("agent_not_ready", "%s did not show up in claude agents" % name)
+        except HerdrError as e:
+            if e.code in ("agent_not_ready", "claude_failed") and trusted_by_claude(place) is False:
+                raise HerdrError(e.code, "%s. Claude Code has not trusted %s, and a background session cannot "
+                                 "answer the trust dialog: open `claude` in that folder (or the OKe home "
+                                 "above it) once, accept, and try again" % (e.message, place))
+            raise
 
     def prompt(self, name, text):
         """No documented way for a script to type into a bg session: the Claude session

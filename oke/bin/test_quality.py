@@ -167,7 +167,7 @@ class TestBaselineCheck(SpawnBase):
     def plan(self, command, criteria="1. a.txt exists"):
         self.write(os.path.join(self.home, "jobs", "q", "plan.md"),
                    u"job: q\n---\n## 접근\nx\n## 수용 기준\n%s\n## 검증 명령        (what passing is)\n"
-                   u"`%s` passes\n## 다른 레포 영향\n없음\n" % (criteria, command))
+                   u"`%s` passes\n## 다른 경로 영향\n없음\n" % (criteria, command))
 
     def rows(self):
         return [r for r in oke.ledger_rows("q") if r["check"] == "check"]
@@ -186,7 +186,7 @@ class TestBaselineCheck(SpawnBase):
     def test_check_without_baseline_exits_2_and_writes_no_row(self):
         self.plan("true")
         self.assertEqual(self.cli("check", "q"), 2)
-        self.assertIn("oke baseline", self.err)
+        self.assertIn("`$OKE baseline", self.err)
         self.assertEqual(self.rows(), [])
 
     def test_baseline_then_pass(self):
@@ -219,7 +219,7 @@ class TestBaselineCheck(SpawnBase):
         self.assertEqual(self.cli("baseline", "q"), 0, self.err)
         self.plan("true && true")
         self.assertEqual(self.cli("check", "q"), 2)
-        self.assertIn("oke baseline", self.err)
+        self.assertIn("`$OKE baseline", self.err)
 
     def test_rebaseline_keeps_history(self):
         self.plan('echo "FAILED one"; exit 1')
@@ -286,7 +286,7 @@ class TestBaselineCheck(SpawnBase):
         oke.write_json_atomic(path, dict(base, version=1, signatures=[]))
         self.assertIsNone(oke.read_baseline("q"))
         self.assertEqual(self.cli("check", "q"), 2)
-        self.assertIn("oke baseline q", self.err)
+        self.assertIn("`$OKE baseline q`", self.err)
         self.assertIn("older", self.err)
         self.assertEqual(self.rows(), [])
         self.assertEqual(self.cli("baseline", "q"), 0, self.err)

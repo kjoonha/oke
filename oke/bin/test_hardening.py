@@ -10,7 +10,7 @@ import unittest
 
 import oke
 import runtime_herdr
-from test_oke import AGENT, SpawnBase
+from test_oke import put_pm, AGENT, SpawnBase
 from test_revive import E, ReviveBase
 
 
@@ -43,7 +43,7 @@ class TestOutageDuringRevive(ReviveBase):
             self.fake({"agent list": [{"stdout": json.dumps({"result": {"agents": []}})}]})
             with self.assertRaises(oke.HerdrError):
                 oke.revive("fix-a-w1")
-            self.assertEqual(oke.read_children(self.key)["fix-a-w1"].get("revives"), 0)
+            self.assertEqual(oke.read_children(self.pm)["fix-a-w1"].get("revives"), 0)
         finally:
             oke.relaunch = real
 
@@ -149,7 +149,7 @@ class TestSender(SpawnBase):
     def test_an_unknown_pane_is_not_the_user(self):
         self.job("fix-a", "working")
         s = oke.load_state()
-        s["repos"][oke.repo_key(self.repo)] = {"pm": {"agent": "pm-toy", "pane": "w1:p3"}}
+        put_pm(s, oke.repo_key(self.repo), {"agent": "pm-toy", "pane": "w1:p3"})
         oke.save_state(s)
         os.environ["HERDR_PANE_ID"] = "w9:p9"
         try:

@@ -5,7 +5,7 @@ import os
 import time
 import unittest
 
-from test_oke import AG, AGENT, E, J, OK, SpawnBase
+from test_oke import put_pm, AG, AGENT, E, J, OK, SpawnBase
 from test_revive import PANE_OK, ReviveBase, started
 import oke
 
@@ -81,10 +81,10 @@ class InboxBase(S3Base):
         S3Base.setUp(self)
         self.job("fix-a", "working")
         s = oke.load_state()
-        s["repos"][self.key] = {"pm": {"agent": "pm-toy", "pane": "w1:p3", "session": "s-pm"}}
+        put_pm(s, self.key, {"agent": "pm-toy", "pane": "w1:p3", "session": "s-pm"})
         s["orchestrator"] = {"pane": "w7:p1"}
         oke.save_state(s)
-        oke.write_json_atomic(oke.children_path(self.key), {"fix-a-w1": {
+        oke.write_json_atomic(oke.children_path(self.pm), {"fix-a-w1": {
             "agent": "fix-a-w1", "pane": "w1:p5", "session": "s-w", "role": "worker", "job": "fix-a"}})
 
     def texts(self, agent):
@@ -355,7 +355,7 @@ def REPORT(kind, seq):
 
 class TestPmWait(InboxBase):
     def wait(self, polls=5):
-        return oke.wait_loop("pm-toy", None, None, poll=0, max_polls=polls, jobs_key=self.key)
+        return oke.wait_loop("pm-toy", None, None, poll=0, max_polls=polls, jobs_key="pm-toy")
 
     def test_a_final_report_names_its_job_and_is_returned_once(self):
         self.pm_job("fix-a", 2, REPORT("done", 2))
@@ -366,10 +366,10 @@ class TestPmWait(InboxBase):
 
     def test_a_job_added_later_is_seen(self):
         self.fake({"agent get": [AGENT("working")]})
-        self.assertIsNone(oke.check_pm_once("pm-toy", self.key))
+        self.assertIsNone(oke.check_pm_once("pm-toy", "pm-toy"))
         self.job("fix-b", "planning")
         self.pm_job("fix-b", 1, REPORT("question", 1))
-        self.assertEqual(oke.check_pm_once("pm-toy", self.key), "report question fix-b")
+        self.assertEqual(oke.check_pm_once("pm-toy", "pm-toy"), "report question fix-b")
 
     def test_the_oldest_report_comes_first(self):
         self.job("fix-b", "planning")
@@ -405,7 +405,7 @@ class TestPmWait(InboxBase):
 
     def test_the_pm_retry_marker_holds_the_wait(self):
         self.pm_job("fix-a", 3, REPORT("waiting", 2))
-        oke.write_json_atomic(os.path.join(oke.pm_dir(self.key), "api-retry.json"), {"attempt": 1, "delay": 30})
+        oke.write_json_atomic(os.path.join(oke.pm_dir(self.pm), "api-retry.json"), {"attempt": 1, "delay": 30})
         self.fake({"agent get": [AGENT("idle")]})
         self.assertIsNone(self.wait())
 
@@ -424,7 +424,7 @@ class TestPmWait(InboxBase):
             return "blocked" + NL + "Allow? 1. Yes"
         oke.look_at = blocked_then_report
         try:
-            self.assertEqual(oke.check_pm_once("pm-toy", self.key), "report done fix-a")
+            self.assertEqual(oke.check_pm_once("pm-toy", "pm-toy"), "report done fix-a")
         finally:
             oke.look_at = original
 
@@ -488,7 +488,7 @@ class TestPmWait(InboxBase):
         calls = []
         oke.load_state = other_wait_marks_it_meanwhile
         try:
-            self.assertIsNone(oke.check_pm_once("pm-toy", self.key))
+            self.assertIsNone(oke.check_pm_once("pm-toy", "pm-toy"))
         finally:
             oke.load_state = original
 
@@ -535,7 +535,7 @@ class TestPmWait(InboxBase):
         self.fake({})
         self.cli("send", "pm-toy", "hello")
         self.fake({"agent get": [E("agent_not_found")]})
-        self.assertEqual(oke.check_pm_once("pm-toy", self.key), "gone")
+        self.assertEqual(oke.check_pm_once("pm-toy", "pm-toy"), "gone")
         self.assertEqual(self.texts("pm-toy"), ["user: hello"])
 
     def test_a_cancel_for_the_last_job_is_delivered_before_no_jobs(self):
@@ -564,16 +564,18 @@ class TestPmFolderUsers(ReviveBase):
 
     def pm_scenario(self):
         self.revive_scenario(**{"pane get": [PANE_OK("w1:p3")],
-                                "agent get": [AGENT("working", name="pm-toy", pane="w1:p3", session="s-pm")]})
+                                "pane list": [J({"panes": []})],  # a revived PM gets its own workspace
+                                "workspace create": [J({"root_pane": {"pane_id": "w9:p1"}})],
+                                "agent get": [AGENT("working", name="pm-toy", pane="w9:p1", session="s-pm")]})
 
     def test_a_new_job_report_resets_the_pm_revive_count(self):
         folder = self.pm_job("fix-a", 1, REPORT("waiting", 1))
         s = oke.load_state()
-        s["repos"][self.key]["pm"].update(revives=3, report_mtime=1.0)
+        s["pms"][self.pm]["pm"].update(revives=3, report_mtime=1.0)
         oke.save_state(s)
         self.pm_scenario()
         self.assertEqual(oke.revive("pm-toy"), "revived")
-        pm = oke.load_state()["repos"][self.key]["pm"]
+        pm = oke.load_state()["pms"][self.pm]["pm"]
         self.assertEqual(pm["revives"], 1)
         self.assertEqual(pm["report_mtime"], os.path.getmtime(os.path.join(folder, "report.md")))
 
@@ -611,7 +613,7 @@ class TestPmFolderUsers(ReviveBase):
         out = json.loads(self.out)
         self.assertEqual(out["jobs"]["fix-a"]["pm_seq"], 4)
         self.assertTrue(out["jobs"]["fix-a"]["pm_job_dir"].endswith("/jobs/fix-a/pm"))
-        self.assertNotIn("seq", out["repos"][self.key])
+        self.assertNotIn("seq", out["pms"][self.pm])
 
 
 class TestPendingUnsent(InboxBase):
@@ -626,24 +628,17 @@ class TestPendingUnsent(InboxBase):
     def test_a_report_of_unknown_type_after_two_warnings_is_pending(self):
         self.pm_job("fix-a", 3, REPORT("progress", 3))
         self.fake({"agent get": [AGENT("idle")]})
-        oke.wait_loop("pm-toy", None, None, poll=0, max_polls=5, jobs_key=self.key)
-        oke.wait_loop("pm-toy", None, None, poll=0, max_polls=5, jobs_key=self.key)
+        oke.wait_loop("pm-toy", None, None, poll=0, max_polls=5, jobs_key="pm-toy")
+        oke.wait_loop("pm-toy", None, None, poll=0, max_polls=5, jobs_key="pm-toy")
         self.cli("pending")
         items = json.loads(self.out)["items"]
         self.assertEqual([(i["job"], i["kind"]) for i in items], [("fix-a", "silent")])
 
-    def test_a_job_from_before_slice3_without_a_job_assignment_is_pending(self):
-        # upgraded mid-job: no jobs/<job>/pm/assignment.md, phase already past intake
-        self.fake({})
-        self.cli("pending")
-        items = json.loads(self.out)["items"]
-        self.assertEqual([(i["job"], i["kind"]) for i in items], [("fix-a", "legacy")])
-
     def test_a_silent_job_after_two_warnings_is_pending(self):
         self.pm_job("fix-a", 3, REPORT("waiting", 2))
         self.fake({"agent get": [AGENT("idle")]})
-        oke.wait_loop("pm-toy", None, None, poll=0, max_polls=5, jobs_key=self.key)
-        oke.wait_loop("pm-toy", None, None, poll=0, max_polls=5, jobs_key=self.key)
+        oke.wait_loop("pm-toy", None, None, poll=0, max_polls=5, jobs_key="pm-toy")
+        oke.wait_loop("pm-toy", None, None, poll=0, max_polls=5, jobs_key="pm-toy")
         self.cli("pending")
         items = json.loads(self.out)["items"]
         self.assertEqual([(i["job"], i["kind"]) for i in items], [("fix-a", "silent")])

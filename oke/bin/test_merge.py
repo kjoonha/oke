@@ -541,7 +541,7 @@ class TestLedgerAndVerify(MergeBase):
         with open(os.path.join(self.jobs, "baseline.json"), "w") as f:
             json.dump({"version": 1, "exit": 0, "signatures": []}, f)  # one an older OKe recorded
         self.cli("check", "fix-a")
-        self.assertIn("`oke job verify fix-a` reads its log again", self.err)  # not a refused baseline
+        self.assertIn("`$OKE job verify fix-a` reads its log again", self.err)  # not a refused baseline
 
     def test_a_head_busy_for_a_moment_is_read_again(self):
         self.merge()

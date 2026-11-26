@@ -1,10 +1,10 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { THEME_NAMES, framesOf, keyDenied, orchestratorDenied, paletteOf, promptRole, workerDenied } from './register'
+import { THEME_NAMES, framesOf, keyDenied, orchestratorDenied, paletteOf, promptRole, workerDenied, writeVerdict } from './register'
 
 type Run = { argv: readonly string[] }
 
 const BOARD = [{
-  repo: 'toy-6b0484', key: 'k', pm: null,
+  name: 'toy', key: 'toy', pm: null,
   jobs: [{ job: 'calc-sub', phase: 'working', merge: 'rolled_back', pending: 'question', size: 'small', agents: [{
     agent: 'calc-sub-w1', role: 'worker', status: 'working', pane: 'w7:p9', report: null,
     board: '## 지금\nwriting sub', revives: 1, cost: 0.4, todos: [
@@ -25,10 +25,15 @@ let mailFlag = false
 let dropMail = false
 let unrecorded = false  // spawn has not recorded the agent yet
 let mailText: string | null = null
+let writeAreas: { path: string; direct: boolean }[] = []  // the tick's write areas
+let tickFolder = '/oke/jobs/j/w1'
+let failTick = false  // oke tick prints no JSON
+let failCheck = false  // oke path-check prints no JSON
 
 function answer(args: readonly string[]) {
   if (args[0] === 'tick') {
-    return { role: tickRole, agent: unrecorded ? null : tickRole === 'pm' ? 'pm-toy' : 'calc-sub-w1', folder: '/oke/jobs/j/w1', home: 'C:/oke', wiki: 'C:/oke/wiki', claude_dir: 'C:/Users/u/.claude', job: 'calc-sub', seq: 2, events: [], events_offset: 0, board: tickRole === 'worker' ? null : tickBoard }
+    if (failTick) return undefined
+    return { role: tickRole, agent: unrecorded ? null : tickRole === 'pm' ? 'pm-toy' : 'calc-sub-w1', folder: tickFolder, home: 'C:/oke', wiki: 'C:/oke/wiki', claude_dir: 'C:/Users/u/.claude', job: 'calc-sub', seq: 2, events: [], events_offset: 0, write_areas: writeAreas, memories: ['C:/Users/u/.claude/projects/x/memory', 'C:/Users/u/.claude/projects/C--repo/memory'], board: tickRole === 'worker' ? null : tickBoard }
   }
   if (args[0] === 'take-mail') {
     if (args.includes('--give-back')) return { text: null, given_back: 1 }
@@ -37,6 +42,12 @@ function answer(args: readonly string[]) {
     return text ? { text, names: ['1.txt'] } : { text: null }
   }
   if (args[0] === 'boundary') return { role: tickRole, answered: answeredNow }
+  if (args[0] === 'path-check') {
+    if (failCheck) return undefined
+    const file = String(args[args.indexOf('--path') + 1])
+    return /\/nested\/|^D:\/elsewhere/.test(file) ? { allow: false, reason: `${file} is not this job's to change` }
+      : { allow: true, reason: null }
+  }
   if (args[0] === 'api-retry' && args.includes('--clear')) return { action: 'cleared' }
   if (args.includes('authentication_failed')) return { action: 'give_up', limit: 20 }
   return { action: 'retry', delay: 30, limit: 20 }
@@ -247,8 +258,8 @@ test('the step line names the PMs and the jobs a job waits on', async ($, on) =>
   mock.clock(on)
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
   tickRole = 'orchestrator'
-  tickBoard = [{ repo: 'toy-6b0484', key: 'k', pm: null, jobs: [
-    { job: 'calc-sub', phase: 'planning', merge: 'none', pending: null, peer_wait: ['api-1a2b3c'], agents: [] },
+  tickBoard = [{ name: 'toy', key: 'toy', pm: null, jobs: [
+    { job: 'calc-sub', phase: 'planning', merge: 'none', pending: null, peer_wait: ['api'], agents: [] },
     { job: 'calc-mul', phase: 'merging', merge: 'none', pending: null, after_wait: ['api-ret'], agents: [] }] }]
   engine(on, [], [])
 
@@ -265,7 +276,7 @@ test('a held job shows its closed agents as off, like an idle PM, not as dead', 
   mock.clock(on)
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
   tickRole = 'orchestrator'
-  tickBoard = [{ repo: 'toy-6b0484', key: 'k', pm: { agent: 'pm-toy', role: 'pm', status: 'off', board: '', todos: [] },
+  tickBoard = [{ name: 'toy', key: 'toy', pm: { agent: 'pm-toy', role: 'pm', status: 'off', board: '', todos: [] },
     jobs: [{ job: 'calc-sub', phase: 'working', merge: 'none', pending: null, held: true, agents: [{
       agent: 'calc-sub-w1', role: 'worker', status: 'off', pane: null, report: null, board: '', revives: 0, todos: [] }] }] }]
   engine(on, [], [])
@@ -396,7 +407,7 @@ test('more than three open jobs fold under one row that opens them', async ($, o
     agent: `${name}-w1`, role: 'worker', status: 'working', pane: null, report: null, board: '', revives: 0, todos: [] }] })
   // e: a PM's background subagent works on it, with no pane of its own; f: nobody works on it
   const quiet = (name: string, subagent: boolean) => ({ ...job(name), agents: [], subagent })
-  tickBoard = [{ repo: 'toy-6b0484', key: 'k', pm: null,
+  tickBoard = [{ name: 'toy', key: 'toy', pm: null,
     jobs: [...['a', 'b', 'c', 'd'].map(job), quiet('e', true), quiet('f', false)] }]
   engine(on, [], [])
 
@@ -557,7 +568,7 @@ test('the board shows to decide, to check and blocked from board.md, not what is
   mock.clock(on)
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
   tickRole = 'orchestrator'
-  tickBoard = [{ repo: 'toy-6b0484', key: 'k', jobs: [], pm: {
+  tickBoard = [{ name: 'toy', key: 'toy', jobs: [], pm: {
     agent: 'pm-toy', role: 'pm', status: 'working', pane: null, report: null, revives: 0, todos: [],
     board: 'agent: pm-toy\n---\n## 지금\nplanning\n## 결정        (decided, with why)\n- JWT over sessions: no shared store\n'
       + '## 결정 필요\nuser: keep the old endpoint?\n## 확인 필요\n없음\n## 막힌 것\nnone' } }]
@@ -865,4 +876,123 @@ test('a child that spawn recorded only after its first turn began still takes it
   await s.clock.advance(1)
   expect(s.prompts).toContain('OKe inbox: pm-toy: Stop and wait')
   mailFlag = false
+})
+
+test('a write in its own folder, tmp, memory or a git job area needs no python; others ask oke path-check', () => {
+  const dirs = { home: 'C:/oke', wiki: 'C:/oke/wiki', folder: 'C:/oke/jobs/j/j-w1',
+    memories: ['C:/u/.claude/projects/x/memory', 'C:/u/.claude/projects/C--repo/memory'],
+    areas: [{ path: 'C:/repo/wt', direct: false }, { path: 'C:/u/notes', direct: true }] }
+  expect(writeVerdict('C:\\oke\\jobs\\j\\j-w1\\report.md', dirs)).toBe('allow')
+  expect(writeVerdict('C:/oke/tmp/page.md', dirs)).toBe('allow')
+  expect(writeVerdict('C:/u/.claude/projects/x/memory/a.md', dirs)).toBe('allow')
+  expect(writeVerdict('C:/u/.claude/projects/C--repo/memory/a.md', dirs)).toBe('allow')
+  expect(writeVerdict('C:/u/.claude/projects/other/memory/a.md', dirs)).toBe('ask')
+  expect(writeVerdict('C:/repo/wt/src/a.py', dirs)).toBe('allow')
+  // the guard's own inputs and other agents' files: python decides (and refuses)
+  for (const f of ['C:/oke/state.json', 'C:/oke/config.json', 'C:/oke/pms/other/board.md', 'C:/oke/automations/a.json',
+    'C:/oke/jobs/j/plan.md', 'C:/oke/jobs/j/j-w1/settings.json', 'C:/oke/jobs/j/j-w1/lean-settings.json',
+    'C:/oke/wiki/pm/a.md', 'C:/u/notes/a.md', 'C:/repo/wt2/a.py', 'C:/oke/../repo/a.py', 'C:/oke/WIKI~1/pm/a.md']) {
+    expect([f, writeVerdict(f, dirs)]).toEqual([f, 'ask'])
+  }
+  // a folder job on the home folder does not hide a git job's worktree under it
+  const home = { ...dirs, areas: [{ path: 'C:/u', direct: true }, { path: 'C:/u/repo/wt', direct: false }] }
+  expect(writeVerdict('C:/u/repo/wt/a.py', home)).toBe('allow')
+  expect(writeVerdict('C:/u/notes/a.md', home)).toBe('ask')
+  // Git Bash paths on Windows; case counts only off Windows
+  expect(writeVerdict('/c/repo/wt/a.py', dirs)).toBe('allow')
+  const posix = { home: '/h/.oke', wiki: '/h/.oke/wiki', folder: null, memories: [], areas: [{ path: '/src/app', direct: false }] }
+  expect(writeVerdict('/src/app/a.py', posix)).toBe('allow')
+  expect(writeVerdict('/SRC/App/a.py', posix)).toBe('ask')
+})
+
+test('a PM, worker or reviewer write outside its areas is refused by oke path-check', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  writeAreas = [{ path: 'C:/u', direct: true }, { path: 'C:/repo', direct: false }]
+  tickFolder = 'C:/oke/jobs/j/w1'
+  const runs: Run[] = []
+  engine(on, runs, [])
+  on('tool.call', () => ({ result: { success: true } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const asks = () => runs.filter(r => r.argv.includes('path-check')).length
+  const bad: any = await $.tool.call({ tool: 'Write', file_path: 'C:/u/nested/x.py', content: 'x' } as any)
+  expect(bad.deny).toMatch(/^OKe: .*not this job's/)
+  const away: any = await $.tool.call({ tool: 'Write', file_path: 'D:/elsewhere/x.py', content: 'x' } as any)
+  expect(away.deny).toMatch(/^OKe: /)
+  const before = asks()
+  const home: any = await $.tool.call({ tool: 'Write', file_path: 'C:/oke/jobs/j/w1/report.md', content: 'x' } as any)
+  const git: any = await $.tool.call({ tool: 'Edit', file_path: 'C:/repo/a.py', old_string: 'a', new_string: 'b' } as any)
+  expect([home.deny, git.deny]).toEqual([undefined, undefined])
+  expect(asks()).toBe(before)  // plainly allowed: no python
+  const shared: any = await $.tool.call({ tool: 'Write', file_path: 'C:/Users/u/.claude/projects/C--repo/memory/m.md', content: 'x' } as any)
+  expect(shared.deny).toBeUndefined()  // the repository's memory, shared by its worktrees
+  expect(asks()).toBe(before)
+  writeAreas = []
+  tickFolder = '/oke/jobs/j/w1'
+})
+
+test('the write guard fails closed: a failed path-check refuses, stale PM areas ask', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  tickRole = 'pm'
+  writeAreas = [{ path: 'C:/repo', direct: false }]
+  const runs: Run[] = []
+  engine(on, runs, [])
+  on('tool.call', () => ({ result: { success: true } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  try {
+  failCheck = true
+  const out: any = await $.tool.call({ tool: 'Write', file_path: 'D:/x/a.py', content: 'x' } as any)
+  expect(out.deny).toMatch(/^OKe: OKe could not check this write \(.*\): try again; if it keeps failing, report a question/)
+  const ok: any = await $.tool.call({ tool: 'Write', file_path: 'C:/repo/a.py', content: 'x' } as any)
+  expect(ok.deny).toBeUndefined()  // fresh areas: no python needed
+  failTick = true
+  await clock.advance(31_000)  // the ticks fail: the areas grow stale
+  const stale: any = await $.tool.call({ tool: 'Write', file_path: 'C:/repo/a.py', content: 'x' } as any)
+  expect(stale.deny).toMatch(/could not check this write/)
+  } finally {
+    failTick = false
+    failCheck = false
+    writeAreas = []
+    tickRole = 'worker'
+  }
+})
+
+test('worker areas from its last good tick do not expire', async ($, on) => {
+  const clock = mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w1:p5' })
+  writeAreas = [{ path: 'C:/repo', direct: false }]
+  const runs: Run[] = []
+  engine(on, runs, [])
+  on('tool.call', () => ({ result: { success: true } }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  try {
+  failTick = true
+  failCheck = true
+  await clock.advance(10 * 60_000)  // no new prompt, no tick for a long time
+  const before = runs.filter(r => r.argv.includes('path-check')).length
+  const ok: any = await $.tool.call({ tool: 'Write', file_path: 'C:/repo/a.py', content: 'x' } as any)
+  expect(ok.deny).toBeUndefined()
+  expect(runs.filter(r => r.argv.includes('path-check')).length).toBe(before)  // no python
+  } finally {
+    failTick = false
+    failCheck = false
+    writeAreas = []
+  }
+})
+
+test('the board names each PM and each job its path', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  tickBoard = [{ name: 'backend', key: 'backend', pm: null, jobs: [
+    { job: 'fix-a', phase: 'planning', merge: 'none', pending: null, path: 'api', agents: [] }] }]
+  engine(on, [], [])
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /▍backend/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /fix-a · api/ })).toBeTruthy()
+  await ui.unmount()
+  tickBoard = BOARD
+  tickRole = 'worker'
 })

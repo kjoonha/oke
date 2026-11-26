@@ -6,12 +6,12 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { BoardJob, BoardNode, BoardRepo, Since, Todo } from '../types'
+import type { BoardJob, BoardNode, BoardPm, Since, Todo } from '../types'
 
 const PANE = 'oke-board'
 const TICK_MS = 10_000
 const UNKNOWN_EVERY = 6 // ticks: a session that is not (yet) an OKe agent is checked every 60 s
-const board = atom({ plugin: 'oke', key: 'board' } as const, [] as BoardRepo[], { shape: 'board-2' })
+const board = atom({ plugin: 'oke', key: 'board' } as const, [] as BoardPm[], { shape: 'board-3' })
 const expanded = atom({ plugin: 'oke', key: 'expanded' } as const, [] as string[], { shape: 'expanded-1' })
 const since = atom({ plugin: 'oke', key: 'since' } as const, {} as Record<string, Since>, { shape: 'since-1' })
 const todos = atom({ plugin: 'oke', key: 'todos' } as const, [] as Todo[], { shape: 'todos-1' })
@@ -41,11 +41,71 @@ let pending: { cancel: () => void } | null = null
 let job: string | null = null
 let seq: number | null = null
 let agentName: string | null = null
+// where this agent's Edit and Write may land without asking oke path-check (tick)
+let writeAreas: { path: string; direct: boolean }[] = []
+let memoryDirs: string[] = []  // the cwd's memory folder and, in git, the repository's shared one
+// for a PM, false once no tick has renewed them for AREAS_TTL: then every write asks oke path-check
+let areasFresh = false
+let areasTimer: { cancel: () => void } | null = null
+const AREAS_TTL = 30_000
 // false once the main loop's turn ended, true from the next prompt; null after a reload
 // (unknown: the waits deliver as before until the next turn ends)
 let inTurn: boolean | null = null
 let taking = false
 let naming = false  // a tick run by takeMail to learn agentName
+
+/** Whether `file` is `dir` or lies under it: slashes ignored, and as oke.py's
+ * normalize_path does, case and a Git Bash `/c/...` form only on Windows. */
+export function underDir(file: string, dir: string | null | undefined, win = false): boolean {
+  if (!dir) return false
+  const norm = (p: string) => {
+    let out = p.replace(/\\/g, '/').replace(/\/+$/, '')
+    if (win) out = out.replace(/^\/([a-z])(\/|$)/i, '$1:/').toLowerCase()
+    return out
+  }
+  const f = norm(file)
+  return f === norm(dir) || f.startsWith(norm(dir) + '/')
+}
+
+// files only OKe writes, also in a folder the agent may write (oke.py's GATE_FILE)
+const GATE_FILE = /^(ledger\.(tsv|head)|baseline\.(json|log)|interview\.json|peers\.(json|md)|intake\.md|children\.json|(lean-|bg-)?settings\.json|mcp\.json|(check|verify)-\d+\.log)$/i
+
+/** A PM's, worker's or reviewer's Edit or Write of `file`: `allow` when it is plainly in
+ * its own folder or OKe's tmp/ (not a file only OKe writes), its memory folder, or a git
+ * job's checkout or worktree; else `ask` (`oke path-check` decides, and refuses when it
+ * cannot). Windows is told by the drive letter of OKe's home. */
+export function writeVerdict(file: string, dirs: { home: string | null, wiki: string | null, folder: string | null,
+  memories: string[], areas: { path: string; direct: boolean }[] }): 'allow' | 'ask' {
+  const win = /^[a-z]:/i.test(dirs.home ?? '')
+  const target = file.replace(/\\/g, '/').toLowerCase()
+  // only a canonical absolute path: `..`, `//`, a trailing dot or space or an 8.3 name could fool a prefix
+  const plain = /^([a-z]:)?\/[^/]/.test(target) && !/(^|\/)\.{1,2}(\/|$)|\/\/|[. ](\/|$)|~\d/.test(target)
+  if (!plain || underDir(file, dirs.wiki, win)) return 'ask'
+  if (underDir(file, dirs.home, win)) {
+    const mine = underDir(file, dirs.folder, win) || underDir(file, dirs.home && `${dirs.home}/tmp`, win)
+    return mine && !GATE_FILE.test(target.split('/').pop() ?? '') ? 'allow' : 'ask'
+  }
+  if (dirs.memories.some(m => underDir(file, m, win))) return 'allow'
+  // any git area that holds it allows it (a folder job on ~ does not hide a checkout under ~);
+  // a link out of it (a committed symlink) is path-check's to catch: shortcut, the fast path
+  // does not read the disk
+  return dirs.areas.some(a => !a.direct && underDir(file, a.path, win)) ? 'allow' : 'ask'
+}
+
+/** The refusal for an Edit or Write outside the agent's write areas, else null.
+ * shortcut: a Bash write is not checked; the skills say the same. */
+async function pathDenied($: any, tool: string, input: any): Promise<string | null> {
+  if (!['Edit', 'Write', 'NotebookEdit'].includes(tool) || !pane) return null
+  const file = String(input.file_path ?? input.notebook_path ?? '')
+  if (!file) return null
+  // areas a failing tick left behind are stale: then python decides every write
+  if (areasFresh && writeVerdict(file, { home, wiki, folder, memories: memoryDirs, areas: writeAreas }) === 'allow') return null
+  const out = await oke($, ['path-check', '--pane', pane, '--path', file])
+  if (!out || typeof out.allow !== 'boolean') {
+    return 'OKe: OKe could not check this write (oke path-check failed): try again; if it keeps failing, report a question'
+  }
+  return out.allow ? null : `OKe: ${out.reason}`
+}
 
 /** Run `oke.py <args>` and parse its JSON line; null when it failed. */
 async function oke($: any, args: string[]): Promise<any> {
@@ -103,6 +163,14 @@ async function tick($: any) {
     job = out.job ?? null
     seq = out.seq ?? null
     agentName = out.agent ?? null
+    writeAreas = out.write_areas ?? []
+    memoryDirs = out.memories ?? []
+    areasFresh = true
+    areasTimer?.cancel()
+    // a worker's or reviewer's areas change only when its job is held, cancelled or closed,
+    // and then it is closed too: only a PM's (it gains and loses jobs) grow stale
+    areasTimer = role === 'worker' || role === 'reviewer' ? null
+      : $.clock.after(AREAS_TTL, () => { areasFresh = false })
     eventsOffset = out.events_offset
     if (role === 'orchestrator') {
       for (const line of out.events as string[]) $.ui.toast(`OKe: ${line.replace(/^\S+ /, '')}`, { timeoutMs: 8000 })
@@ -176,7 +244,7 @@ let asked: Set<string> | null = null
 
 /** A new item waiting on the person raises a native notification at once (they may be
  * away, on their phone). The first look only learns what already waited. */
-async function notifyAsks($: any, tree: BoardRepo[]) {
+async function notifyAsks($: any, tree: BoardPm[]) {
   if (!tree.length) return  // a failed read, not "nothing waits": keep what was asked
   const jobs = tree.flatMap(r => r.jobs)
   const now = new Set(jobs
@@ -304,11 +372,14 @@ const PENDING: Record<string, string> = {
   silent: 'PM is silent',
   report_done: 'read the PM report',
   unsent: 'assignment not sent',
-  legacy: 'needs a look',
+  unassigned: 'assignment not written',
+  split: 'a PM split a job',
+  after_ready: 'may start now',
+  after_broken: 'its after-job will not finish',
 }
 
 /** Pending kinds that wait on the person (the rest the orchestrator handles itself). */
-const ASKS_USER = ['plan', 'merge', 'question', 'blocked', 'failed']
+const ASKS_USER = ['plan', 'merge', 'question', 'blocked', 'failed', 'after_broken']
 
 /** Git commands no OKe agent runs, the orchestrator included: OKe merges through `oke job
  * merge`, and these lose work or reach other people. `git -C <dir>`, `-c k=v` and
@@ -454,7 +525,7 @@ function step(job: BoardJob): number {
   return job.merge === 'verified' ? STEPS.length : job.merge === 'unverified' ? 5 : 4
 }
 
-function nodes(tree: BoardRepo[]): BoardNode[] {
+function nodes(tree: BoardPm[]): BoardNode[] {
   const out: BoardNode[] = []
   for (const repo of tree) {
     if (repo.pm) out.push(repo.pm)
@@ -550,7 +621,7 @@ const usd = (n: number) => `$${n.toFixed(2)}`
 type Self = { model: string; percent?: number; cost?: number }
 
 /** The status line: for orchestrator and PM the work they watch, for a child its own job. */
-function statusParts(role: string, tree: BoardRepo[], self: Self): Part[] {
+function statusParts(role: string, tree: BoardPm[], self: Self): Part[] {
   const own = [
     self.percent !== undefined ? { text: `ctx ${self.percent}%`, drop: 2 } : null,
     self.cost !== undefined ? { text: usd(self.cost), drop: 4 } : null,
@@ -577,8 +648,8 @@ const FOLD_AT = 3
 
 /** The org chart under the status line: a repo with its PM, then one row per open job
  * with its step, its cost and its agents. A PM sees its own repo, so no repo row. */
-function orgRows(role: string, tree: BoardRepo[]): { repo?: BoardRepo; job?: BoardJob; last: boolean }[] {
-  const rows: { repo?: BoardRepo; job?: BoardJob; last: boolean }[] = []
+function orgRows(role: string, tree: BoardPm[]): { repo?: BoardPm; job?: BoardJob; last: boolean }[] {
+  const rows: { repo?: BoardPm; job?: BoardJob; last: boolean }[] = []
   for (const repo of tree) {
     const jobs = repo.jobs.filter(isOpen)
     if (role === 'orchestrator' && (repo.pm || jobs.length)) rows.push({ repo, last: false })
@@ -1028,7 +1099,7 @@ function frameCells(m: Mood, i: number): string {
 }
 
 /** The band's mood from the board, or for a worker or reviewer from its own turn. */
-function moodOf(tree: BoardRepo[], working: boolean): Mood {
+function moodOf(tree: BoardPm[], working: boolean): Mood {
   const jobs = tree.flatMap(r => r.jobs)
   if (jobs.some(j => j.pending)) return 'wave'
   const all = nodes(tree)
@@ -1108,6 +1179,10 @@ export const register: Register = on => {
         const denied = workerDenied(e.tool, e, folder)
         if (denied) return { deny: denied }
       }
+      if (role === 'pm' || role === 'worker' || role === 'reviewer') {
+        const denied = await pathDenied($, e.tool, e)
+        if (denied) return { deny: denied }
+      }
       if (role === 'orchestrator') {
         let root: string | null = null  // asked on each write: /cd or a worktree move changes it
         if (['Edit', 'Write', 'NotebookEdit'].includes(e.tool)) {
@@ -1166,7 +1241,7 @@ export const register: Register = on => {
         const [mark, , color] = pm ? STATUS[pm.status] ?? ['·', pm.status, undefined] : ['', '', undefined]
         return (
           <Text wrap="truncate-end">
-            <Text bold>{r.repo.repo.replace(/-[0-9a-f]{6}$/, '')}</Text>
+            <Text bold>{r.repo.name}</Text>
             {pm ? <Text color={color} dimColor={pm.status === 'idle'}>{` PM${mark}`}</Text> : ''}
           </Text>
         )
@@ -1393,7 +1468,7 @@ export const register: Register = on => {
       const finished = repo.jobs.filter(j => j.phase === 'done' || j.phase === 'failed')
       cards.push(
         <Box flexDirection="column" marginTop={1}>
-          <Text bold color={INK.pink}>{`▍${repo.repo.replace(/-[0-9a-f]{6}$/, '')}`}</Text>
+          <Text bold color={INK.pink}>{`▍${repo.name}`}</Text>
           {repo.pm ? <Box flexDirection="column" paddingLeft={1}>{agentBlock(repo.pm, 'PM')}</Box> : []}
         </Box>,
       )
@@ -1401,7 +1476,7 @@ export const register: Register = on => {
         if (finished.includes(job)) continue
         const [label, labelColor] = LEDGER[job.merge] ?? ['', undefined]
         const at = step(job)
-        const peers = (job.peer_wait ?? []).map(r => r.replace(/-[0-9a-f]{6}$/, ''))
+        const peers = job.peer_wait ?? []
         const wait = [peers.length ? `PM ${peers.join(', ')}` : '', (job.after_wait ?? []).join(', ')]
           .filter(Boolean).join('; ')
         const hurt = !job.held && job.agents.some(n => n.status === 'dead')
@@ -1409,6 +1484,7 @@ export const register: Register = on => {
           <Box flexDirection="column" borderStyle="round" borderColor={job.pending ? INK.yellow : hurt ? INK.red : INK.lavender} paddingX={1} marginTop={1}>
             <Text>
               <Text bold color={INK.white}>{job.job}</Text>
+              {job.path ? <Text color={INK.dim}>{` · ${job.path}`}</Text> : ''}
               {job.size ? <Text color={INK.dim}>{` · ${job.size}`}</Text> : ''}
               {label ? <Text color={labelColor}>{`  ${label}`}</Text> : ''}
               {job.held ? <Text color={INK.dim}>{'  ⏸ on hold'}</Text> : ''}

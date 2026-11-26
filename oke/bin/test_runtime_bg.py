@@ -7,7 +7,7 @@ import subprocess
 import sys
 import unittest
 
-from test_oke import SpawnBase, HERE, spawn_ok  # noqa: F401
+from test_oke import put_pm, SpawnBase, HERE, spawn_ok  # noqa: F401
 import oke
 import runtime_bg
 
@@ -79,6 +79,33 @@ class TestBgRuntime(BgBase):
         self.assertEqual(merged["env"], {"X": "1"})
         self.assertEqual(merged["worktree"], {"bgIsolation": "none"})
         self.assertEqual(merged["crossSessionInbound"], "accept")
+
+    def claude_json(self, projects):
+        conf = self.path("conf")
+        os.makedirs(conf, exist_ok=True)
+        with io.open(os.path.join(conf, ".claude.json"), "w", encoding="utf-8") as f:
+            f.write(json.dumps({"projects": projects}))
+        old = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = conf
+        self.addCleanup(lambda: os.environ.pop("CLAUDE_CONFIG_DIR") if old is None
+                        else os.environ.__setitem__("CLAUDE_CONFIG_DIR", old))
+
+    def test_a_start_in_an_untrusted_folder_says_how_to_trust_it(self):
+        place = self.path("home/pms/backend")
+        os.makedirs(place)
+        self.claude_json({os.path.expanduser("~").replace("\\", "/"): {"hasTrustDialogAccepted": True}})
+        self.fake({"go": [{"stderr": "no session", "exit": 1}]})
+        with self.assertRaises(oke.HerdrError) as c:
+            self.rt.start("backend", place, [], "go", trusted=lambda: False)
+        self.assertEqual(c.exception.code, "claude_failed")
+        self.assertIn("has not trusted", c.exception.message)  # the home folder's trust does not count
+        self.assertFalse(runtime_bg.trusted_by_claude(place))
+        self.claude_json({self.path("home").replace("\\", "/"): {"hasTrustDialogAccepted": True}})
+        self.assertTrue(runtime_bg.trusted_by_claude(place))  # trusted from the OKe home above it
+        self.fake({"go": [{"stderr": "no session", "exit": 1}]})
+        with self.assertRaises(oke.HerdrError) as c:
+            self.rt.start("backend", place, [], "go", trusted=lambda: False)
+        self.assertNotIn("has not trusted", c.exception.message)
 
     def test_bypass_becomes_dont_ask_with_the_role_tools(self):
         argv = runtime_bg.without_bypass(["--tools", "Bash,Edit", "--permission-mode", "bypassPermissions"])
@@ -192,7 +219,7 @@ class TestDeliverInBg(BgBase):
         os.environ["OKE_RUNTIME"] = "bg"
         self.job("fix-a", "working")
         a = self.assignment("fix-a-w1", "worker", "fix-a")
-        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
+        oke.write_json_atomic(oke.children_path(self.pm),
                               {"fix-a-w1": {"agent": "fix-a-w1", "job": "fix-a", "pane": "a1",
                                             "role": "worker", "seq": 1}})
         rows = [dict(ROWS[0], state="done")]
@@ -220,7 +247,7 @@ class TestIdentityInBg(BgBase):
     def test_tick_knows_a_bg_child_by_its_session(self):
         os.environ["OKE_RUNTIME"] = "bg"
         self.job("fix-a", "working")
-        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
+        oke.write_json_atomic(oke.children_path(self.pm),
                               {"fix-a-w1": {"agent": "fix-a-w1", "job": "fix-a", "pane": "a1",
                                             "session": "s-1", "role": "worker", "seq": 1}})
         self.fake({"agents --json": [OUT(json.dumps(ROWS))]})
@@ -231,7 +258,7 @@ class TestIdentityInBg(BgBase):
         os.environ["OKE_RUNTIME"] = "bg"
         os.environ["CLAUDE_CODE_SESSION_ID"] = "s-1"
         self.job("fix-a", "working")
-        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
+        oke.write_json_atomic(oke.children_path(self.pm),
                               {"fix-a-w1": {"agent": "fix-a-w1", "job": "fix-a", "pane": "a1",
                                             "session": "s-1", "role": "worker", "seq": 1}})
         self.assertIn("fix-a/fix-a-w1/assignment.md", oke.compact_message())
@@ -240,7 +267,7 @@ class TestIdentityInBg(BgBase):
         os.environ["OKE_RUNTIME"] = "bg"
         st = oke.load_state()
         st["orchestrator"] = {"pane": "session:sid-orch"}
-        st["repos"][oke.repo_key(self.repo)] = {"pm": {"agent": "pm-toy", "pane": "a2", "session": "s-2"}}
+        put_pm(st, oke.repo_key(self.repo), {"agent": "pm-toy", "pane": "a2", "session": "s-2"})
         oke.save_state(st)
         self.fake({"agents --json": [OUT(json.dumps(ROWS))]})
         self.addCleanup(setattr, oke, "revive", oke.revive)
@@ -254,7 +281,7 @@ class TestBoardAndScreen(BgBase):
     def test_board_text(self):
         os.environ["OKE_RUNTIME"] = "bg"
         self.job("fix-a", "working")
-        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
+        oke.write_json_atomic(oke.children_path(self.pm),
                               {"fix-a-w1": {"agent": "fix-a-w1", "job": "fix-a", "pane": "a1",
                                             "session": "s-1", "role": "worker", "seq": 1}})
         self.fake({"agents --json": [OUT(json.dumps(ROWS))]})

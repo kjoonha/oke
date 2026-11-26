@@ -4,7 +4,7 @@ import json
 import os
 import unittest
 
-from test_oke import AG, AGENT, J
+from test_oke import put_pm, AG, AGENT, J
 from test_slice3 import S3Base
 import oke
 
@@ -20,8 +20,8 @@ class PeerBase(S3Base):
         self.job("fix-a", "planning")
         self.other_job("fix-b", self.repo_b, "working")
         s = oke.load_state()
-        s["repos"][self.key] = {"pm": {"agent": "pm-a", "pane": "w1:p3", "session": "s-a"}}
-        s["repos"][self.key_b] = {"pm": {"agent": "pm-b", "pane": "w2:p3", "session": "s-b"}}
+        put_pm(s, self.key, {"agent": "pm-a", "pane": "w1:p3", "session": "s-a"})
+        put_pm(s, self.key_b, {"agent": "pm-b", "pane": "w2:p3", "session": "s-b"})
         s["orchestrator"] = {"pane": "w7:p1"}
         oke.save_state(s)
         self.alive = ["pm-a", "pm-b"]
@@ -34,7 +34,7 @@ class PeerBase(S3Base):
         repo = self.git_repo(name)
         self.other_job(job, repo, phase)
         s = oke.load_state()
-        s["repos"][oke.repo_key(repo)] = {"pm": {"agent": pm, "pane": PANES[pm][0], "session": PANES[pm][1]}}
+        put_pm(s, oke.repo_key(repo), {"agent": pm, "pane": PANES[pm][0], "session": PANES[pm][1]})
         oke.save_state(s)
         return oke.repo_key(repo)
 
@@ -140,18 +140,18 @@ class TestPeerAnswer(PeerBase):
 class TestPeerWaits(PeerBase):
     def owe(self, job="fix-a", pm="pm-b", key=None, nudged=0):
         oke.write_json_atomic(oke.peers_path(job), {"round": 1, "asker": "pm-a", "waiting": {
-            pm: {"repo": key or self.key_b, "nudged": nudged}}})
+            pm: {"pm": key or pm, "nudged": nudged}}})
 
     def test_asking_pm_waiting_on_peers_gets_no_idle_no_report(self):
         self.pm_job("fix-a", 1)  # handed over, no report yet
         self.owe()
         self.fake({"agent get": [AGENT("idle")]})
-        self.assertIsNone(oke.check_pm_once("pm-a", self.key))
+        self.assertIsNone(oke.check_pm_once("pm-a", "pm-a"))
 
     def test_idle_asked_pm_is_reminded_once_then_peer_no_answer(self):
         self.owe()
         self.fake({"agent get": [AGENT("idle")], "agent prompt": [J({"type": "agent_prompted"})]})
-        result = oke.wait_loop("pm-b", None, None, poll=0, max_polls=20, jobs_key=self.key_b)
+        result = oke.wait_loop("pm-b", None, None, poll=0, max_polls=20, jobs_key="pm-b")
         self.assertEqual(result, "peer_no_answer fix-a pm-b")
         self.assertEqual(oke.read_peers("fix-a")["waiting"]["pm-b"]["nudged"], 2)  # the user was asked
         prompts = [c for c in self.calls() if c[:2] == ["agent", "prompt"]]
@@ -162,35 +162,35 @@ class TestPeerWaits(PeerBase):
         self.owe()
         oke.queue_mail("pm-b", "pm-a", "peer ask (job fix-a, round 1): x")
         self.fake({"agent get": [AGENT("idle")]})
-        self.assertEqual(oke.check_pm_once("pm-b", self.key_b), "?deliver")
+        self.assertEqual(oke.check_pm_once("pm-b", "pm-b"), "?deliver")
 
     def test_two_asks_nudge_names_the_first_owed_job(self):
         self.job("fix-c", "planning")
         self.owe("fix-a")
         self.owe("fix-c")
         self.fake({"agent get": [AGENT("idle")]})
-        self.assertEqual(oke.check_pm_once("pm-b", self.key_b), "?peer_idle fix-a")
+        self.assertEqual(oke.check_pm_once("pm-b", "pm-b"), "?peer_idle fix-a")
         self.answer(job="fix-a")
         self.fake({"agent get": [AGENT("idle")]})
-        self.assertEqual(oke.check_pm_once("pm-b", self.key_b), "?peer_idle fix-c")
+        self.assertEqual(oke.check_pm_once("pm-b", "pm-b"), "?peer_idle fix-c")
         self.assertEqual(list(oke.peer_waiting(oke.load_state(), "fix-c")), ["pm-b"])
 
 
 class TestReviewFixes(PeerBase):
     def owe(self, job="fix-a", nudged=0):
         oke.write_json_atomic(oke.peers_path(job), {"round": 1, "asker": "pm-a", "waiting": {
-            "pm-b": {"repo": self.key_b, "nudged": nudged}}})
+            "pm-b": {"pm": "pm-b", "nudged": nudged}}})
 
     def test_peer_no_answer_comes_once_and_the_next_owed_job_gets_its_turn(self):
         self.job("fix-c", "planning")
         self.owe("fix-a", nudged=1)
         self.owe("fix-c")
         self.fake({"agent get": [AGENT("idle")], "agent prompt": [J({"type": "agent_prompted"})]})
-        self.assertEqual(oke.wait_loop("pm-b", None, None, poll=0, max_polls=20, jobs_key=self.key_b),
+        self.assertEqual(oke.wait_loop("pm-b", None, None, poll=0, max_polls=20, jobs_key="pm-b"),
                          "peer_no_answer fix-a pm-b")
-        self.assertEqual(oke.wait_loop("pm-b", None, None, poll=0, max_polls=20, jobs_key=self.key_b),
+        self.assertEqual(oke.wait_loop("pm-b", None, None, poll=0, max_polls=20, jobs_key="pm-b"),
                          "peer_no_answer fix-c pm-b")
-        self.assertIsNone(oke.wait_loop("pm-b", None, None, poll=0, max_polls=8, jobs_key=self.key_b))
+        self.assertIsNone(oke.wait_loop("pm-b", None, None, poll=0, max_polls=8, jobs_key="pm-b"))
         self.assertEqual(self.answer(), 0, self.err)  # a late answer still counts
 
     def test_a_vanished_entry_keeps_the_wait_going(self):
@@ -235,20 +235,20 @@ class TestReviewFixes2(PeerBase):
         oke.save_state(s)
         self.pm_job("fix-a", 1, REPORT("done", 1))
         self.fake({"agent get": [AGENT("working")]})
-        self.assertEqual(oke.check_pm_once("pm-a", self.key), "report done fix-a")
+        self.assertEqual(oke.check_pm_once("pm-a", "pm-a"), "report done fix-a")
         s = oke.load_state()
         s["jobs"]["fix-b"]["held"] = False  # back: must not owe the finished talk
         oke.save_state(s)
         self.assertEqual(oke.owed_answers(oke.load_state(), "pm-b"), [])
 
-    def test_verify_pass_does_not_tell_a_job_awaiting_merge_approval(self):
+    def test_verify_pass_tells_a_job_awaiting_merge_approval_too(self):
         self.advance("fix-a", "awaiting_merge")
         self.put(os.path.join(self.home, "jobs", "fix-a", "plan.md"), "job: fix-a\nafter: fix-b\n---\n")
         self.advance("fix-b", "merging")
         oke.ledger_add("fix-b", "oke", "abc1234", "merge", "pass")
         self.fake({"agent list": [J({"agents": []})]})
         self.assertEqual(self.cli("job", "verify", "fix-b", "--accept", "user checked"), 0, self.err)
-        self.assertEqual(self.texts("pm-a"), [])
+        self.assertEqual(self.texts("pm-a"), ["oke: Job fix-a: after-job fix-b is finished"])
 
 
 class TestReviewFixes3(PeerBase):
@@ -260,7 +260,7 @@ class TestReviewFixes3(PeerBase):
         self.answer("impact: we disagree")
         self.pm_job("fix-a", 1, REPORT("question", 1))
         self.fake({"agent get": [AGENT("working")]})
-        self.assertEqual(oke.check_pm_once("pm-a", self.key), "report question fix-a")
+        self.assertEqual(oke.check_pm_once("pm-a", "pm-a"), "report question fix-a")
         self.assertEqual(list(oke.peer_waiting(oke.load_state(), "fix-a")), ["pm-c"])
 
     def test_after_the_plan_report_a_late_answer_is_logged_and_mailed(self):
@@ -268,7 +268,7 @@ class TestReviewFixes3(PeerBase):
         self.ask()
         self.pm_job("fix-a", 1, REPORT("done", 1))
         self.fake({"agent get": [AGENT("working")]})
-        self.assertEqual(oke.check_pm_once("pm-a", self.key), "report done fix-a")
+        self.assertEqual(oke.check_pm_once("pm-a", "pm-a"), "report done fix-a")
         self.assertEqual(oke.peer_waiting(oke.load_state(), "fix-a"), {})
         self.assertEqual(self.answer("impact: late"), 0, self.err)
         self.assertIn("- answer (pm-b): impact: late", self.log())
@@ -277,19 +277,19 @@ class TestReviewFixes3(PeerBase):
     def test_asker_gets_no_idle_no_report_while_the_user_decides(self):
         self.pm_job("fix-a", 1)
         oke.write_json_atomic(oke.peers_path("fix-a"), {"round": 1, "asker": "pm-a", "waiting": {
-            "pm-b": {"repo": self.key_b, "nudged": 1}}})
+            "pm-b": {"pm": "pm-b", "nudged": 1}}})
         self.assertFalse(oke.peer_nudge("pm-b", "fix-a"))  # the user is asked now
         self.fake({"agent get": [AGENT("idle")]})
-        self.assertIsNone(oke.check_pm_once("pm-a", self.key))
+        self.assertIsNone(oke.check_pm_once("pm-a", "pm-a"))
         self.pm_job("fix-a", 2)  # the orchestrator's kind: answer: the PM owes a report again
-        self.assertEqual(oke.check_pm_once("pm-a", self.key), "?idle_no_report fix-a")
+        self.assertEqual(oke.check_pm_once("pm-a", "pm-a"), "?idle_no_report fix-a")
 
 
 class TestReviewFixes4(PeerBase):
     def test_a_missing_answer_the_user_must_rule_on_stays_in_pending(self):
         self.pm_job("fix-a", 1)
         oke.write_json_atomic(oke.peers_path("fix-a"), {"round": 1, "asker": "pm-a", "waiting": {
-            "pm-b": {"repo": self.key_b, "nudged": 1}}})
+            "pm-b": {"pm": "pm-b", "nudged": 1}}})
         oke.peer_nudge("pm-b", "fix-a")
         item = oke.pending_item("fix-a", oke.load_state()["jobs"]["fix-a"])
         self.assertEqual(item["kind"], "peer")
@@ -303,8 +303,8 @@ class TestReviewFixes5(PeerBase):
         self.add_repo("web", "pm-c", "fix-c", "working")
         self.pm_job("fix-a", 1)
         oke.write_json_atomic(oke.peers_path("fix-a"), {"round": 1, "asker": "pm-a", "waiting": {
-            "pm-b": {"repo": self.key_b, "nudged": 1},
-            "pm-c": {"repo": oke.repo_key(os.path.join(os.path.dirname(self.repo_b), "web")), "nudged": 1}}})
+            "pm-b": {"pm": "pm-b", "nudged": 1},
+            "pm-c": {"pm": "pm-c", "nudged": 1}}})
 
     def item(self):
         return oke.pending_item("fix-a", oke.load_state()["jobs"]["fix-a"])
@@ -362,7 +362,7 @@ class TestAfter(PeerBase):
         s = oke.load_state()
         s["jobs"]["fix-b"].update(phase="failed", cancelled=True)
         oke.save_state(s)
-        self.assertIn("after fix-b was cancelled: ask the user", self.merge())
+        self.assertIn("after-job fix-b was cancelled: the orchestrator asks the user; keep the job waiting", self.merge())
 
     def test_archived_after_job_counts_by_its_archived_ledger(self):
         self.verified()
@@ -376,18 +376,18 @@ class TestAfter(PeerBase):
         self.assertNotIn("fix-b", self.merge())
         for name in ("ledger.tsv", "ledger.head"):  # the ledger alone gone reads as cut
             os.remove(os.path.join(dst, name))
-        self.assertIn("after fix-b was archived without a verified merge: ask the user", self.merge())
+        self.assertIn("after-job fix-b was archived without a verified merge", self.merge())
 
     def test_cancel_notifies_the_pm_of_a_job_waiting_on_it(self):
         self.fake({"agent list": [J({"agents": []})]})
         self.assertEqual(self.cli("job", "cancel", "fix-b"), 0, self.err)
-        self.assertIn("oke: Job fix-a: after-job fix-b was cancelled. Report question to the user.",
+        self.assertIn("oke: Job fix-a: after-job fix-b was cancelled: the orchestrator asks the user; keep the job waiting",
                       self.texts("pm-a"))
 
     def test_after_itself_is_ignored_and_an_unknown_name_says_so(self):
         self.put(os.path.join(self.home, "jobs", "fix-a", "plan.md"), "job: fix-a\nafter: fix-a, nope\n---\n")
         err = self.merge()
-        self.assertIn("after nope is no known job: fix the plan", err)
+        self.assertIn("after-job nope is no known job", err)
         self.assertNotIn("waiting for fix-a", err)
 
     def test_verify_pass_does_not_tell_a_job_still_working(self):
@@ -405,7 +405,7 @@ class TestAfter(PeerBase):
         oke.ledger_add("fix-b", "oke", "abc1234", "merge", "pass")
         self.fake({"agent list": [J({"agents": []})]})
         self.assertEqual(self.cli("job", "verify", "fix-b", "--accept", "user checked"), 0, self.err)
-        self.assertIn("oke: Job fix-a: after-job fix-b is merged and verified. Run the merge again.",
+        self.assertIn("oke: Job fix-a: after-job fix-b is finished",
                       self.texts("pm-a"))
 
 
@@ -416,16 +416,28 @@ class TestBoard(PeerBase):
 
     def test_board_lists_peer_and_after_waits(self):
         oke.write_json_atomic(oke.peers_path("fix-a"), {"round": 1, "asker": "pm-a", "waiting": {
-            "pm-b": {"repo": self.key_b, "nudged": 0}}})
+            "pm-b": {"pm": "pm-b", "nudged": 0}}})
         self.put(os.path.join(self.home, "jobs", "fix-a", "plan.md"), "job: fix-a\nafter: fix-b\n---\n")
         job = self.jobs()["fix-a"]
-        self.assertEqual(job["peer_wait"], [oke.repo_name(self.key_b)])
+        self.assertEqual(job["peer_wait"], ["pm-b"])
         self.assertEqual(job["after_wait"], [])  # planning: not at the merge yet
         self.advance("fix-a", "merging")
         self.assertEqual(self.jobs()["fix-a"]["after_wait"], ["fix-b"])
         lines = "\n".join(t for _, t in oke.board_lines(oke.board_tree(oke.load_state(), [])))
-        self.assertIn("waiting for PM %s" % oke.repo_name(self.key_b), lines)
-        self.assertIn("waiting for fix-b to merge", lines)
+        self.assertIn("waiting for PM pm-b", lines)
+        self.assertIn("waiting for after-job fix-b", lines)
+
+
+
+class TestPhaseByAgent(PeerBase):
+    def test_only_the_orchestrator_sets_a_phase(self):
+        self.as_agent("pm-a")
+        self.assertEqual(self.cli("job", "phase", "fix-a", "awaiting_approval"), 1)
+        self.assertIn("only the orchestrator sets a job's phase", self.err)
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["phase"], "planning")
+        self.as_agent("w7:p1")  # the orchestrator's pane
+        self.cli("job", "phase", "fix-a", "awaiting_approval")
+        self.assertNotIn("only the orchestrator", self.err)
 
 
 if __name__ == "__main__":

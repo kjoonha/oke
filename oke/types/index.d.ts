@@ -30,13 +30,16 @@ export type BoardJob = {
   /** The user put it on hold (`oke job hold`): nothing runs for it until it is back. */
   held?: boolean
   subagent?: boolean  // the PM waits on a background subagent for it (no pane of its own)
-  /** Repositories whose PM still owes this job an answer (`oke peer ask`). */
+  /** The folder name of the job's path, or `path?` while its PM has not set it. */
+  path?: string
+  /** PMs that still owe this job an answer (`oke peer ask`). */
   peer_wait?: string[]
-  /** Jobs that must merge and verify before this one may merge (plan `after:`). */
+  /** After-jobs (plan `after:` or split `--after`) still holding this job: a git job's merge, or a folder job's start. A git after-job must merge and verify, a folder or research one be done; one that can never finish is listed too. */
   after_wait?: string[]
 }
 
-export type BoardRepo = { repo: string; key: string; pm: BoardNode | null; jobs: BoardJob[] }
+/** One PM: its name, its node and its jobs. */
+export type BoardPm = { name: string; key: string; pm: BoardNode | null; jobs: BoardJob[] }
 
 /** When an agent's herdr status last changed, for the elapsed time shown beside it. */
 export type Since = { status: string; at: number }

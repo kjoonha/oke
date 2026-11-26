@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/oke-org.svg" alt="Org chart: you talk to the orchestrator; it runs one PM per repository; each PM runs a worker and a reviewer. Assignments flow down, reports flow up.">
+  <img src="docs/oke-org.svg" alt="Org chart: you talk to the orchestrator; it hands each job to the PM you pick; each PM runs a worker and a reviewer. Assignments flow down, reports flow up.">
 </p>
 
 <p align="center">
@@ -24,19 +24,23 @@
 
 <p align="center">
   A Claude Code plugin. You talk to one orchestrator.<br>
-  It gives each repository a PM, and each PM runs a worker and a reviewer in their own panes.<br>
+  You create named PMs (roles); each PM finds where a job's files are, then runs a worker and a reviewer in their own panes.<br>
   Questions and approvals come back to you as popups in the orchestrator's window.
 </p>
 
 ## How it is organised
 
 - **Orchestrator**: the Claude Code session you talk to. It interviews you about a job, asks you to approve plans and merges, and keeps the queue.
-- **PM**: one per repository. It has a planner subagent draft the plan in the background, checks it, starts the worker and the reviewer, and merges and verifies only what the review passed.
+- **PM**: a named role you create (`backend`, `docs`, ...). A PM is only a name: it owns no folders. For every job the orchestrator asks you which PM takes it (every PM plus "New PM"; recommended is the PM you named, else the PM that already worked on the path you said). Each job changes one path, a git checkout or a plain folder. The PM finds it while planning, from your words, its wiki and its places (the paths of its earlier jobs), and asks you when none shows it. A PM's session can read the whole file system, so it can look anywhere; it writes only where the guard below allows. Work across several paths becomes several jobs: the PM splits them off and the orchestrator tells you. Each PM keeps its own wiki (`<wiki_path>/<pm>/`). It has a planner subagent draft the plan in the background, checks it, starts the worker and the reviewer, and merges and verifies only what the review passed.
 - **Worker / reviewer**: each runs in its own pane and git worktree. They write reports. Only the PM merges, through `oke job merge`, and only what the review passed. A hook blocks git commands that publish or destroy work (`push`, `reset --hard`, forced `clean`, `checkout` and branch deletes) in every OKe session.
 - **Messages**: a message to an agent waits in its inbox (`$OKE_HOME/inbox/<agent>/`) and is typed in as soon as that agent's turn ends, even while its background subagents or tasks still run. A PM busy with one job's review therefore still takes the next job.
 - **Checks**: the plan names numbered acceptance criteria (`## 수용 기준`) and one check command (`## 검증 명령`, in backticks). Before any work, `oke baseline <job>` runs the command on the untouched checkout and saves what already fails. The worker checks its work with `oke check <job>`: OKe runs the command, and only failure lines the baseline did not have count as new failures. OKe writes the result into the job's ledger and signs every row with a key (`$OKE_HOME/ledger.key`) no agent may read; a row without a valid signature, typed or copied by hand, does not count. `oke job merge` merges only when the review names the plan's current `criteria_rev` (a hash of the criteria and the command) and the ledger has a passing `oke check` on the reviewed commit. After the merge, `oke job verify <job>` records a pass without running when the merged code is the code the check passed on; when other merges changed main since the check, it lists the files they changed and the PM decides: `--skip "<why>"` when those files cannot change the result (documentation, say), recorded in the ledger with the reason and the files, or `--run` to run the command on main, which undoes the merge on a new failure.
 
 Agents talk through files under `$OKE_HOME` (default `~/.oke`), so a crash loses no state. After a terminal, Claude Code or the whole app dies, `/oke:start` finds the open jobs and asks, per job, whether to **resume**, **hold** (set it aside, keep its worktree and branch) or **archive** it.
+
+A PM, worker or reviewer may Edit or Write only in its own folder under OKe's home (a PM also in its open jobs' folders there; never the files only OKe writes, such as the ledger), OKe's `tmp/`, its own memory folder, and the paths of its open jobs that change something (not research): a git job's worktree (else its checkout), or a folder job's folder without the git repositories below it and links that lead out of it (`oke path-check`). Folder jobs change files in place, with no backup.
+
+PMs: say "add a PM", "rename PM <x>" or "remove PM <x>". A PM with open or held jobs is removed only after you agree to cancel those jobs (its wiki is set aside as `<name>.removed-<time>`); a PM is renamed only while it has none; its finished jobs carry over to the new name. `oke pm list` shows them from a shell.
 
 ## The board
 
@@ -44,12 +48,12 @@ Agents talk through files under `$OKE_HOME` (default `~/.oke`), so a crash loses
 
 ```
 ╭─────────────────────────────────────────────────────────────╮
-│ ▍shop5                                                      │
+│ ▍backend                                                    │
 │                                                             │
 │  · PM done 0m  ▸                                            │
 │                                                             │
 │ ╭─────────────────────────────────────────────────────────╮ │
-│ │ textkit · large  ⏸ on hold                              │ │
+│ │ textkit · shop5 · large  ⏸ on hold                      │ │
 │ │ plan › approve ›  work  › review › merge › verify       │ │
 │ │                                                         │ │
 │ │ – w1 off 0m  ▸                                          │ │
@@ -63,7 +67,7 @@ Agents talk through files under `$OKE_HOME` (default `~/.oke`), so a crash loses
 - Python 3.6 or later (standard library only) and git
 - One place to run the agents:
   - herdr 0.9.5 or later (agents run in herdr panes), or
-  - neither: agents run as background `claude --bg` sessions.
+  - neither: agents run as background `claude --bg` sessions. A background session cannot answer the trust dialog, so open `claude` once in the OKe home (`~/.oke`) and in each git checkout or folder a job works in, and accept it.
 
 ## Install (online)
 
@@ -148,14 +152,14 @@ OKe keeps its files in `~/.oke`. To use another folder, set `OKE_HOME` in the `e
 - `lean_launch`: start PMs, workers and reviewers without your plugins, hooks and MCP servers (`--setting-sources project,local --strict-mcp-config`). Only the herdr hooks, your `PreToolUse` hooks, `permissions.deny` and `env` from your `settings.json` are copied into the agent's `lean-settings.json` (readable only by you; `job archive` deletes it). `permissions.ask` is not copied. This cuts the starting context from about 76k to 40k tokens. Each role also gets only its core tools (`--tools`, about 15k tokens at start). For each job, the PM turns on extra tools with the assignment header's `tools:`, `mcp:` and `plugins:` lines (`oke.py extras` lists them). Set it to `false` if the agents need all your personal settings.
 - `models`: the model of each role (`pm`, `worker`, `reviewer`). Default `opus`.
 - `effort`: the effort level per role (`pm`, `worker`, `reviewer`): `low`, `medium`, `high`, `xhigh` or `max`. With `lean_launch`, a role left out runs at Claude Code's default effort, not at the `effortLevel` of your own settings; without it, children read your settings.
-- `merge_ignore_untracked`: untracked paths in the repository that never block a merge, such as another tool's state folder. Default `[".omc/"]`. Python caches never block either.
+- `merge_ignore_untracked`: untracked paths in the checkout that never block a merge, such as another tool's state folder. Default `[".omc/"]`. Python caches never block either.
 - `interview_threshold`, `interview_max_rounds`: the interview the orchestrator runs when it takes a job. It scores the goal, constraints and success criteria from 0 to 1 and asks one question at a time about the vaguest part, until the ambiguity (`1 - 0.4 goal - 0.3 constraints - 0.3 criteria`) is at or below the threshold. It also stops when you pick "plan now" or it reaches the round limit.
 
 After installing, follow the checks in `docs/work-checklist.md`.
 
 ## Token use
 
-Each agent's mod adds one line per turn (its subagents' turns included) to `usage.csv` in the agent's folder: time, model, input, output, cache read and cache write tokens. The orchestrator writes `$OKE_HOME/usage.csv`. `python oke/bin/oke.py cost [job]` adds them up per job (archived jobs too), per repository PM and for the orchestrator.
+Each agent's mod adds one line per turn (its subagents' turns included) to `usage.csv` in the agent's folder: time, model, input, output, cache read and cache write tokens. The orchestrator writes `$OKE_HOME/usage.csv`. `python oke/bin/oke.py cost [job]` adds them up per job (archived jobs too), per PM and for the orchestrator.
 
 ## Development
 

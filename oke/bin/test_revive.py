@@ -7,7 +7,7 @@ import sys
 import time
 import unittest
 
-from test_oke import AG, AGENT, E, J, OK, SpawnBase, help_ok
+from test_oke import put_pm, AG, AGENT, E, J, OK, SpawnBase, help_ok
 import oke
 import runtime_herdr
 
@@ -31,22 +31,22 @@ class ReviveBase(SpawnBase):
         self.key = oke.repo_key(self.repo)
         self.job("fix-a", "working")
         s = oke.load_state()
-        s["repos"][self.key] = {"pm": {"agent": "pm-toy", "pane": "w1:p3", "session": "s-pm", "seq": 1}}
+        put_pm(s, self.key, {"agent": "pm-toy", "pane": "w1:p3", "session": "s-pm", "seq": 1})
         s["orchestrator"] = {"pane": "w7:p1", "session": "s-o", "cwd": self.repo,
                              "argv": ["--plugin-dir", "X", "--resume", "old", "--model", "opus"]}
         oke.save_state(s)
-        os.makedirs(oke.pm_dir(self.key))
+        os.makedirs(oke.pm_dir(self.pm))
         self.write_pm_assignment()
         self.child_dir = os.path.join(self.home, "jobs", "fix-a", "fix-a-w1")
         os.makedirs(self.child_dir)
         self.write_file(os.path.join(self.child_dir, "assignment.md"),
                         "agent: fix-a-w1\nrole: worker\ncwd: %s\nseq: 2\njob: fix-a\n---\n" % self.repo)
-        oke.write_json_atomic(oke.children_path(self.key), {"fix-a-w1": {
+        oke.write_json_atomic(oke.children_path(self.pm), {"fix-a-w1": {
             "agent": "fix-a-w1", "pane": "w1:p5", "session": "s-w", "seq": 2, "terminal": "term-5",
             "role": "worker", "job": "fix-a"}})
 
     def write_pm_assignment(self):
-        self.write_file(os.path.join(oke.pm_dir(self.key), "assignment.md"),
+        self.write_file(os.path.join(oke.pm_dir(self.pm), "assignment.md"),
                         "agent: pm-toy\nrole: pm\ncwd: %s\nseq: 1\n---\n" % self.repo)
 
     def write_file(self, path, text):
@@ -54,7 +54,7 @@ class ReviveBase(SpawnBase):
             f.write(text)
 
     def child(self):
-        return oke.read_children(self.key)["fix-a-w1"]
+        return oke.read_children(self.pm)["fix-a-w1"]
 
     def events(self):
         p = os.path.join(self.home, "events.log")
@@ -94,17 +94,17 @@ class TestRevive(ReviveBase):
 
     def test_a_reused_pane_id_is_not_closed(self):
         # after a herdr restart the recorded pane id can be a user's new shell
-        children = oke.read_children(self.key)
+        children = oke.read_children(self.pm)
         children["fix-a-w1"]["terminal"] = "term-old"
-        oke.write_json_atomic(oke.children_path(self.key), children)
+        oke.write_json_atomic(oke.children_path(self.pm), children)
         self.revive_scenario(**{"pane get": [J({"pane": {"pane_id": "w1:p5", "terminal_id": "term-user"}})]})
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
         self.assertEqual(self.argv_of("pane", "close"), [])
 
     def test_a_pane_with_no_recorded_terminal_is_not_closed(self):
-        children = oke.read_children(self.key)
+        children = oke.read_children(self.pm)
         children["fix-a-w1"].pop("terminal", None)
-        oke.write_json_atomic(oke.children_path(self.key), children)
+        oke.write_json_atomic(oke.children_path(self.pm), children)
         self.revive_scenario()
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
         self.assertEqual(self.argv_of("pane", "close"), [])
@@ -153,7 +153,7 @@ class TestRevive(ReviveBase):
         original = oke.relaunch
 
         def spy(*a):
-            seen.append(oke.read_children(self.key)["fix-a-w1"]["revives"])
+            seen.append(oke.read_children(self.pm)["fix-a-w1"]["revives"])
             return original(*a)
         oke.relaunch = spy
         try:
@@ -228,9 +228,9 @@ class TestRevive(ReviveBase):
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
 
     def test_an_asked_revive_has_no_limit(self):
-        children = oke.read_children(self.key)
+        children = oke.read_children(self.pm)
         children["fix-a-w1"].update(revives=3, report_mtime=None)
-        oke.write_json_atomic(oke.children_path(self.key), children)
+        oke.write_json_atomic(oke.children_path(self.pm), children)
         self.revive_scenario()
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
 
@@ -312,9 +312,9 @@ class TestRevive(ReviveBase):
 
     def test_new_report_resets_the_death_count(self):
         self.write_file(os.path.join(self.child_dir, "report.md"), "type: waiting\nseq: 2\n---\n")
-        children = oke.read_children(self.key)
+        children = oke.read_children(self.pm)
         children["fix-a-w1"].update(revives=3, report_mtime=1.0)
-        oke.write_json_atomic(oke.children_path(self.key), children)
+        oke.write_json_atomic(oke.children_path(self.pm), children)
         self.revive_scenario()
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
         self.assertEqual(self.child()["revives"], 1)
@@ -353,9 +353,9 @@ class TestRevive(ReviveBase):
         self.assertIn(["pane", "close", "w1:p8"], self.calls())
 
     def test_reset_lets_the_user_resume_after_give_up(self):
-        children = oke.read_children(self.key)
+        children = oke.read_children(self.pm)
         children["fix-a-w1"].update(revives=3, report_mtime=None, gave_up=True)
-        oke.write_json_atomic(oke.children_path(self.key), children)
+        oke.write_json_atomic(oke.children_path(self.pm), children)
         self.revive_scenario()
         self.assertEqual(self.cli("revive", "fix-a-w1", "--reset"), 0)
         self.assertEqual(self.out.strip(), "revived")
@@ -374,14 +374,18 @@ class TestRevive(ReviveBase):
 
     def test_pm_revives_with_its_launch_args(self):
         self.revive_scenario(**{"pane get": [PANE_OK("w1:p3")],
-                                "agent get": [AGENT("working", name="pm-toy", pane="w1:p3", session="s-pm")]})
+                                "pane list": [J({"panes": []})],
+                                "workspace create": [J({"root_pane": {"pane_id": "w9:p1"}})],
+                                "agent get": [AGENT("working", name="pm-toy", pane="w9:p1", session="s-pm")]})
         self.assertEqual(oke.revive("pm-toy"), "revived")
+        # its own workspace, labelled with its name, as `oke place` gives it
+        self.assertIn("--label pm-toy", " ".join(self.argv_of("workspace", "create")[-1]))
         start = started(self.calls())[0]
         self.assertEqual(start[2], "pm-toy")
         self.assertEqual(start[start.index("--resume") + 1], "s-pm")
         self.assertEqual(start[start.index("--model") + 1], "opus")
-        self.assertIn("pm/assignment.md", self.argv_of("agent", "prompt")[0][3])
-        self.assertEqual(oke.load_state()["repos"][self.key]["pm"]["revives"], 1)
+        self.assertIn("pms/pm-toy/assignment.md", self.argv_of("agent", "prompt")[0][3])
+        self.assertEqual(oke.load_state()["pms"][self.pm]["pm"]["revives"], 1)
 
     def test_pm_not_needed_without_open_job(self):
         self.assertEqual(self.cli("job", "phase", "fix-a", "failed"), 0)
@@ -522,19 +526,19 @@ class TestTick(ReviveBase):
 
     def test_all_alive_writes_nothing(self):
         before = (io.open(oke.state_path(), encoding="utf-8").read(),
-                  io.open(oke.children_path(self.key), encoding="utf-8").read())
+                  io.open(oke.children_path(self.pm), encoding="utf-8").read())
         self.tick("w1:p3", [AG("pm-toy", pane="w1:p3", session="s-pm"),
                             AG(None, pane="w7:p1", session="s-o"),
                             AG("fix-a-w1", pane="w1:p5", session="s-w")])
         after = (io.open(oke.state_path(), encoding="utf-8").read(),
-                 io.open(oke.children_path(self.key), encoding="utf-8").read())
+                 io.open(oke.children_path(self.pm), encoding="utf-8").read())
         self.assertEqual(before, after)
         self.assertEqual(self.revived, [])
 
     def test_records_a_child_session_that_spawn_could_not_see(self):
-        children = oke.read_children(self.key)
+        children = oke.read_children(self.pm)
         children["fix-a-w1"]["session"] = None
-        oke.write_json_atomic(oke.children_path(self.key), children)
+        oke.write_json_atomic(oke.children_path(self.pm), children)
         self.tick("w1:p3", [AG("pm-toy", pane="w1:p3", session="s-pm"),
                             AG(None, pane="w7:p1", session="s-o"),
                             AG("fix-a-w1", pane="w1:p5", session="s-new")])
@@ -552,7 +556,7 @@ class TestTick(ReviveBase):
         self.assertIn("gave_up fix-a-w1", again["events"][0])
 
     def test_board_tree(self):
-        self.write_file(os.path.join(oke.pm_dir(self.key), "board.md"), "## 지금\nplanning\n")
+        self.write_file(os.path.join(oke.pm_dir(self.pm), "board.md"), "## 지금\nplanning\n")
         self.write_file(os.path.join(self.child_dir, "board.md"), "## 지금\ncoding\n")
         out = self.tick("w7:p1", [AG(None, pane="w7:p1", session="s-o"),
                                   AG("pm-toy", pane="w1:p3", status="working"),
@@ -692,7 +696,7 @@ class TestApiRetry(ReviveBase):
 
     def test_pm_folder(self):
         self.retry("w1:p3", "--attempt", "1", "--error", "overloaded")
-        self.assertTrue(os.path.exists(os.path.join(oke.pm_dir(self.key), "api-retry.json")))
+        self.assertTrue(os.path.exists(os.path.join(oke.pm_dir(self.pm), "api-retry.json")))
 
     def test_orchestrator_retries_without_a_file(self):
         out = self.retry("w7:p1", "--attempt", "1", "--error", "overloaded")
@@ -774,7 +778,7 @@ class TestSpawnTerminal(ReviveBase):
               "pane get": [J({"pane": {"pane_id": "w1:p9", "terminal_id": "term-9"}})]}
         self.fake(sc)
         self.assertEqual(self.cli("spawn", a, "--split-from", "w1:p3"), 0)
-        self.assertEqual(oke.read_children(self.key)["fix-a-w2"]["terminal"], "term-9")
+        self.assertEqual(oke.read_children(self.pm)["fix-a-w2"]["terminal"], "term-9")
 
 
 class TestLock(ReviveBase):

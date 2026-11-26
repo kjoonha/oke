@@ -59,8 +59,8 @@ KID_TOP, KID_W, KID_H = 470, 160, 118
 
 parts = []
 parts.append('<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" role="img" '
-             'aria-label="OKe org chart: you talk to the orchestrator; it runs one PM per repository; each PM runs a '
-             'worker and a reviewer. Assignments flow down, reports flow up.">' % (W, H, W, H))
+             'aria-label="OKe org chart: you talk to the orchestrator; it hands each job to a PM, a role you name; '
+             'each PM finds the job\'s path and runs a worker and a reviewer. Assignments flow down, reports flow up.">' % (W, H, W, H))
 parts.append("""<style>
 .f{opacity:0;animation:f 1.6s steps(1,end) infinite}@keyframes f{0%{opacity:1}25%{opacity:0}100%{opacity:0}}
 text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#f1eefb}
@@ -105,8 +105,8 @@ parts.append(card("orchestrator", ocx, otop, ow, oh, "orchestrator", "interviews
 parts.append('<text x="%d" y="%d" class="note">your Claude Code session</text>' % (ocx + ow // 2 + 18, otop + 64))
 parts.append('<text x="%d" y="%d" class="note">plans and merges need your OK</text>' % (ocx + ow // 2 + 18, otop + 80))
 for i, (pcx, ptop) in enumerate(PMS):
-    parts.append(card("pm", pcx, ptop, 190, 124, "PM", "repo-%s · plans · merges" % "ab"[i], 1.0, 0.4 * i))
-parts.append('<text x="460" y="374" text-anchor="middle" class="note">one PM per repository</text>')
+    parts.append(card("pm", pcx, ptop, 190, 124, "PM", "%s · plans · merges" % ("backend", "docs")[i], 1.0, 0.4 * i))
+parts.append('<text x="460" y="374" text-anchor="middle" class="note">PMs are roles you name; each finds its jobs\' paths</text>')
 for i, (kcx, role) in enumerate(KIDS):
     sub = "own pane + git worktree" if role == "worker" else "checks the commits"
     parts.append(card(role, kcx, KID_TOP, KID_W, KID_H, role, sub, 0.9, 0.2 * i))

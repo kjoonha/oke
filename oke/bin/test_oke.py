@@ -15,6 +15,21 @@ import oke  # noqa: E402
 import runtime_herdr  # noqa: E402
 
 
+def put_pm(s, key, record):
+    """In state `s`: make record's agent a PM with that record, and give it the jobs whose
+    git key is `key` (tests). A PM left with no job and no record goes."""
+    name = record["agent"]
+    e = s["pms"].setdefault(name, {"pm": {}, "places": []})
+    e["pm"] = record
+    for j in s["jobs"].values():
+        if j.get("git_key") == key:
+            j["pm"] = name
+    for n, other in list(s["pms"].items()):
+        if n != name and not (other.get("pm") or {}).get("agent") \
+                and not any(j.get("pm") == n for j in s["jobs"].values()):
+            del s["pms"][n]
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -92,10 +107,33 @@ class Base(unittest.TestCase):
         """The PM's wiki line for the job, which `job phase done` asks for."""
         self.assertEqual(self.cli("wiki", "log", "--job", name, "--note", "none"), 0, self.err)
 
+    def pm_for(self, path):
+        """Tests that only need some PM get `pm-<folder name>` for a path (the user picks
+        the PM in real use), made if missing."""
+        st = oke.load_state()
+        _, folder, _ = oke.path_facts(str(path))
+        name = "pm-" + oke.slug(os.path.basename(folder.rstrip("/")), 20)
+        if name not in st["pms"]:
+            st["pms"][name] = {"pm": {}, "places": []}
+            oke.save_state(st)
+        return name
+
     def cli(self, *args):
+        args = [str(a) for a in args]
+        # `--repo <path>` in a test: `--pm pm-<folder> --path <path>`
+        if args[:2] == ["job", "new"] and "--repo" in args:
+            i = args.index("--repo")
+            try:
+                pm = self.pm_for(args[i + 1])
+            except ValueError:  # a path job new refuses: some PM, so the path is what fails
+                pm = self.pm_for(self.home)
+            args[i:i + 2] = ["--pm", pm, "--path", args[i + 1]]
+        elif args[:1] == ["wiki"] and "--repo" in args:
+            i = args.index("--repo")
+            args[i:i + 2] = ["--pm", self.pm_for(args[i + 1])]
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            code = oke.main([str(a) for a in args])
+            code = oke.main(args)
         self.out, self.err = out.getvalue(), err.getvalue()
         return code
 
@@ -124,7 +162,7 @@ class TestState(Base):
     def test_first_run_creates_home_and_defaults(self):
         home = os.path.join(self.tmp, "nope")
         os.environ["OKE_HOME"] = home
-        self.assertEqual(oke.load_state(), {"orchestrator": {}, "repos": {}, "jobs": {}})
+        self.assertEqual(oke.load_state(), {"orchestrator": {}, "pms": {}, "jobs": {}})
         self.assertEqual(oke.load_config()["autonomy"], "balanced")
         self.assertTrue(os.path.isdir(home))
 
@@ -180,28 +218,12 @@ class TestState(Base):
         self.assertEqual(len(oke.slug("a" * 40)), 24)
         self.assertEqual(oke.slug("--a--b--"), "a-b")
 
-    def test_wiki_name_from_the_origin_url(self):
-        for url in ("https://github.com/TeamA/api.git", "git@github.com:TeamA/api.git",
-                    "ssh://git@host:22/TeamA/api/", "https://host/group/TeamA/api"):
-            self.assertEqual(oke.wiki_name("/x/api/.git", url), "teama-api")
-        self.assertEqual(oke.wiki_name("/x/my_api/.git", ""), "my-api")
-
-    def test_wiki_folder_moves_from_the_old_name_and_keeps_out_strangers(self):
-        repo = self.git_repo("api")
-        key = oke.repo_key(repo)
+    def test_the_wiki_is_one_folder_per_pm(self):
         root = oke.load_config()["wiki_path"]
-        old = os.path.join(root, oke.repo_name(key))
-        os.makedirs(old)
-        with open(os.path.join(old, "index.md"), "w") as f:
-            f.write("- [Testing](testing.md)\n")
-        path = oke.wiki_dir(key)
-        self.assertEqual(os.path.basename(path), "api")
-        self.assertTrue(os.path.exists(os.path.join(path, "index.md")))
-        self.assertFalse(os.path.exists(old))
-        self.assertEqual(oke.wiki_dir(key), path)  # its own folder, every time
-        other = self.git_repo("other/api")
-        self.assertEqual(os.path.basename(oke.wiki_dir(oke.repo_key(other))), oke.repo_name(oke.repo_key(other)))
-
+        path = oke.wiki_dir("backend")
+        self.assertEqual(os.path.normcase(path), os.path.normcase(os.path.join(root, "backend")))
+        self.assertTrue(os.path.isdir(path))
+        self.assertEqual(oke.wiki_dir("backend"), path)
     def test_size_is_set_while_planning_and_small_merges_without_a_second_ask(self):
         repo = self.git_repo("r")
         for job in ("tiny", "grew", "big"):
@@ -260,7 +282,8 @@ class TestState(Base):
         repo = self.git_repo("r")
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 0)
         info = json.loads(self.out)
-        self.assertEqual(info["repo"], oke.repo_key(repo))
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["git_key"], oke.repo_key(repo))
+        self.assertNotIn("repo", info)
         # seen live: an orchestrator used `repo` (the .git folder) as the PM's cwd
         self.assertEqual(oke.normalize_path(info["path"]), oke.normalize_path(repo))
         # seen live: a PM guessed `main` as the reviewer's base on a `master` repository
@@ -268,9 +291,9 @@ class TestState(Base):
         self.assertEqual(self.cli("status"), 0, self.err)
         self.assertEqual(json.loads(self.out)["jobs"]["fix-a"]["base"], branch)
         self.assertTrue(info["job_dir"].endswith("/jobs/fix-a"))
-        self.assertRegex(info["pm_dir"], r"/repos/r-[0-9a-f]{6}/pm$")
-        self.assertRegex(info["pm_agent"], r"^pm-r-[0-9a-f]{6}$")
-        self.assertTrue(info["wiki"].endswith("/wiki/r"))
+        self.assertTrue(info["pm_dir"].endswith("/pms/pm-r"))
+        self.assertEqual(info["pm_agent"], "pm-r")
+        self.assertTrue(info["wiki"].endswith("/wiki/pm-r"))
         self.assertTrue(info["shared_wiki"].endswith("/wiki/_shared"))
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 1)
         self.assertEqual(self.cli("job", "phase", "fix-a", "nonsense"), 1)
@@ -278,7 +301,7 @@ class TestState(Base):
         self.advance("fix-a", "planning")
         st = oke.load_state()
         self.assertEqual(st["jobs"]["fix-a"]["phase"], "planning")
-        self.assertEqual(st["jobs"]["fix-a"]["repo"], oke.repo_key(repo))
+        self.assertEqual(st["jobs"]["fix-a"]["git_key"], oke.repo_key(repo))
         self.assertTrue(os.path.isdir(os.path.join(self.home, "jobs", "fix-a")))
         os.makedirs(os.path.join(self.home, "jobs", "fix-a", "fix-a-w1"))
         for name in ("lean-settings.json", "report.md"):
@@ -349,7 +372,7 @@ class TestState(Base):
         os.makedirs(folder)
         self.assertEqual(self.cli("job", "new", "calc", "--repo", folder), 0, self.err)
         self.assertTrue(json.loads(self.out)["direct"])
-        self.assertEqual(oke.repo_key(folder), oke.load_state()["jobs"]["calc"]["repo"])
+        self.assertEqual(oke.repo_key(folder), oke.load_state()["jobs"]["calc"]["git_key"])
         self.assertEqual(self.cli("job", "new", "x", "--repo", self.path("missing")), 1)
         self.advance("calc", "working")
         self.assertEqual(self.cli("job", "phase", "calc", "awaiting_merge"), 1)
@@ -394,14 +417,14 @@ class TestCost(Base):
         self.csv("jobs/fix-a/fix-a-w1/usage.csv", "t,sonnet,1,2,3,4", "t,sonnet,10,20,30,40")
         self.csv("jobs/fix-a/fix-a-rv1/usage.csv", "t,opus,100,0,0,0", "broken line")
         self.csv("archive/fix-a-20261122-101010/fix-a-w1/usage.csv", "t,opus,5,5,5,5")
-        self.csv("repos/toy-1/pm/usage.csv", "t,opus,7,7,7,7")
+        self.csv("pms/backend/usage.csv", "t,opus,7,7,7,7")
         self.csv("usage.csv", "t,opus,9,9,9,9")
         self.assertEqual(self.cli("cost"), 0)
         out = json.loads(self.out)
         job = out["jobs/fix-a"]
         self.assertEqual(sorted(job.pop("models")), ["opus", "sonnet"])
         self.assertEqual(job, {"turns": 3, "input": 111, "output": 22, "cache_read": 33, "cache_write": 44})
-        self.assertEqual(out["repos/toy-1"]["turns"], 1)
+        self.assertEqual(out["pms/backend"]["turns"], 1)
         self.assertEqual(out["orchestrator"]["input"], 9)
         self.assertEqual(self.cli("cost", "fix-a"), 0)
         self.assertEqual(sorted(json.loads(self.out)), ["archive/fix-a-20261122-101010", "jobs/fix-a"])
@@ -482,19 +505,27 @@ class SpawnBase(Base):
         Base.setUp(self)
         self.repo = self.git_repo("toy")
         runtime_herdr.DIALOG_POLL = 0
+        self.pm = "pm-toy"
 
     def job(self, name, phase):
         self.assertEqual(self.cli("job", "new", name, "--repo", self.repo), 0)
         self.advance(name, phase)
 
     def assignment(self, agent, role, job=None, seq=1, cwd=None):
+        if role == "pm":  # a PM runs in its own folder and owns the test repository
+            st = oke.load_state()
+            if agent not in st["pms"]:
+                put_pm(st, oke.repo_key(self.repo), {"agent": agent})
+                st["pms"][agent]["pm"] = {}
+                oke.save_state(st)
+            cwd = cwd or oke.pm_dir(agent)
         lines = ["agent: " + agent, "role: " + role, "cwd: " + (cwd or self.repo), "seq: %d" % seq]
         if job:
             lines.append("job: " + job)
         return self.write("asg/%s.md" % agent, "\n".join(lines) + "\n---\n## 목표\n")
 
     def children(self):
-        with io.open(oke.children_path(oke.repo_key(self.repo)), encoding="utf-8") as f:
+        with io.open(oke.children_path(self.pm), encoding="utf-8") as f:
             return json.load(f)
 
     def argv_of(self, *prefix):
@@ -513,7 +544,7 @@ class TestSpawn(SpawnBase):
     def test_spawn_survives_a_children_file_in_list_form(self):
         # live run: a PM rewrote children.json as a list, and the next spawn crashed with TypeError
         self.job("fix-a", "working")
-        oke.write_json_atomic(oke.children_path(oke.repo_key(self.repo)),
+        oke.write_json_atomic(oke.children_path(self.pm),
                               [{"agent": "fix-a-w1", "job": "fix-a", "pane": "w1:p5"}])
         a = self.assignment("fix-a-rv", "reviewer", "fix-a")
         self.fake(spawn_ok())
@@ -563,8 +594,27 @@ class TestSpawn(SpawnBase):
         self.fake(spawn_ok())
         self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
         self.assertEqual(self.argv_of("pane", "split"), [])
-        pm = oke.load_state()["repos"][oke.repo_key(self.repo)]["pm"]
+        pm = oke.load_state()["pms"]["pm-toy"]["pm"]
         self.assertEqual((pm["agent"], pm["pane"], pm["session"]), ("pm-toy", "w1:p9", "s-1"))
+
+    def test_a_pm_removed_while_it_starts_has_its_pane_closed(self):
+        a = self.assignment("pm-toy", "pm")
+        self.fake(dict(spawn_ok(), **{"pane close": [J({"type": "ok"})]}))
+        cls = type(oke.runtime())
+        real = cls.start
+
+        def start(rt, *args, **kw):
+            st = oke.load_state()
+            st["pms"].pop("pm-toy")  # `pm remove` meanwhile
+            oke.save_state(st)
+            return real(rt, *args, **kw)
+        cls.start = start
+        try:
+            self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 1)
+        finally:
+            cls.start = real
+        self.assertIn("was removed while it started: closed it", self.err)
+        self.assertEqual(self.argv_of("pane", "close"), [["pane", "close", "w1:p9"]])
 
     def test_spawn_pm_refuses_an_old_per_job_assignment(self):
         # before slice 3 the PM folder held one job's instruction; it is no standing assignment
@@ -970,7 +1020,7 @@ class TestStatus(SpawnBase):
 
     def set_pm(self, agent="pm-toy", pane="w1:p3", session="s-pm"):
         s = oke.load_state()
-        s["repos"][self.key] = {"pm": {"agent": agent, "pane": pane, "session": session, "seq": 1}}
+        put_pm(s, self.key, {"agent": agent, "pane": pane, "session": session, "seq": 1})
         oke.save_state(s)
 
     def status(self, agents=(), *flags):
@@ -981,7 +1031,7 @@ class TestStatus(SpawnBase):
         return json.loads(self.out) if self.out.strip() else None
 
     def pm_record(self):
-        return oke.load_state()["repos"][self.key]["pm"]
+        return oke.load_state()["pms"][self.pm]["pm"]
 
     def test_outside_herdr(self):
         os.environ.pop("HERDR_ENV", None)
@@ -990,13 +1040,13 @@ class TestStatus(SpawnBase):
         self.assertEqual(self.cli("status"), 0)
         st = json.loads(self.out)
         self.assertEqual(st["herdr"], {"inside": False, "missing": []})
-        self.assertEqual(st["repos"][self.key]["pm"], "unknown")
+        self.assertEqual(st["pms"][self.pm]["pm"], "unknown")
 
     def test_outside_herdr_shows_state_and_never_claims(self):
         os.environ.pop("HERDR_ENV", None)
         self.set_pm()
-        st = self.status([AG(name="pm-toy", pane="w1:p3", session="s-pm", cwd=self.repo)], "--claim")
-        self.assertEqual((st["herdr"]["inside"], st["repos"][self.key]["pm"]), (False, "alive"))
+        st = self.status([AG(name="pm-toy", pane="w1:p3", session="s-pm", cwd=oke.pm_dir(self.pm))], "--claim")
+        self.assertEqual((st["herdr"]["inside"], st["pms"][self.pm]["pm"]), (False, "alive"))
         self.assertIsNone(oke.load_state()["orchestrator"].get("pane"))
 
     def test_missing_commands_reported(self):
@@ -1009,47 +1059,47 @@ class TestStatus(SpawnBase):
 
     def test_pm_found_by_name_after_pane_move(self):
         self.set_pm()
-        st = self.status([AG(name="pm-toy", pane="w9:p1", session="other", cwd=self.repo)])
-        repo = st["repos"][self.key]
+        st = self.status([AG(name="pm-toy", pane="w9:p1", session="other", cwd=oke.pm_dir(self.pm))])
+        repo = st["pms"][self.pm]
         self.assertEqual((repo["pm"], repo["agent"], repo["pane"]), ("alive", "pm-toy", "w9:p1"))
         self.assertEqual(self.pm_record()["pane"], "w9:p1")
 
     def test_status_fills_in_missing_session(self):
         self.set_pm(session=None)
-        self.status([AG(name="pm-toy", pane="w1:p3", session="s-late", cwd=self.repo)])
+        self.status([AG(name="pm-toy", pane="w1:p3", session="s-late", cwd=oke.pm_dir(self.pm))])
         self.assertEqual(self.pm_record()["session"], "s-late")
 
     def test_pm_found_by_pane_after_rename(self):
         self.set_pm()
-        st = self.status([AG(name="renamed", pane="w1:p3", session="other", cwd=self.repo)])
-        self.assertEqual(st["repos"][self.key]["pm"], "alive")
+        st = self.status([AG(name="renamed", pane="w1:p3", session="other", cwd=oke.pm_dir(self.pm))])
+        self.assertEqual(st["pms"][self.pm]["pm"], "alive")
         self.assertEqual(self.pm_record()["agent"], "renamed")
 
     def test_pm_found_by_session(self):
         self.set_pm()
-        st = self.status([AG(name="x", pane="w5:p5", session="s-pm", cwd=self.repo)])
-        self.assertEqual(st["repos"][self.key]["pm"], "alive")
+        st = self.status([AG(name="x", pane="w5:p5", session="s-pm", cwd=oke.pm_dir(self.pm))])
+        self.assertEqual(st["pms"][self.pm]["pm"], "alive")
         self.assertEqual((self.pm_record()["agent"], self.pm_record()["pane"]), ("x", "w5:p5"))
 
     def test_pm_in_other_repo_cwd_is_dead(self):
         self.set_pm()
         other = self.git_repo("other")
         st = self.status([AG(name="pm-toy", pane="w1:p3", session="s-pm", cwd=other)])
-        self.assertEqual(st["repos"][self.key]["pm"], "dead")
+        self.assertEqual(st["pms"][self.pm]["pm"], "dead")
         self.assertEqual(self.pm_record()["pane"], "w1:p3")
 
     def test_pm_missing_is_dead(self):
         self.set_pm()
-        self.assertEqual(self.status([])["repos"][self.key]["pm"], "dead")
+        self.assertEqual(self.status([])["pms"][self.pm]["pm"], "dead")
 
     def test_job_classes(self):
         self.set_pm()
         self.job("j-work", "working")
         self.job("j-merge", "awaiting_merge")
-        oke.write_json_atomic(oke.children_path(self.key), {
+        oke.write_json_atomic(oke.children_path(self.pm), {
             "j-work-w1": {"agent": "j-work-w1", "job": "j-work", "pane": "w2:p1"},
             "j-work-rv": {"agent": "j-work-rv", "job": "j-work", "pane": "w2:p2"}})
-        alive = self.status([AG(name="pm-toy", pane="w1:p3", cwd=self.repo), AG(name="j-work-w1", pane="w2:p1")])
+        alive = self.status([AG(name="pm-toy", pane="w1:p3", cwd=oke.pm_dir(self.pm)), AG(name="j-work-w1", pane="w2:p1")])
         work = alive["jobs"]["j-work"]
         self.assertEqual((work["phase"], work["class"], work["agents"]),
                          ("working", "alive", {"j-work-w1": "alive", "j-work-rv": "dead"}))
@@ -1113,7 +1163,7 @@ class TestCompactHook(SpawnBase):
 
     def test_compact_hook_for_worker(self):
         self.job("fix-a", "working")
-        oke.write_json_atomic(oke.children_path(self.key), {
+        oke.write_json_atomic(oke.children_path(self.pm), {
             "fix-a-w1": {"agent": "fix-a-w1", "job": "fix-a", "pane": "w2:p2", "role": "worker"}})
         os.environ["HERDR_PANE_ID"] = "w2:p2"
         self.assertEqual(self.cli("compact-hook"), 0)
@@ -1123,11 +1173,11 @@ class TestCompactHook(SpawnBase):
 
     def test_compact_hook_for_pm(self):
         s = oke.load_state()
-        s["repos"][self.key] = {"pm": {"agent": "pm-toy", "pane": "w1:p3"}}
+        put_pm(s, self.key, {"agent": "pm-toy", "pane": "w1:p3"})
         oke.save_state(s)
         os.environ["HERDR_PANE_ID"] = "w1:p3"
         self.cli("compact-hook")
-        self.assertIn(oke.pm_dir(self.key).replace("\\", "/") + "/assignment.md", self.out)
+        self.assertIn(oke.pm_dir(self.pm).replace("\\", "/") + "/assignment.md", self.out)
 
     def test_compact_hook_for_orchestrator(self):
         s = oke.load_state()
@@ -1171,16 +1221,17 @@ class TestReviewFixes(SpawnBase):
         self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 1)
         self.assertEqual(self.argv_of("agent", "send-keys"), [])
 
-    def test_pm_trust_refused_for_repo_without_a_job(self):
+    def test_pm_trust_refused_outside_its_folder(self):
         a = self.assignment("pm-toy", "pm")
-        self.fake(trust_scenario(self.repo))
+        self.fake(trust_scenario(self.repo))  # the pane sits in the repository, not the PM folder
         self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 1)
         self.assertEqual(self.argv_of("agent", "send-keys"), [])
 
-    def test_pm_trust_accepted_for_repo_with_a_job(self):
+    def test_pm_trust_accepted_for_its_own_folder(self):
         self.job("fix-a", "planning")
         a = self.assignment("pm-toy", "pm")
-        self.fake(trust_scenario(self.repo))
+        os.makedirs(oke.pm_dir("pm-toy"))
+        self.fake(trust_scenario(oke.pm_dir("pm-toy")))
         self.assertEqual(self.cli("spawn", a, "--pane", "w1:p9"), 0)
         self.assertEqual(len(self.argv_of("agent", "send-keys")), 1)
 
@@ -1292,19 +1343,20 @@ class TestReviewFixes(SpawnBase):
     def test_status_prints_pm_dir_and_session(self):
         key = oke.repo_key(self.repo)
         s = oke.load_state()
-        s["repos"][key] = {"pm": {"agent": "pm-toy", "pane": "w1:p3", "session": "s-pm", "seq": 1}}
+        put_pm(s, key, {"agent": "pm-toy", "pane": "w1:p3", "session": "s-pm", "seq": 1})
         oke.save_state(s)
-        os.makedirs(oke.pm_dir(key))
-        with io.open(os.path.join(oke.pm_dir(key), "assignment.md"), "w", encoding="utf-8") as f:
+        os.makedirs(oke.pm_dir(self.pm))
+        with io.open(os.path.join(oke.pm_dir(self.pm), "assignment.md"), "w", encoding="utf-8") as f:
             f.write(u"agent: pm-toy\nseq: 5\n---\n")
         os.environ["HERDR_ENV"] = "1"
         sc = help_ok()
         sc["agent list"] = [J({"agents": []})]
         self.fake(sc)
         self.assertEqual(self.cli("status"), 0)
-        repo = json.loads(self.out)["repos"][key]
+        repo = json.loads(self.out)["pms"][self.pm]
         self.assertEqual(repo["session"], "s-pm")  # seq is per job now: status.jobs[..].pm_seq
-        self.assertEqual(repo["pm_dir"], oke.pm_dir(key).replace("\\", "/"))
+        self.assertEqual(repo["pm_dir"], oke.pm_dir(self.pm).replace("\\", "/"))
+        self.assertEqual(repo["places"], oke.load_state()["pms"][self.pm]["places"])
 
 
 class TestRepoDir(unittest.TestCase):

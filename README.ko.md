@@ -10,16 +10,22 @@
 
 <p align="center">
   Claude Code 플러그인. 사용자는 orchestrator 한 명과만 대화한다.<br>
-  orchestrator 가 저장소마다 PM 을 두고, PM 이 worker 와 reviewer 를 herdr pane 에 띄워 일을 시킨다.<br>
+  사용자가 이름 붙인 PM (역할) 을 만든다. PM 이 job 의 파일이 어디 있는지 찾고, worker 와 reviewer 를 herdr pane 에 띄워 일을 시킨다.<br>
   질문과 승인은 orchestrator 창의 팝업으로 올라온다.
 </p>
+
+PM 은 사용자가 만드는 역할 (`backend`, `docs` 같은 이름) 이다. PM 은 이름일 뿐 폴더를 맡지 않는다. job 마다 orchestrator 가 어느 PM 에 맡길지 묻는다 (모든 PM 과 "새 PM". 사용자가 이름을 댄 PM, 아니면 사용자가 말한 경로에서 일한 적 있는 PM 을 추천). job 하나는 경로 하나 (git checkout 이나 일반 폴더) 만 바꾼다. 경로는 PM 이 계획하면서 찾는다: 사용자의 말, 자기 wiki, 자기 places (지난 job 들의 경로) 순서로 보고, 어디에도 없으면 사용자에게 묻는다. PM 세션은 파일 시스템 전체를 읽을 수 있어서 어디든 찾아볼 수 있고, 쓰기는 아래의 guard 가 허락하는 곳에만 한다. 여러 경로에 걸친 일은 PM 이 job 을 나누고, orchestrator 가 사용자에게 알린다. wiki 는 PM 마다 하나다 (`<wiki_path>/<pm>/`).
+
+PM, worker, reviewer 는 OKe 홈 안의 자기 폴더 (PM 은 자기 열린 job 의 폴더도. ledger 처럼 OKe 만 쓰는 파일은 제외), OKe 의 `tmp/`, 자기 memory 폴더, 무언가를 바꾸는 열린 job 의 경로 (research 제외) 에만 Edit 나 Write 할 수 있다: git job 은 worktree (없으면 checkout), 폴더 job 은 그 폴더에서 아래의 git 저장소와 밖으로 나가는 링크를 뺀 곳 (`oke path-check`). 폴더 job 은 파일을 그 자리에서 바꾸고 백업은 없다.
+
+PM 관리: "PM 추가", "PM <x> 이름 바꿔", "PM <x> 지워" 라고 말한다. 열린 job 이나 보류 job 이 있는 PM 은 그 job 들을 취소하는 데 동의해야 지운다 (wiki 는 `<name>.removed-<time>` 으로 옮겨 둔다). 이름은 열린 job 이나 보류 job 이 있는 동안에만 못 바꾼다. 끝난 job 은 새 이름을 따라간다. 셸에서는 `oke pm list` 로 본다.
 
 PM 은 계획 초안을 planner subagent 에게 백그라운드로 맡기고, 그것을 검토해 보고한다. agent 에게 가는 메시지는 그 agent 의 inbox (`$OKE_HOME/inbox/<agent>/`) 에서 기다리다가 그 agent 의 턴이 끝나는 즉시 입력된다. 백그라운드 subagent 나 작업이 아직 돌아도 그렇다. 그래서 한 job 의 리뷰를 돌리는 PM 도 다음 job 을 바로 받는다.
 
 ## 필요한 것
 
 - Claude Code 2.1.322 이상 (mod 를 지원하는 버전)
-- herdr 0.9.5 이상 (`herdr agent start / prompt / wait` 가 있어야 한다), 또는 없으면 `claude --bg` 백그라운드 세션
+- herdr 0.9.5 이상 (`herdr agent start / prompt / wait` 가 있어야 한다), 또는 없으면 `claude --bg` 백그라운드 세션. 백그라운드 세션은 신뢰 창에 답하지 못하므로 OKe 홈 (`~/.oke`) 과 job 이 일하는 git 체크아웃이나 폴더마다 한 번 `claude` 를 열어 신뢰를 수락해 둔다
 - Python 3.6 이상 (표준 라이브러리만 쓴다), git
 
 ## 설치 (인터넷 되는 곳)
