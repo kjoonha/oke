@@ -57,7 +57,8 @@ def find_claude(name="claude"):
             m = re.search(r'"%dp0%\\([^"]*claude\.exe)"', f.read(), re.I)
     except (IOError, OSError):
         m = None
-    exe = os.path.join(os.path.dirname(found), m.group(1)) if m else None
+    # the shim writes Windows separators: split on them, so the path holds on any system
+    exe = os.path.join(os.path.dirname(found), *m.group(1).split("\\")) if m else None
     return exe if exe and os.path.isfile(exe) else found
 
 
