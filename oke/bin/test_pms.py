@@ -1309,10 +1309,17 @@ class TestOutputs(PmBase):
         self.assertEqual(self.cli("job", "phase", "look", "done"), 0, self.err)
         self.plan("small", worktree=False)
         self.advance("small", "working")  # it works in the main checkout: its changes are there
+        self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 0, self.err)  # x.txt: from before it
+        st = oke.load_state()
+        st["jobs"]["small"].pop("no_change")
+        st["jobs"]["small"]["output"] = "code"
+        oke.save_state(st)
+        self.write("toy/y.txt", "y\n")
+        self.git(self.repo, "add", "y.txt")  # the job's own change
         self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 1)
-        self.assertIn("changed files: x.txt", self.err)
-        self.git(self.repo, "rm", "-q", "--cached", "x.txt")
-        os.remove(os.path.join(self.repo, "x.txt"))
+        self.assertIn("changed files: y.txt", self.err)
+        self.git(self.repo, "rm", "-q", "--cached", "y.txt")
+        os.remove(os.path.join(self.repo, "y.txt"))
         self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 0, self.err)
 
     def test_a_no_change_job_leaves_no_worktree_behind(self):

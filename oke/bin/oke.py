@@ -4436,6 +4436,10 @@ def job_locked(args):
             info["worked"] = True  # a later re-plan does not undo the edits already made
             if not plan_worktree(args.slug):
                 info["worked_in_main"] = True  # its edits may sit in the main checkout, whatever a re-plan says
+                if "main_before" not in info and info.get("git_key") and not info.get("direct"):
+                    # the user's own edits there before the job started are not the job's change
+                    code, dirty = git_out(native_path(repo_dir(info["git_key"])), "status", "--porcelain", "-uno")
+                    info["main_before"] = [l.strip() for l in dirty.splitlines()] if code == 0 else []
         if args.phase not in ("intake", "planning", "awaiting_approval", "failed"):
             info["approved"] = True  # past its approval once: its path stays
         save_state(state)
@@ -4828,6 +4832,9 @@ def job_changes(job, info):
         code, dirty = git_out(where, "status", "--porcelain", "-uno")
         if code != 0:
             return "git status failed in %s" % where
+        if where == main:  # the main checkout: the user's edits from before the job are not its change
+            before = set(info.get("main_before") or [])
+            dirty = "\n".join(l for l in dirty.splitlines() if l.strip() not in before)
         if dirty:
             # git_out strips the output: the first line lost its leading space
             return "changed files%s: " % (" in the main checkout" if where != cwd else "") + \
