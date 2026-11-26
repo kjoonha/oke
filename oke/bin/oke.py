@@ -4491,6 +4491,9 @@ def job_locked(args):
         info = state["jobs"][args.slug]
         if info.get("size") == "research":
             return fail("job %s is research: it has no size" % args.slug)
+        if args.size == "small" and experiment(info):
+            return fail("job %s is an experiment: it is normal or large (only a worker pane waits for a long "
+                        "run)" % args.slug)
         grows = SIZES.index(args.size) > SIZES.index(info.get("size") or "large")
         if info.get("phase") not in ("intake", "planning", "awaiting_approval") and not (
                 grows and info.get("phase") in ("working", "reviewing")):
@@ -4754,7 +4757,11 @@ def set_output(state, args):
     phase = info.get("phase")
     if not args.no_change:
         if args.output == job_output(info):  # the same output again (every plan records it)
-            print(json.dumps({"job": args.slug, "output": args.output}))
+            out = {"job": args.slug, "output": args.output}
+            if args.output == "result" and info.get("size") == "small":
+                info["size"] = out["size"] = "normal"  # an experiment's run needs a worker pane
+                save_state(state)
+            print(json.dumps(out))
             return 0
         # a replan may change it while nothing was made yet that the other output cannot use
         if phase not in GATE_PHASES or merge_state(args.slug)[0] != "none" \
@@ -4762,8 +4769,11 @@ def set_output(state, args):
             return fail("job %s has worked on its plan (%s): its output stays %s. Report a question: the user "
                         "decides (cancel it and start a new job)" % (args.slug, phase, job_output(info)))
         info["output"] = args.output
+        out = {"job": args.slug, "output": args.output}
+        if args.output == "result" and info.get("size") == "small":
+            info["size"] = out["size"] = "normal"  # an experiment's run needs a worker pane
         save_state(state)
-        print(json.dumps({"job": args.slug, "output": args.output}))
+        print(json.dumps(out))
         return 0
     # the user ends a job that changed nothing: only the orchestrator, on the user's answer
     pane = runtime().whoami()

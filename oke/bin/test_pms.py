@@ -1423,6 +1423,16 @@ class TestOutputs(PmBase):
         self.plan("fix", worktree=False)
         self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 1)
 
+    def test_an_experiment_is_never_small(self):
+        self.assertEqual(self.new("sim", "a", "--path", self.repo), 0, self.err)
+        self.advance("sim", "planning")
+        self.assertEqual(self.cli("job", "size", "sim", "small"), 0, self.err)
+        self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["size"], "normal")
+        self.assertEqual(oke.load_state()["jobs"]["sim"]["size"], "normal")
+        self.assertEqual(self.cli("job", "size", "sim", "small"), 1)
+        self.assertIn("normal or large", self.err)
+
     def test_a_folder_job_ends_with_no_change_on_the_users_word(self):
         notes = self.folder("notes")
         self.assertEqual(self.new("notes", "a", "--path", notes), 0, self.err)

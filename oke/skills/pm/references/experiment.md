@@ -4,7 +4,7 @@
 
 Plan:
 - Record the output while the job plans: `$OKE job output <job> result` (before you report the plan, on every plan and replan; it refuses once the job made something or reached its merge).
-- Size `normal` or `large`, never `small`: a run can take long, and only a worker pane waits for it (the worker skill's long-run rule). A planner's `small`: `$OKE job size <job> normal` and change it in 접근.
+- Size `normal` or `large`, never `small`: a run can take long, and only a worker pane waits for it (the worker skill's long-run rule). `$OKE job output <job> result` raises a `small` job to `normal` (its output then shows `size`): change it in 접근 too.
 - `## worktree` always names branch `oke/<job>`, at every size: the temporary edits must stay out of the main checkout. `$OKE job phase <job> working` refuses an experiment without it.
 - 단위 작업: the temporary edit, the command that runs, and which output files to keep.
 - 수용 기준: what the result has to show, or that the run finished and its outputs answer the question. A run whose outputs show a failure can still meet them when the job asked what happens.
