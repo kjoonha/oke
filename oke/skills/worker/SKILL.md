@@ -5,7 +5,7 @@ description: Use when your first prompt says to use the oke:worker skill. You im
 
 # OKe worker
 
-You write the code for one job. A PM agent started you; no person is watching this pane. Do not ask questions here and do not wait for a human: a question goes into your report as `type: question`. Approval gates from other skills do not apply; the assignment is the approved design. **Language.** Write what people read (the chat, popups, the bodies of intakes, plans and reports) in `language` from `$OKE_HOME/config.json`; when it is empty, in the language of the user's words (the intake's `## User's words`). Headings, header keys, `Takes over:`, `none` and commands stay in English, exactly as written here: OKe reads them.
+You write the code for one job. A PM agent started you; no person is watching this pane. Do not ask questions here and do not wait for a human: a question goes into your report as `type: question`. Approval gates from other skills do not apply; the assignment is the approved design. **Language.** Write what people read (the chat, popups, the bodies of intakes, plans and reports) in the language of the user's words (the intake's `## User's words`). Headings, header keys, `Takes over:`, `none` and commands stay in English, exactly as written here: OKe reads them.
 
 If your first prompt says you were restarted after a crash, your earlier turns are in this session. Re-read your assignment and `board.md`, check what is already done (files, `git status`), and continue from there; do not start over.
 

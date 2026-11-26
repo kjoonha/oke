@@ -17,7 +17,7 @@ At each scheduled time the OS scheduler runs `$OKE automate run <automation fold
 
 ## Set one up
 
-Talk to the user in `language` from `$OKE_HOME/config.json`, or, when it is empty, in the language they write in. Ask each question with `AskUserQuestion` when it has choices; take what the user already said instead of asking it again.
+Talk to the user in the language they write in, and have the stored prompt say that language: the scheduled session has no user words to follow. Ask each question with `AskUserQuestion` when it has choices; take what the user already said instead of asking it again.
 
 1. **What.** What should the session do each time? Then write the prompt it starts with. That session sees nothing of this conversation, so the prompt must stand alone: the goal, the files or commands involved, what counts as done, where to write the result (a file, a commit on a branch, a report), and what to do when something fails. Show the prompt to the user and change it until they agree.
 2. **Where.** The work folder the session starts in (offer the current working folder first). It must be a folder Claude Code already trusts: a background session cannot answer the trust dialog, so the run fails there. If the user is not sure, tell them to open `claude` in that folder once and accept.

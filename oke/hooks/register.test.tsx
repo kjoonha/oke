@@ -1036,12 +1036,12 @@ test('the board names each PM and each job its path', async ($, on) => {
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
   tickRole = 'orchestrator'
   tickBoard = [{ name: 'backend', key: 'backend', pm: null, jobs: [
-    { job: 'fix-a', phase: 'planning', merge: 'none', pending: null, path: 'api', agents: [] }] }]
+    { job: 'fix-a', phase: 'planning', merge: 'none', pending: null, path: 'c:/work/api', agents: [] }] }]
   engine(on, [], [])
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /▍backend/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /fix-a · api/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^c:\/work\/api$/ })).toBeTruthy()  // its own line: a long path is not cut off
   await ui.unmount()
   tickBoard = BOARD
   tickRole = 'worker'

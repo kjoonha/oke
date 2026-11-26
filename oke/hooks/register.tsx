@@ -1492,11 +1492,11 @@ export const register: Register = on => {
           <Box flexDirection="column" borderStyle="round" borderColor={job.pending ? INK.yellow : hurt ? INK.red : INK.lavender} paddingX={1} marginTop={1}>
             <Text>
               <Text bold color={INK.white}>{job.job}</Text>
-              {job.path ? <Text color={INK.dim}>{` · ${job.path}`}</Text> : ''}
               {job.size ? <Text color={INK.dim}>{` · ${job.size}`}</Text> : ''}
               {label ? <Text color={labelColor}>{`  ${label}`}</Text> : ''}
               {job.held ? <Text color={INK.dim}>{'  ⏸ on hold'}</Text> : ''}
             </Text>
+            {job.path ? <Text color={INK.dim} wrap="wrap">{job.path}</Text> : ''}
             <Text>
               {STEPS.flatMap((s, i) => [
                 i ? <Text color={INK.dim}>{' › '}</Text> : '',

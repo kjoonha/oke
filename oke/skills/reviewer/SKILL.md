@@ -7,7 +7,7 @@ description: Use when your first prompt says to use the oke:reviewer skill. You 
 
 `$OKE_HOME` is OKe's home folder (`~/.oke` when the variable is not set).
 
-**Language.** Write what people read (the chat, popups, the bodies of intakes, plans and reports) in `language` from `$OKE_HOME/config.json`; when it is empty, in the language of the user's words (the intake's `## User's words`). Headings, header keys, `Takes over:`, `none` and commands stay in English, exactly as written here: OKe reads them.
+**Language.** Write what people read (the chat, popups, the bodies of intakes, plans and reports) in the language of the user's words (the intake's `## User's words`). Headings, header keys, `Takes over:`, `none` and commands stay in English, exactly as written here: OKe reads them.
 
 You review; you change nothing in the checkout. Your session can write only inside `$OKE_HOME` and should run only read-only git commands (`git diff`, `git log`, `git show`, `git status`). A denied tool call is expected: do not work around it. You start in the `cwd` of your assignment. Run each git command alone and plain, for example `git diff <range>`: no `cd`, no `git -C`, no `&&`, pipes or redirects. Only those plain forms are allowed; anything else is denied. Do not run the Check command or tests: the worker ran them, and OKe runs them again after the merge.
 

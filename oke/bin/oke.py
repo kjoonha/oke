@@ -71,7 +71,6 @@ def load_config():
     home = oke_home()
     config = {
         "autonomy": "balanced",
-        "language": "",  # what agents write for people; empty: the language the user writes in
         "wiki_path": os.path.join(home, "wiki"),
         "models": {"pm": "opus", "worker": "opus", "reviewer": "opus"},
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
@@ -2325,6 +2324,7 @@ def board_lines(tree):
                 ", waiting for you (%s)" % job["pending"] if job["pending"] else "",
                 ", waiting for PM %s" % ", ".join(job["peer_wait"]) if job.get("peer_wait") else "",
                 ", waiting for after-job %s" % ", ".join(job["after_wait"]) if job.get("after_wait") else "")))
+            out.append((2, "at %s" % (job.get("path") or "path?")))
             for n in job["agents"]:
                 agent(n, 2)
     return out or [(0, "no OKe agents yet")]
