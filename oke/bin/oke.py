@@ -2724,7 +2724,39 @@ def cmd_compact_hook(args):
 
 # ---------------------------------------------------------------- job
 
+BRIEF_SECTIONS = ("Workspace", "Approach", "Steps", "Acceptance criteria", "Check command",
+                  "Impact elsewhere", "Questions for the user")
+
+
+def job_brief(job):
+    """The plan as the user reads it before approving: the job's absolute path first, then
+    the plan's main sections, then the plan file."""
+    info = load_state()["jobs"].get(job)
+    if info is None:
+        raise StateError("no job " + job)
+    lines = ["job: %s" % job, "path: %s" % (native_path(info["path"]) if info.get("path") else "path?"), ""]
+    for name in BRIEF_SECTIONS:
+        text = plan_section(job, name)
+        if not text or (name in ("Impact elsewhere", "Questions for the user")
+                        and text.lower().startswith("none")):
+            continue
+        lines += ["## " + name, text, ""]
+    lines.append("plan: %s" % native_path(os.path.join(oke_home(), "jobs", job, "plan.md")))
+    return "\n".join(lines)
+
+
 def cmd_job(args):
+    if args.action == "brief":
+        try:
+            text = job_brief(args.slug)
+        except StateError as e:
+            return fail(str(e))
+        out = getattr(sys.stdout, "buffer", None)
+        if out is not None:
+            out.write((text + "\n").encode("utf-8"))
+        else:
+            print(text)
+        return 0
     if args.action == "phase":
         # only the orchestrator moves a job: a PM's report does (seen live: a PM set its own job
         # done and never reported it, so nobody archived it)
@@ -5557,6 +5589,8 @@ def build_parser():
     new.add_argument("--pm", required=True, help="the PM the user picked")
     new.add_argument("--path", help="the folder the job changes, only when the user said it")
     new.add_argument("--research", action="store_true", help="look and report: no change, no merge")
+    jb = job_sub.add_parser("brief", help="the plan as the user reads it before approving")
+    jb.add_argument("slug")
     jp = job_sub.add_parser("path", help="the PM sets the job's one path while planning")
     jp.add_argument("slug")
     jp.add_argument("path")

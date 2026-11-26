@@ -1334,6 +1334,19 @@ class TestOutputs(PmBase):
                    u"job: small\n---\n## Workspace\nmain checkout\nTakes over: `문서.md`, \"READ ME.md\"\n")
         self.assertEqual(self.cli("job", "phase", "small", "working"), 0, self.err)
 
+    def test_the_brief_shows_the_path_first_and_the_main_sections(self):
+        self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Approach\nsize: small\n## Workspace\nmain checkout\n"
+                   u"Takes over: none\n## Steps\n1. 고친다\n## Acceptance criteria\n1. 통과\n## Check command\n`true`\n"
+                   u"## Impact elsewhere\nnone (nothing)\n## Questions for the user\nnone\n")
+        self.assertEqual(self.cli("job", "brief", "small"), 0, self.err)
+        lines = self.out.splitlines()
+        self.assertEqual(lines[1], "path: " + oke.native_path(oke.load_state()["jobs"]["small"]["path"]))
+        self.assertIn(u"1. 고친다", self.out)
+        self.assertIn("## Check command", self.out)
+        self.assertNotIn("Impact elsewhere", self.out)
+        self.assertTrue(lines[-1].startswith("plan: "))
+
     def test_the_workspace_section(self):
         self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
         self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nmain checkout\nTakes over: a.py, b.py\n")
