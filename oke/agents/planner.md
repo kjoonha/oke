@@ -17,11 +17,12 @@ size: small | normal | large — <one line why>
 output: code | result | files — <one line why> (files: a direct job)
 outside: <what this plan changes that code outside this path may use: APIs, schemas, CLI flags, config keys, file formats, shared services; or none>
 web: <questions that only the web can answer, one per line; or none>
+change: none — <what you checked that shows it>   (only when the job needs no change)
 ---
 <the whole plan.md, in the format below>
 ```
 
-The job needs no change (already done, cannot be reproduced, not needed): start 접근 with `nothing to change:` and what you checked that shows it.
+The job needs no change (already done, cannot be reproduced, not needed): add the `change: none` line to the header, with what you checked that shows it, and write only 접근 (what you checked) below `---`.
 
 Web pages are not yours to read: list what you need under `web:` and plan around the gap; the PM asks a web reader and calls you again with the answers. If the intake is not enough to plan, say what is missing under `## 사용자에게 물을 것` and plan as far as you can.
 
