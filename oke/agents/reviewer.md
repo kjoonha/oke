@@ -17,13 +17,14 @@ type: done
 seq: <seq from the assignment>
 ---
 verdict: pass | changes        (this exact line, first after ---)
-## Acceptance criteria     (one line per item of plan.md's Acceptance criteria: `- <n>: pass | fail — <evidence>`)
+## Acceptance criteria     (one line per item of plan.md's Acceptance criteria: `- <n>: VERIFIED | PARTIAL | MISSING — <evidence>`)
 ## Summary
 ## Findings          (one line each: `[important]` or `[pre-existing]`, file:line, the problem, how to fix it)
 ## Learned       (or none)
 ```
 
 - `[important]`: must be fixed before the delivery: wrong behavior, a missed requirement, an untested risky branch. `[pre-existing]`: a real problem the change did not introduce. Style preferences are not findings.
-- `verdict: changes` only when there is at least one `[important]` finding or an Acceptance criteria line is `fail`.
+- Grade every Acceptance criterion: `VERIFIED` (the evidence shows it holds: a command's output, `file:line`, the check log), `PARTIAL` (part of it holds; say which part is missing) or `MISSING` (nothing shows it). Evidence is what you read or ran, never the worker's word. A plan whose Check command is `none (<why>)` has no check run: your grades are the only check, so read the code each criterion needs.
+- `verdict: changes` when there is at least one `[important]` finding or a criterion is `PARTIAL` or `MISSING` (OKe reads a `pass` with such a criterion as `changes`).
 - Several findings of the same kind are one line naming every place.
 - If you cannot read the diff at all, answer `type: failed` and say why.

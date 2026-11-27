@@ -28,6 +28,26 @@ class PmBase(SpawnBase):
     def new(self, job, pm, *extra):
         return self.cli("job", "new", job, "--pm", pm, *extra)
 
+    def answered(self, job, pm, *extra):
+        """A new job its PM ends as an answer (`job answer`, while it plans)."""
+        self.assertEqual(self.new(job, pm, *extra), 0, self.err)
+        self.assertEqual(self.cli("interview", job, "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
+        self.assertEqual(self.cli("job", "phase", job, "planning"), 0, self.err)
+        self.assertEqual(self.cli("job", "answer", job), 0, self.err)
+
+    def started(self, job, **marks):
+        """An older research job that went to working under an older OKe (no plan to approve then)."""
+        st = oke.load_state()
+        st["jobs"][job].update(phase="working", **marks)
+        oke.save_state(st)
+
+    def old_research(self, job, pm, *extra):
+        """A job an older OKe saved as research (`size: research`): read as an answer."""
+        self.assertEqual(self.new(job, pm, *extra), 0, self.err)
+        st = oke.load_state()
+        st["jobs"][job]["size"] = "research"
+        oke.save_state(st)
+
     def places(self, name):
         return oke.load_state()["pms"][name]["places"]
 
@@ -319,14 +339,14 @@ class TestJobPath(PmBase):
         self.assertIn("calc", self.err)
         self.assertEqual(self.cli("job", "path", "calc2", self.folder("other")), 0, self.err)
 
-    def test_a_research_job_sets_its_path_while_it_works(self):
-        self.assertEqual(self.cli("job", "new", "look", "--pm", "a", "--research"), 0, self.err)
+    def test_an_older_research_job_sets_its_path_while_it_works(self):
+        self.old_research("look", "a")
         self.assertEqual(self.cli("interview", "look", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
-        self.assertEqual(self.cli("job", "phase", "look", "working"), 0, self.err)
+        self.started("look")
         self.assertEqual(self.cli("job", "path", "look", self.repo), 0, self.err)
         self.assertEqual(oke.load_state()["jobs"]["look"]["path"], self.norm(self.repo))
         self.assertEqual(self.cli("job", "path", "look", self.folder("other")), 1)  # set once it works
-        self.assertIn("a research job keeps its path; report a question", self.err)
+        self.assertIn("it keeps its path; report a question", self.err)
         self.assertNotIn("split", self.err)
         self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
         self.advance("fix-a", "working")
@@ -438,6 +458,10 @@ class TestJobPath(PmBase):
         self.assertEqual((info["path"], info["direct"]), (drive.lower() + "/", True))
         self.assertEqual(self.cli("job", "path", "calc", drive + "/"), 0, self.err)
         self.assertTrue(json.loads(self.out)["unchanged"])
+        self.assertEqual(oke.write_areas(oke.load_state(), "pm", "a"), [])  # not before the approval
+        st = oke.load_state()
+        st["jobs"]["calc"].update(phase="working", approved=True)
+        oke.save_state(st)
         self.assertEqual(oke.write_areas(oke.load_state(), "pm", "a"), [{"path": drive.lower() + "/", "direct": True}])
         st = oke.load_state()
         worker = os.path.join(self.home, "jobs", "calc", "calc-w1")
@@ -460,9 +484,12 @@ class TestJobPath(PmBase):
                       self.err)
         self.assertIsNone(oke.load_state()["jobs"]["fix-b"].get("path"))
 
-    def test_a_research_job_ignores_a_taken_branch(self):
-        self.git(self.repo, "branch", "oke/look")  # research never makes a branch
-        self.assertEqual(self.cli("job", "new", "look", "--pm", "a", "--research", "--path", self.repo), 0, self.err)
+    def test_an_answered_job_ignores_a_taken_branch(self):
+        self.git(self.repo, "branch", "oke/look")  # an answer never makes a branch
+        self.answered("look", "a")
+        self.assertEqual(self.cli("job", "path", "look", self.repo), 0, self.err)
+        self.old_research("peek", "a", "--path", self.repo)  # an older research job too
+        self.assertEqual(oke.load_state()["jobs"]["peek"]["path"], self.norm(self.repo))
 
     def test_one_open_direct_job_per_folder_tree(self):
         top = self.folder("top")
@@ -564,8 +591,23 @@ class TestPathCheck(PmBase):
         self.assertEqual(self.new("code", "docs", "--path", self.repo), 0, self.err)
         st = oke.load_state()
         st["pms"]["docs"]["pm"] = {"agent": "docs", "pane": "w1:p3", "session": "s-d"}
+        for name in ("notes", "code"):  # the user approved both plans: their paths may change
+            st["jobs"][name].update(phase="working", approved=True, worked=True)
         oke.save_state(st)
         self.fake({"agent list": [J({"agents": [AG("docs", pane="w1:p3", session="s-d")]})]})
+
+    def test_nothing_changes_before_the_plan_is_approved(self):
+        st = oke.load_state()
+        st["jobs"]["notes"].update(phase="planning", approved=False, worked=False)
+        oke.save_state(st)
+        self.assertFalse(self.check(os.path.join(self.top, "a", "b.md"))["allow"])  # still investigating
+        self.assertTrue(self.check(os.path.join(self.repo, "src", "x.py"))["allow"])  # approved: it may
+        st["jobs"]["notes"]["phase"] = "awaiting_approval"
+        oke.save_state(st)
+        self.assertFalse(self.check(os.path.join(self.top, "a", "b.md"))["allow"])
+        st["jobs"]["notes"].update(phase="planning", approved=True)  # a re-plan after work keeps its area
+        oke.save_state(st)
+        self.assertTrue(self.check(os.path.join(self.top, "a", "b.md"))["allow"])
 
     def check(self, path, pane="w1:p3"):
         self.assertEqual(self.cli("path-check", "--pane", pane, "--path", path), 0, self.err)
@@ -623,9 +665,11 @@ class TestPathCheck(PmBase):
             why = oke.write_problem(st, me, p)
             self.assertIn("report a question to your PM", why)
 
-    def test_a_research_job_has_no_write_area(self):
-        self.assertEqual(self.cli("job", "new", "look", "--pm", "docs", "--research", "--path",
-                                  self.folder("look")), 0, self.err)
+    def test_an_answered_job_has_no_write_area(self):
+        self.answered("look", "docs", "--path", self.folder("look"))
+        st = oke.load_state()
+        st["jobs"]["look"]["approved"] = True  # even past an approval an older OKe gave
+        oke.save_state(st)
         self.assertEqual(oke.write_areas(oke.load_state(), "worker", "docs", "look"), [])
         self.assertFalse(self.check(os.path.join(self.path("look"), "a.md"))["allow"])
 
@@ -864,10 +908,10 @@ class TestPendingStart(PmBase):
         self.write("home/jobs/fix-a/pm/report.md", "type: done\nseq: 2\n---\nthe plan, as answered\n")
         self.assertEqual(self.kinds()["fix-a"]["kind"], "unassigned")  # never work reviewed
 
-    def test_a_curate_start_cut_before_its_assignment_is_unassigned(self):
-        self.assertEqual(self.new("look", "a", "--research"), 0, self.err)
+    def test_an_older_curate_start_cut_before_its_assignment_is_unassigned(self):
+        self.old_research("look", "a")
         self.assertEqual(self.cli("interview", "look", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
-        self.assertEqual(self.cli("job", "phase", "look", "working"), 0, self.err)  # curate.md: phase first
+        self.started("look", start_seq=oke.pm_job_report("look")[0])  # curate.md: phase first, then cut
         item = self.kinds()["look"]
         self.assertEqual(item["kind"], "unassigned")
         self.assertIn("was never written", item["text"])
@@ -880,22 +924,22 @@ class TestPendingStart(PmBase):
         oke.save_state(st)
 
     def test_a_phase_set_after_its_assignment_or_again_marks_nothing(self):
-        self.assertEqual(self.new("look", "a", "--research"), 0, self.err)
+        self.old_research("look", "a")
         self.assertEqual(self.cli("interview", "look", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
         self.research_sent(1, "research")  # "Give the job to the PM": write (step 2), then the phase (step 3)
-        self.assertEqual(self.cli("job", "phase", "look", "working"), 0, self.err)
+        self.started("look")
         self.assertNotIn("look", self.kinds())
         self.write("home/jobs/look/pm/report.md", "type: done\nseq: 1\n---\nfindings\n")
-        self.assertEqual(self.kinds()["look"]["kind"], "report_done")
+        self.assertEqual(self.kinds()["look"]["kind"], "answer")  # an older research job ends as an answer
         self.research_sent(2, "dialog")  # a dialog while working: step 3 sets working again
         self.assertEqual(self.cli("job", "phase", "look", "working"), 0, self.err)
         self.write("home/jobs/look/pm/report.md", "type: done\nseq: 2\n---\nfindings\n")
-        self.assertEqual(self.kinds()["look"]["kind"], "report_done")  # not unassigned
+        self.assertEqual(self.kinds()["look"]["kind"], "answer")  # not unassigned
 
-    def test_research_jobs_are_not_split(self):
-        self.assertEqual(self.new("look", "a", "--research"), 0, self.err)
+    def test_answered_jobs_are_not_split(self):
+        self.answered("look", "a")
         self.assertEqual(self.cli("job", "split", "look", "look-b", "--path", self.folder("b")), 1)
-        self.assertIn("research jobs are not split", self.err)
+        self.assertIn("is an answer: it is not split", self.err)
 
 
 class TestCost(PmBase):
@@ -998,8 +1042,9 @@ class TestOutputs(PmBase):
         self.assertEqual(self.new("notes", "a", "--path", self.folder("notes")), 0, self.err)
         self.assertEqual(self.cli("job", "output", "notes", "result"), 1)  # a folder job hands over files
         self.assertIn("its output is the files", self.err)
-        self.assertEqual(self.new("look", "a", "--research"), 0, self.err)
-        self.assertEqual(self.cli("job", "output", "look", "code"), 1)  # research: its answer
+        self.answered("look", "a")
+        self.assertEqual(self.cli("job", "output", "look", "code"), 1)  # an answer: its answer
+        self.assertIn("is an answer", self.err)
         self.plan("sim")
         self.advance("sim", "working")
         self.assertEqual(self.cli("job", "output", "sim", "code"), 1)  # it stays once it works
@@ -1242,23 +1287,27 @@ class TestOutputs(PmBase):
         self.assertEqual(self.cli("wiki", "log", "--job", "idea", "--note", "none"), 0, self.err)
         self.assertEqual(self.cli("job", "phase", "idea", "done"), 0, self.err)
 
-    def test_clean_removes_through_herdr_the_workspace_found_by_its_path(self):
+    def test_clean_closes_through_herdr_only_the_tab_oke_opened(self):
         self.assertEqual(self.new("sim", "a", "--path", self.repo), 0, self.err)
         self.advance("sim", "planning")
         self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)
         self.plan("sim")
         self.advance("sim", "awaiting_approval")
         self.assertEqual(self.cli("job", "phase", "sim", "working"), 0, self.err)
-        wt = self.worktree("sim")  # stored id w-sim: herdr may give that id to another workspace later
+        wt = self.worktree("sim")  # stored id w-sim: herdr may give that id to another tab later
         self.finished("sim")  # done (its review is not what these tests check)
+        st = oke.load_state()
+        st["jobs"]["sim"]["worktree"]["tabs"] = ["w2:t3"]  # a second tab OKe opened there
+        oke.save_state(st)
         self.assertEqual(self.cli("job", "archive", "sim"), 0, self.err)
-        self.fake({"worktree list": [J({"worktrees": [
-                       {"path": self.repo, "is_linked_worktree": False, "open_workspace_id": "w2"},
-                       {"path": "\\\\?\\" + wt, "is_linked_worktree": True, "open_workspace_id": "w9"}]})],
-                   "worktree remove": [J({})]})
+        self.fake({"pane list": [J({"panes": [
+                       {"pane_id": "w2:p1", "tab_id": "w2:t1", "workspace_id": "w2", "cwd": oke.pm_dir("a")},
+                       {"pane_id": "w2:p5", "tab_id": "w2:t5", "workspace_id": "w2", "cwd": wt},  # the user's
+                       {"pane_id": "w2:p4", "tab_id": "w2:t3", "workspace_id": "w2", "cwd": "\\\\?\\" + wt}]})],
+                   "tab close": [J({"type": "ok"})]})
         self.assertEqual(self.cli("job", "clean", "sim"), 0, self.err)
-        removes = [c for c in self.calls() if c[:2] == ["worktree", "remove"]]
-        self.assertEqual(removes, [["worktree", "remove", "--workspace", "w9", "--force"]])
+        closes = [c for c in self.calls() if c[1:2] == ["close"]]
+        self.assertEqual(closes, [["tab", "close", "w2:t3"]])
         self.assertFalse(os.path.isdir(wt))  # the fake removed nothing: git did
 
     def test_no_change_writes_the_wiki_line_the_pm_left_out(self):

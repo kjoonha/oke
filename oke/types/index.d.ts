@@ -23,8 +23,14 @@ export type BoardJob = {
   agents: BoardNode[]
   /** The ledger: none or delivered (unreadable when its key is lost). */
   deliver: string
-  /** The job size the PM chose: small, normal or large (or research). */
+  /** The job size the PM chose: small, normal or large. */
   size?: string
+  /** The `## User's words` of the job's intake.md, on one line. */
+  words?: string
+  /** Where the job is, in plain words: investigating, planning, awaiting approval, working, ... */
+  step?: string
+  /** The steps still to come, in plain words. */
+  left?: string[]
   /** What the job waits on the user for (`oke pending` kind), null when nothing or deferred. */
   pending: string | null
   /** The user put it on hold (`oke job hold`): nothing runs for it until it is back. */
@@ -34,6 +40,21 @@ export type BoardJob = {
   path?: string
   /** PMs that still owe this job an answer (`oke peer ask`). */
   peer_wait?: string[]
+}
+
+/** A finished job for the board's Done section (`oke tick` `recent`, newest first). */
+export type RecentJob = {
+  job: string
+  /** The PM it was a job of (its board section shows it). */
+  pm: string | null
+  words: string
+  phase: string
+  /** It ended with an answer, changing nothing. */
+  answer: boolean
+  /** The first line of its report's Summary. */
+  result: string
+  /** The branch it handed over for the user to merge, or null. */
+  branch: string | null
 }
 
 /** One PM: its name, its node and its jobs. */
@@ -46,6 +67,7 @@ declare module 'claude-code' {
   interface PluginState {
     oke: {
       board: Shaped<BoardRepo[]>
+      recent: Shaped<RecentJob[]>
       expanded: Shaped<string[]>
       since: Shaped<Record<string, Since>>
       todos: Shaped<Todo[]>

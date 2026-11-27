@@ -16,7 +16,7 @@ If your first prompt says you were restarted after a crash, your earlier turns a
 3. Do the work in `cwd`. Stay inside the assignment's Scope. Do not write outside `cwd`, except your own folder: OKe refuses such an Edit or Write, and a Bash write is up to you. When `cwd` is not a git repository, a git repository below it, or a link that leads out of it, is not yours: never write there, also not with Bash.
 4. If your assignment header says `commit: yes`, commit your work in `cwd` on the current branch. Otherwise leave it uncommitted and say so in the report; the PM commits it (with a worktree, before the review; without one, after the review passes).
 5. Check the work (an experiment, `output: result` in Instruction: never `oke check`, see the last bullet of this step): `python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py" check <job>`. It runs the plan's Check command in `cwd`, compares the failures with what failed before the work started, and records the result in the job's ledger. Do not run the Check command yourself to decide pass or fail. Paste its output into the report.
-   - Exit 0: no new failure.
+   - Exit 0: no new failure. `"result": "none"`: the plan has no Check command (`none (<why>)`); nothing ran, and the review checks each acceptance criterion: say in Check output what you checked yourself.
    - Exit 1: `new` lists the new failure lines (the full output is at `log`). Fix them and check again.
    - Exit 2 with untracked files: `git add` the ones that are part of the work, delete the rest, check again.
    - Other exit 2: it cannot judge (no baseline, the command changed, or it could not run): report `blocked` with the message. Never run `oke baseline` yourself: the PM records it.

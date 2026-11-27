@@ -17,12 +17,12 @@ size: small | normal | large — <one line why>
 output: code | result | files — <one line why> (files: a direct job)
 outside: <what this plan changes that code outside this path may use: APIs, schemas, CLI flags, config keys, file formats, shared services; or none>
 web: <questions that only the web can answer, one per line; or none>
-change: none — <what you checked that shows it>   (only when the job needs no change)
+change: none — <one line why>   (only when nothing is to be changed: the user wants to know something, or the job needs no change)
 ---
 <the whole plan.md, in the format below>
 ```
 
-The job needs no change (already done, cannot be reproduced, not needed): add the `change: none` line to the header, with what you checked that shows it, and write only Approach (what you checked) below `---`.
+Nothing is to be changed: the user wants to know something (investigate, explain, analyze, compare), or the change is already done, cannot be reproduced or is not needed. Add the `change: none` line to the header and write the findings below `---` instead of a plan: the answer to what the user asked, with `file:line` where it helps, and what you checked. A request to find something out and fix it is a change: plan it.
 
 Web pages are not yours to read: list what you need under `web:` and plan around the gap; the PM asks a web reader and calls you again with the answers. If the intake is not enough to plan, say what is missing under `## Questions for the user` and plan as far as you can.
 
@@ -35,12 +35,12 @@ job: <job>
 ## Workspace        (a worktree: `new worktree (branch oke/<job>)`; the intake says the job continues job <A>: `new worktree (branch oke/<job>, from oke/<A>)`; none: `main checkout`, and on the next line `Takes over: none` or `Takes over: <file>, <file>`)
 ## Steps        (ordered list for the worker)
 ## Acceptance criteria        (numbered list: the interview's Success criteria, one checkable line each)
-## Check command        (required: `<one bash command>` in backticks on the first line, then what passing looks like)
+## Check command        (required: `<one bash command>` in backticks on the first line, then what passing looks like; or `none (<why>)` on the first line)
 ## Impact elsewhere    (who was asked, each answer, what changed in the plan, and a job this one must wait for; or none and why)
 ## Questions for the user (or none)
 ```
 
-**Check command.** Use the checkout's own check first: the command a verify skill (`.claude/skills/verify*/SKILL.md`) runs, or the check command its README, CONTRIBUTING or CLAUDE.md names. It is always one bash command line, never a skill, in backticks on the section's first line: `oke baseline` and `oke check` read it from there. The Acceptance criteria and the Check command together give the job's `criteria_rev`: change either after approval and the delivery needs a new check and a new review (and a new baseline when the command changed). Write a new command only when none fits the change, and say why in Approach.
+**Check command.** Use the checkout's own check first: the command a verify skill (`.claude/skills/verify*/SKILL.md`) runs, or the check command its README, CONTRIBUTING or CLAUDE.md names. It is always one bash command line, never a skill, in backticks on the section's first line: `oke baseline` and `oke check` read it from there. The Acceptance criteria and the Check command together give the job's `criteria_rev`: change either after approval and the delivery needs a new check and a new review (and a new baseline when the command changed). Write a new command only when none fits the change, and say why in Approach. When no command can check the change (a document, a prompt, a change with no tests to run), write `none (<why>)` on the first line: there is then no baseline and no check run, and the reviewer's grade of each acceptance criterion is the check, so write every criterion so that reading the change can show it.
 
 **Size.** `small`: one line describes it (a few lines in one or two files, no design choice, an obvious check: a typo, a constant, a config value, a one-line fix). `normal`: a clear change in a few files with no open design question. `large`: everything else; when in doubt, large. A `small` or `normal` job gets one line per section.
 

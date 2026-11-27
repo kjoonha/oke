@@ -135,8 +135,8 @@ class TestRevive(ReviveBase):
         self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
         self.assertEqual(oke.revive("fix-a-w1"), "revived")
         self.assertIsNotNone(self.child()["pane"])
-        # the hold may have closed a herdr worktree's workspace with it: the new pane opens
-        # next to the PM, in the assignment's cwd (the worktree path), not in that workspace
+        # the hold may have closed the worktree's tab with it: the new pane opens
+        # next to the PM, in the assignment's cwd (the worktree path), not in that tab
         split = self.argv_of("pane", "split")[-1]
         self.assertEqual(split[split.index("--pane") + 1], "w1:p3")
         cwd = oke.read_header(os.path.join(oke.oke_home(), "jobs", "fix-a", "fix-a-w1", "assignment.md"))["cwd"]

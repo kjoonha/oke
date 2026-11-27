@@ -286,7 +286,10 @@ class TestBoardAndScreen(BgBase):
                                             "session": "s-1", "role": "worker", "seq": 1}})
         self.fake({"agents --json": [OUT(json.dumps(ROWS))]})
         self.assertEqual(self.cli("board"), 0, self.err)
-        self.assertIn("job fix-a: working", self.out)
+        self.assertIn("To do for you: 0 approvals", self.out)
+        self.assertIn("  job fix-a\n    now: working\n    left: review, delivery\n", self.out)
+        self.assertNotIn("fix-a-w1", self.out)  # agents only on the full board
+        self.assertEqual(self.cli("board", "--full"), 0, self.err)
         self.assertIn("    worker fix-a-w1: working", self.out)
 
     def test_screen_strips_terminal_escapes(self):

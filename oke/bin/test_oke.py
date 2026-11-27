@@ -45,6 +45,10 @@ class Base(unittest.TestCase):
         os.makedirs(self.home)
         self._env = dict(os.environ)
         self._grace = oke.BLOCKED_GRACE
+        self._worktrees = runtime_herdr.WORKTREES_ROOT
+        runtime_herdr.WORKTREES_ROOT = os.path.join(self.tmp, "herdr-worktrees")  # never the real ~/.herdr
+        self._waits = runtime_herdr.CLOSE_WAIT, runtime_herdr.REMOVE_POLL
+        runtime_herdr.CLOSE_WAIT, runtime_herdr.REMOVE_POLL = 0, 0  # a fake pane list never changes
         os.environ["OKE_HOME"] = self.home
         for k in ("HERDR_ENV", "HERDR_PANE_ID", "OKE_HERDR", "FAKE_HERDR_DIR", "OKE_RUNTIME",
                   "OKE_CLAUDE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CONFIG_DIR"):
@@ -55,6 +59,8 @@ class Base(unittest.TestCase):
 
     def tearDown(self):
         oke.BLOCKED_GRACE = self._grace
+        runtime_herdr.WORKTREES_ROOT = self._worktrees
+        runtime_herdr.CLOSE_WAIT, runtime_herdr.REMOVE_POLL = self._waits
         os.environ.clear()
         os.environ.update(self._env)
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -384,13 +390,49 @@ class TestState(Base):
         self.logged("calc")
         self.assertEqual(self.cli("job", "phase", "calc", "done"), 0, self.err)
 
-    def test_research_skips_the_plan_and_the_delivery(self):
+    def test_an_answer_skips_the_plan_and_the_delivery(self):
         repo = self.git_repo("r")
-        self.assertEqual(self.cli("job", "new", "look", "--repo", repo, "--research"), 0, self.err)
-        self.assertEqual(self.cli("job", "phase", "look", "working"), 1)  # the interview first
+        self.assertEqual(self.cli("job", "new", "look", "--repo", repo), 0, self.err)
+        self.assertNotIn("size", json.loads(self.out))  # no kind of job to pick at intake
+        self.assertEqual(self.cli("job", "answer", "look"), 1)  # only while its PM investigates
+        self.assertIn("phase planning", self.err)
         self.assertEqual(self.cli("interview", "look", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
-        self.assertEqual(self.cli("job", "phase", "look", "working"), 0, self.err)
-        self.assertEqual(self.cli("job", "size", "look", "small"), 1)
+        self.assertEqual(self.cli("job", "phase", "look", "planning"), 0, self.err)
+        self.assertEqual(self.cli("job", "answer", "look"), 0, self.err)
+        self.assertEqual(json.loads(self.out), {"job": "look", "answer": True})
+        self.assertEqual(self.cli("job", "answer", "look"), 0, self.err)  # again: no change
+        self.assertTrue(json.loads(self.out)["unchanged"])
+        self.assertEqual(oke.job_output(oke.load_state()["jobs"]["look"]), "result")
+        for refused in (("job", "size", "look", "small"), ("job", "deliver", "look"),
+                        ("job", "phase", "look", "awaiting_approval"), ("job", "phase", "look", "working")):
+            self.assertEqual(self.cli(*refused), 1, refused)
+        self.assertEqual(oke.write_areas(oke.load_state(), "pm", oke.load_state()["jobs"]["look"]["pm"]), [])
+        self.assertEqual(self.cli("job", "phase", "look", "done"), 1)  # the wiki log line first
+        self.logged("look")
+        self.assertEqual(self.cli("job", "phase", "look", "done"), 0, self.err)  # straight from planning
+
+    def test_a_job_past_its_approval_is_no_answer(self):
+        repo = self.git_repo("r")
+        self.assertEqual(self.cli("job", "new", "fix", "--repo", repo), 0, self.err)
+        self.assertEqual(self.cli("interview", "fix", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
+        self.assertEqual(self.cli("job", "phase", "fix", "planning"), 0, self.err)
+        st = oke.load_state()
+        st["jobs"]["fix"]["approved"] = True  # approved once, then planned again
+        oke.save_state(st)
+        self.assertEqual(self.cli("job", "answer", "fix"), 1)
+        self.assertIn("no-change question", self.err)
+        st["jobs"]["fix"].update(approved=False, held=True)
+        oke.save_state(st)
+        self.assertEqual(self.cli("job", "answer", "fix"), 1)
+        self.assertIn("on hold", self.err)
+        self.assertEqual(self.cli("job", "phase", "fix", "done"), 1)  # a plan that is no answer: no shortcut
+
+    def test_an_older_research_job_still_closes_without_a_plan(self):
+        repo = self.git_repo("r")
+        self.assertEqual(self.cli("job", "new", "look", "--repo", repo), 0, self.err)
+        st = oke.load_state()
+        st["jobs"]["look"].update(size="research", phase="working")  # started by an older OKe
+        oke.save_state(st)
         self.assertEqual(self.cli("job", "deliver", "look"), 1)
         self.logged("look")
         self.assertEqual(self.cli("job", "phase", "look", "done"), 0, self.err)
@@ -476,7 +518,7 @@ class TestHerdr(Base):
         self.fake({"agent start --help": [OK], "agent prompt --help": [OK],
                    "agent wait --help": [{"stdout": "", "exit": 2}], "agent read --help": [OK],
                    "agent send-keys --help": [OK], "pane split --help": [OK],
-                   "worktree create --help": [OK]})
+                   "tab create --help": [OK]})
         self.assertEqual(runtime_herdr.missing_commands(), ["agent wait"])
 
 

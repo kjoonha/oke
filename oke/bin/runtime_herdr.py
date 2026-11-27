@@ -5,13 +5,16 @@ below are the plumbing they share. Agent records keep herdr's shape: name, pane_
 agent_status, agent_session, terminal_id.
 """
 import json
+import hashlib
 import io
 import os
+import shutil
+import stat
 import subprocess
 import time
 
 REQUIRED_COMMANDS = ("agent start", "agent prompt", "agent wait", "agent read",
-                     "agent send-keys", "pane split", "worktree create")
+                     "agent send-keys", "pane split", "tab create")
 
 
 def replace_file(src, dst):
@@ -263,6 +266,173 @@ def pane_exists(pane):
         return False
 
 
+WORKTREES_ROOT = os.path.join(os.path.expanduser("~"), ".herdr", "worktrees")
+
+
+CLOSE_WAIT = 10.0  # seconds a closed tab's processes get to leave the worktree folder
+REMOVE_TRIES = 5  # git worktree remove, again while Windows still locks the folder
+REMOVE_POLL = 0.5
+
+
+def norm_path(p):
+    """A path to compare: herdr may answer with a long-path prefix, git with forward
+    slashes, and either may name a symlinked folder by its target."""
+    def bare(q):
+        return q[4:] if q.startswith("\\\\?\\") else q
+    p = bare(os.path.realpath(bare(p)))
+    return os.path.normcase(os.path.abspath(p)).replace("\\", "/").rstrip("/")
+
+
+def path_inside(cwd, want):
+    """Whether `cwd` is `want` (a norm_path) or a folder below it."""
+    cwd = norm_path(cwd) if cwd else None
+    return cwd is not None and (cwd == want or cwd.startswith(want + "/"))
+
+
+def worktree_folder(repo, branch):
+    """~/.herdr/worktrees/<repository folder name>-<hash of its path>/<branch, "/" as "-">:
+    two repositories of one name never share a folder."""
+    name = os.path.basename(os.path.normpath(os.path.abspath(repo))) or "root"  # a drive root has no name
+    tag = hashlib.sha1(norm_path(repo).encode("utf-8")).hexdigest()[:8]
+    return os.path.join(WORKTREES_ROOT, "%s-%s" % (name, tag), branch.replace("/", "-"))
+
+
+def registered(repo, path):
+    """Whether git lists `path` as a worktree of `repo`."""
+    if not repo:
+        return False
+    p = subprocess.Popen(["git", "-C", repo, "worktree", "list", "--porcelain"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    out = p.communicate()[0].decode("utf-8", "replace")
+    want = norm_path(path)
+    return any(norm_path(line[len("worktree "):]) == want
+               for line in out.splitlines() if line.startswith("worktree "))
+
+
+def checkout_of(repo, branch):
+    """The folder of a linked worktree of `repo` that has `branch` checked out (wherever it
+    is: an older OKe made them elsewhere), or None. The main checkout never counts."""
+    p = subprocess.Popen(["git", "-C", repo, "worktree", "list", "--porcelain"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    out = p.communicate()[0].decode("utf-8", "replace")
+    here, first = None, True
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            here, first = line[len("worktree "):], here is None
+        elif line == "branch refs/heads/" + branch and not first and os.path.isdir(here):
+            return os.path.normpath(here)
+    return None
+
+
+def toplevel(path):
+    """The top folder of the git checkout `path` is in (a job's path may be a subfolder)."""
+    p = subprocess.Popen(["git", "-C", path, "rev-parse", "--show-toplevel"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    out = p.communicate()[0].decode("utf-8", "replace").strip()
+    return os.path.normpath(out) if p.returncode == 0 and out else path
+
+
+def git_worktree_add(repo, path, branch, start=None):
+    """Check out `branch` at `path`; a new branch starts at `start` (else HEAD). A failed
+    add leaves no new branch behind: a retry would take it, at HEAD, without `start`."""
+    if os.path.exists(path) and (not os.path.isdir(path) or os.listdir(path)):
+        raise HerdrError("worktree_failed", "folder %s is already there and is not the worktree of %s: "
+                         "move it away first" % (path, branch))
+    exists = subprocess.call(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+    # a folder deleted by hand stays in git's list and blocks the add
+    subprocess.call(["git", "-C", repo, "worktree", "prune"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    args = ["git", "-C", repo, "worktree", "add"] + (
+        [path, branch] if exists else ["-b", branch, path] + ([start] if start else []))
+    p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    err = p.communicate()[1]
+    if p.returncode != 0:
+        if not exists:  # git may have made the branch before the checkout failed
+            subprocess.call(["git", "-C", repo, "worktree", "prune"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.call(["git", "-C", repo, "branch", "-q", "-D", branch],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        raise HerdrError("worktree_failed", err.decode("utf-8", "replace").strip())
+
+
+def wait_closed(wid):
+    """Wait (up to CLOSE_WAIT seconds) until herdr lists no pane of the closed tab or
+    workspace `wid`: a close returns before its shells have let go of their folder."""
+    deadline = time.time() + CLOSE_WAIT
+    while True:
+        try:
+            panes = herdr("pane", "list").get("panes", [])
+        except HerdrError:
+            return
+        if not any(wid in (p.get("tab_id"), p.get("workspace_id")) for p in panes) or time.time() >= deadline:
+            return
+        time.sleep(0.25)
+
+
+LOCKED = ("permission denied", "resource busy", "being used by another process",
+          "directory not empty", "invalid argument")
+
+
+def ours_to_delete(path, repo, was_registered):
+    """Whether OKe may delete what is left of `path` itself: a folder where OKe makes
+    worktrees, or one git listed as a worktree of `repo` when the removal began."""
+    p = norm_path(path)
+    roots = [norm_path(WORKTREES_ROOT)] + ([norm_path(os.path.join(repo, ".claude", "worktrees"))] if repo else [])
+    return was_registered or any(p.startswith(r + "/") for r in roots)
+
+
+def writable_again(func, path, _exc):
+    """shutil.rmtree's onerror: Windows will not delete a read-only file (git makes its
+    object files read-only); clear the bit and try once more. A file still locked stays."""
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
+
+
+def remove_checkout(path, repo, force):
+    """`git worktree remove` of `path`, again for a while when Windows still locks the folder.
+    git deletes the checkout's files and its own record of it even when some file stays
+    locked; from then on git knows no worktree there ("is not a working tree"), and what is
+    left is deleted directly, until it is gone or the tries run out."""
+    import runtime_bg  # it imports this module
+    was_registered = registered(repo, path)
+    by_hand = False
+    for attempt in range(REMOVE_TRIES):
+        if attempt:
+            time.sleep(REMOVE_POLL)
+        if not os.path.isdir(path):
+            if repo:
+                runtime_bg.git_worktree_remove(path, repo, force=force)  # prunes git's list
+            return
+        if not os.path.exists(os.path.join(path, ".git")):
+            if not (attempt or force or was_registered):
+                # not git's leftover from a try here: files nobody said to throw away
+                raise HerdrError("worktree_failed", "%s is no git checkout: not deleted without --force" % path)
+            by_hand = True  # git started and left the rest; it would not touch it again
+        if not by_hand:
+            try:
+                runtime_bg.git_worktree_remove(path, repo, force=force)
+                return
+            except HerdrError as e:
+                text = e.message.lower()
+                if "not a working tree" in text and was_registered:
+                    by_hand = True
+                elif not any(m in text for m in LOCKED):
+                    raise
+                continue
+        if not ours_to_delete(path, repo, was_registered):
+            raise HerdrError("worktree_failed", "%s is no worktree OKe made: not deleted" % path)
+        shutil.rmtree(path, onerror=writable_again)
+        if repo:
+            subprocess.call(["git", "-C", repo, "worktree", "prune"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not os.path.isdir(path):
+            return
+    raise HerdrError("worktree_failed", "could not delete %s: a file in it is still in use" % path)
+
+
 class HerdrRuntime(object):
     """What the OKe domain needs from a runtime, done with herdr panes. A place is a
     herdr pane id. Errors are HerdrError with herdr's own codes."""
@@ -368,28 +538,66 @@ class HerdrRuntime(object):
         return herdr("workspace", "create", "--cwd", repo, "--label", label,
                      "--no-focus")["root_pane"]["pane_id"]
 
-    def worktree_create(self, repo, branch, label, start=None):
-        """Check out `branch` in a new worktree (a new branch starts at `start`, else HEAD).
-        Returns id (to remove it), path, place."""
-        exists = start and subprocess.call(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
-        ws = herdr("worktree", "create", "--cwd", repo, "--branch", branch, "--label", label,
-                   *(["--base", start] if start and not exists else []), "--no-focus")["workspace"]
-        panes = herdr("pane", "list", "--workspace", ws["workspace_id"]).get("panes", [])
-        return {"id": ws["workspace_id"], "path": ws["worktree"]["checkout_path"],
-                "place": panes[0]["pane_id"] if panes else None}
+    def worktree_create(self, repo, branch, label, start=None, near=None):
+        """Check out `branch` in a worktree under ~/.herdr/worktrees/<repo>/ (a new branch
+        starts at `start`, else HEAD; a worktree already there on `branch` is reused) and
+        open a tab for it in the workspace of pane `near` (the PM's), else a new workspace.
+        Returns id (the tab, or the workspace: to close it), path, place (its first pane)."""
+        path = checkout_of(repo, branch)  # reused wherever it is
+        if path is None:
+            path = worktree_folder(toplevel(repo), branch)
+            git_worktree_add(repo, path, branch, start)
+        ws = None
+        if near:
+            try:
+                ws = herdr("pane", "get", near).get("pane", {}).get("workspace_id")
+            except HerdrError as e:
+                if e.code == "herdr_unavailable":
+                    raise
+        if ws:
+            made = herdr("tab", "create", "--workspace", ws, "--cwd", path, "--label", label, "--no-focus")
+            wid = made["tab"]["tab_id"]
+        else:
+            made = herdr("workspace", "create", "--cwd", path, "--label", label, "--no-focus")
+            wid = made["workspace"]["workspace_id"]
+        return {"id": wid, "path": path, "place": made["root_pane"]["pane_id"]}
 
-    def worktree_workspace(self, repo, path):
-        """The open workspace of the worktree checked out at `path`, or None. Asked by path:
-        herdr reuses workspace ids after a restart, so a stored id may be another's now."""
-        def norm(p):
-            p = p[4:] if p.startswith("\\\\?\\") else p  # herdr may answer with a \\?\ path
-            return os.path.normcase(os.path.abspath(p)).replace("\\", "/").rstrip("/")
-        want = norm(path)
-        for wt in herdr("worktree", "list", "--cwd", repo).get("worktrees", []):
-            if wt.get("path") and norm(wt["path"]) == want and wt.get("is_linked_worktree"):
-                return wt.get("open_workspace_id")
-        return None
+    def worktree_places(self, repo, path, own=()):
+        """What to close for the worktree at `path`: the ids in `own` (the tabs and the
+        fallback workspace OKe opened for the job) of the open tabs and workspaces whose panes
+        all sit at or under `path`. Both must hold: a tab the user opened in the worktree is not
+        OKe's, and herdr reuses ids after a restart, so a stored id alone may be another's now.
+        Never a tab with a pane elsewhere: the PM's tab may hold a reviewer split in the
+        worktree."""
+        want = norm_path(path)
+        panes = herdr("pane", "list").get("panes", [])
 
-    def worktree_remove(self, wid, force=False):
-        herdr("worktree", "remove", "--workspace", wid, *(["--force"] if force else []))
+        def groups(key):
+            out = {}
+            for p in panes:
+                if p.get(key):
+                    out.setdefault(p[key], []).append(p)
+            return out
+        found = []
+        for wid, members in sorted(groups("workspace_id").items()):
+            if wid in own and all(path_inside(p.get("cwd"), want) for p in members):
+                found.append(wid)
+        for tid, members in sorted(groups("tab_id").items()):
+            if tid in own and members[0].get("workspace_id") not in found \
+                    and all(path_inside(p.get("cwd"), want) for p in members):
+                found.append(tid)
+        return found
+
+    def worktree_remove(self, wid=None, force=False, path=None, repo=None):
+        """Close tab or workspace `wid` (a tab id has ":t"; one already gone counts as
+        closed), then remove the checkout at `path` (its branch stays). Pass only an id that
+        worktree_places found: herdr closes any id it is given."""
+        if wid:
+            try:
+                herdr("tab" if ":t" in wid else "workspace", "close", wid)
+                wait_closed(wid)
+            except HerdrError as e:
+                if e.code not in ("tab_not_found", "workspace_not_found"):
+                    raise
+        if path and (os.path.isdir(path) or repo):
+            remove_checkout(path, repo, force)

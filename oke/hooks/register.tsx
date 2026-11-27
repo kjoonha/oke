@@ -6,12 +6,14 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { BoardJob, BoardNode, BoardPm, Since, Todo } from '../types'
+import type { BoardJob, BoardNode, BoardPm, RecentJob, Since, Todo } from '../types'
 
 const PANE = 'oke-board'
 const TICK_MS = 10_000
 const UNKNOWN_EVERY = 6 // ticks: a session that is not (yet) an OKe agent is checked every 60 s
 const board = atom({ plugin: 'oke', key: 'board' } as const, [] as BoardPm[], { shape: 'board-3' })
+const recent = atom({ plugin: 'oke', key: 'recent' } as const, [] as RecentJob[], { shape: 'recent-1' })
+// open rows of the board: an agent by its name, a job as `job:<name>`
 const expanded = atom({ plugin: 'oke', key: 'expanded' } as const, [] as string[], { shape: 'expanded-1' })
 const since = atom({ plugin: 'oke', key: 'since' } as const, {} as Record<string, Since>, { shape: 'since-1' })
 const todos = atom({ plugin: 'oke', key: 'todos' } as const, [] as Todo[], { shape: 'todos-1' })
@@ -186,6 +188,7 @@ async function tick($: any) {
         return next
       })
       await update($, board, () => out.board)
+      await update($, recent, () => out.recent ?? [])
       if (role === 'orchestrator') await notifyAsks($, out.board)
     }
   } finally {
@@ -378,6 +381,7 @@ const PENDING: Record<string, string> = {
   failed: 'PM reports a failure',
   silent: 'PM is silent',
   report_done: 'read the PM report',
+  answer: 'read the answer',
   unsent: 'assignment not sent',
   unassigned: 'assignment not written',
   split: 'a PM split a job',
@@ -385,6 +389,25 @@ const PENDING: Record<string, string> = {
 
 /** Pending kinds that wait on the person (the rest the orchestrator handles itself). */
 const ASKS_USER = ['plan', 'question', 'blocked', 'failed']
+/** The board's "To do for you" counts: approvals, and every other decision the person makes. */
+const APPROVALS = ['plan']
+const QUESTIONS = ['question', 'blocked', 'failed', 'peer', 'silent']
+/** Characters of the user's words a folded job shows. */
+const WORDS_SHORT = 100
+
+/** The user's words for a job, cut at WORDS_SHORT unless the job is open. */
+export function jobWords(job: { job: string, words?: string }, full = false): string {
+  const words = job.words || `job ${job.job}`  // no intake yet: its name is all there is
+  return full || words.length <= WORDS_SHORT ? words : `${words.slice(0, WORDS_SHORT).trimEnd()}…`
+}
+
+/** "To do for you: N approvals · N questions" from the board's jobs. */
+export function todoLine(jobs: { pending: string | null, phase: string }[]): string {
+  const open = jobs.filter(j => j.phase !== 'done' && j.phase !== 'failed')
+  const n = (kinds: string[]) => open.filter(j => j.pending && kinds.includes(j.pending)).length
+  const plural = (k: number, word: string) => `${k} ${word}${k === 1 ? '' : 's'}`
+  return `To do for you: ${plural(n(APPROVALS), 'approval')} · ${plural(n(QUESTIONS), 'question')}`
+}
 
 /** Git commands no OKe agent runs, the orchestrator included: OKe hands work over through `oke
  * job deliver` and `oke job pr`, and these lose work or reach other people. `git -C <dir>`, `-c k=v` and
@@ -1301,7 +1324,7 @@ export const register: Register = on => {
           {job.job}
           {job.held
             ? <Text dimColor>{' on hold'}</Text>
-            : <Text color={job.pending ? 'yellow' : 'cyan'}>{` ${job.pending ? 'waiting' : STEPS[step(job)] ?? 'done'}`}</Text>}
+            : <Text color={job.pending ? 'yellow' : 'cyan'}>{` ${job.pending ? 'waiting' : job.step ?? STEPS[step(job)] ?? 'done'}`}</Text>}
           {cost ? <Text dimColor>{` ${usd(cost)}`}</Text> : ''}
           {agentDots(job)}
         </Text>
@@ -1415,10 +1438,11 @@ export const register: Register = on => {
     const tree = await read($, board)
     const open = await read($, expanded)
     const times = await read($, since)
+    const finished = await read($, recent)
     // the orchestrator's own task list: the person watches this session most of the time
     const mine = role === 'orchestrator' ? await read($, todos) : []
     const now = Date.now()
-    if (tree.length === 0 && mine.length === 0) return <Text dimColor>No OKe work yet.</Text>
+    if (tree.length === 0 && mine.length === 0 && finished.length === 0) return <Text dimColor>No OKe work yet.</Text>
 
     // in progress first, each with how it goes (board.md's Now), then planned, then done
     const todoRows = (list: Todo[], now: string[] = []) => TODO_ORDER.flatMap(status =>
@@ -1493,74 +1517,98 @@ export const register: Register = on => {
     }
 
     const cards = []
-    const waiting = tree.flatMap(repo => repo.jobs.filter(j => j.pending))
-    if (waiting.length) {
+    const openJobs = tree.flatMap(repo => repo.jobs.filter(isOpen))
+    // only what the person decides: the orchestrator handles the other queue items itself
+    const waiting = openJobs.filter(j => j.pending && [...APPROVALS, ...QUESTIONS].includes(j.pending))
+    if (openJobs.length || waiting.length) {
       cards.push(
-        <Box flexDirection="column" borderStyle="round" borderColor={INK.yellow} paddingX={1}>
-          <Text bold color={INK.yellow}>{`✦ waiting on you ${waiting.length}`}</Text>
-          {waiting.map(j => <Text>{`▸ ${j.job}: ${PENDING[j.pending as string] ?? j.pending}`}</Text>)}
+        <Box flexDirection="column" borderStyle="round" borderColor={waiting.length ? INK.yellow : INK.dim} paddingX={1}>
+          <Text bold color={waiting.length ? INK.yellow : undefined} dimColor={!waiting.length}>{`✦ ${todoLine(openJobs)}`}</Text>
+          {waiting.map(j => <Text wrap="truncate-end">{`▸ ${jobWords(j)}: ${PENDING[j.pending as string] ?? j.pending}`}</Text>)}
         </Box>,
       )
     }
     if (mine.length) {
       const done = mine.filter(t => t.status === 'completed').length
       cards.push(
-        <Box flexDirection="column" borderStyle="round" borderColor={INK.lavender} paddingX={1} marginTop={waiting.length ? 1 : 0}>
+        <Box flexDirection="column" borderStyle="round" borderColor={INK.lavender} paddingX={1} marginTop={cards.length ? 1 : 0}>
           <Text><Text bold color={INK.lavender}>{`OKe todo ${done}/${mine.length}`}</Text>{progress(mine)}</Text>
           {todoRows(mine)}
         </Box>,
       )
     }
+    const short = (n: BoardNode, job: BoardJob) => (n.agent.startsWith(`${job.job}-`) ? n.agent.slice(job.job.length + 1) : n.agent)
+    // the last jobs done, under their PM (a PM no longer on the board: at the end)
+    const doneCard = (list: RecentJob[]) => (
+      <Box flexDirection="column" marginTop={1}>
+        <Text bold color={INK.green}>{'Done'}</Text>
+        {list.map(r => (
+          <Text wrap="truncate-end" color={r.phase === 'failed' ? INK.red : undefined} dimColor>
+            {`${r.phase === 'failed' ? '✗' : '✓'} ${jobWords(r)}${r.words ? `  ${r.job}` : ''}${r.phase === 'failed' ? ' · stopped' : r.answer ? ' · answered' : ''}`
+              + `${r.result ? ` · ${r.result}` : ''}${r.branch ? ` · branch ${r.branch}` : ''}`}
+          </Text>
+        ))}
+      </Box>
+    )
     for (const repo of tree) {
-      const finished = repo.jobs.filter(j => j.phase === 'done' || j.phase === 'failed')
+      const jobs = repo.jobs.filter(isOpen)
+      const pm = repo.pm
+      const [pmMark, , pmColor] = pm ? STATUS[pm.status] ?? ['·', pm.status, undefined] : ['', '', undefined]
       cards.push(
         <Box flexDirection="column" marginTop={1}>
-          <Text bold color={INK.pink}>{`▍${repo.name}`}</Text>
-          {repo.pm ? <Box flexDirection="column" paddingLeft={1}>{agentBlock(repo.pm, 'PM')}</Box> : []}
+          <Text>
+            <Text bold color={INK.pink}>{`▍${repo.name}`}</Text>
+            {pm ? <Text color={pmColor} dimColor={pm.status === 'idle'}>{` PM${pmMark}`}</Text> : ''}
+          </Text>
+          {pm && !jobs.length ? <Box flexDirection="column" paddingLeft={1}>{agentBlock(pm, 'PM')}</Box> : []}
         </Box>,
       )
-      for (const job of repo.jobs) {
-        if (finished.includes(job)) continue
+      for (const job of jobs) {
+        const key = `job:${job.job}`
+        const isOpenJob = open.includes(key)
         const [label, labelColor] = LEDGER[job.deliver] ?? ['', undefined]
         const at = step(job)
+        const where = job.step ?? STEPS[at] ?? 'done'
+        const left = job.left ?? STEPS.slice(at + 1)
         const peers = job.peer_wait ?? []
-        const wait = peers.length ? `PM ${peers.join(', ')}` : ''
         const hurt = !job.held && job.agents.some(n => n.status === 'dead')
+        const cost = job.agents.reduce((sum, n) => sum + (n.cost ?? 0), 0)
         cards.push(
           <Box flexDirection="column" borderStyle="round" borderColor={job.pending ? INK.yellow : hurt ? INK.red : INK.lavender} paddingX={1} marginTop={1}>
+            <Button key={`open-${key}`} plain onPress={() => toggle(key)}>
+              <Text bold color={INK.white} wrap="wrap">{jobWords(job, isOpenJob)}</Text>
+              <Text dimColor>{`${job.words ? `  ${job.job}` : ''}${isOpenJob ? '  ▾' : '  ▸'}`}</Text>
+            </Button>
             <Text>
-              <Text bold color={INK.white}>{job.job}</Text>
-              {job.size ? <Text color={INK.dim}>{` · ${job.size}`}</Text> : ''}
-              {label ? <Text color={labelColor}>{`  ${label}`}</Text> : ''}
+              <Text dimColor>{'now '}</Text>
+              <Text color={INK.ink} backgroundColor={job.pending ? INK.yellow : INK.cyan} bold>{` ${where} `}</Text>
+              {job.pending && PENDING[job.pending] ? <Text color={INK.yellow}>{` ${PENDING[job.pending]}`}</Text> : ''}
+              {peers.length ? <Text color={INK.yellow} dimColor>{` (wait PM ${peers.join(', ')})`}</Text> : ''}
               {job.held ? <Text color={INK.dim}>{'  ⏸ on hold'}</Text> : ''}
+              {hurt ? <Text color={INK.red}>{'  ✗ stuck'}</Text> : ''}
             </Text>
-            {job.path ? <Text color={INK.dim} wrap="wrap">{job.path}</Text> : ''}
-            <Text>
-              {STEPS.flatMap((s, i) => [
-                i ? <Text color={INK.dim}>{' › '}</Text> : '',
-                <Text
-                  color={i === at ? INK.ink : i < at ? INK.green : undefined}
-                  backgroundColor={i === at ? INK.cyan : undefined}
-                  dimColor={i > at}
-                  bold={i === at}
-                >
-                  {i === at ? ` ${s} ` : s}
-                </Text>,
-                i === at && wait ? <Text color={INK.yellow} dimColor>{` (wait ${wait})`}</Text> : '',
-              ])}
-            </Text>
-            {job.agents.map(n => agentBlock(n, n.agent.startsWith(`${job.job}-`) ? n.agent.slice(job.job.length + 1) : n.agent))}
+            <Text dimColor>{`left ${left.length ? left.join(' › ') : 'nothing'}`}</Text>
+            {isOpenJob
+              ? [
+                  <Text>
+                    {job.size ? <Text color={INK.dim}>{job.size}</Text> : ''}
+                    {label ? <Text color={labelColor}>{`  ${label}`}</Text> : ''}
+                    {cost ? <Text dimColor>{`  ${usd(cost)}`}</Text> : ''}
+                  </Text>,
+                  job.path ? <Text color={INK.dim} wrap="wrap">{job.path}</Text> : '',
+                  ...(pm ? [agentBlock(pm, 'PM')] : []),
+                  ...job.agents.map(n => agentBlock(n, short(n, job))),
+                ]
+              : []}
           </Box>,
         )
       }
-      for (const job of finished) {
-        cards.push(
-          <Text dimColor color={job.phase === 'failed' ? INK.red : undefined}>
-            {`  ${job.phase === 'done' ? '✓' : '✗'} ${job.job} ${job.phase === 'done' ? 'done' : 'failed'}`}
-          </Text>,
-        )
-      }
+      const mineDone = finished.filter(r => r.pm === repo.key)
+      if (mineDone.length) cards.push(doneCard(mineDone))
     }
+    const keys = new Set(tree.map(repo => repo.key))
+    const others = finished.filter(r => !keys.has(r.pm ?? ''))
+    if (others.length) cards.push(doneCard(others))
     return <Box flexDirection="column">{cards}</Box>
   })
 }

@@ -349,8 +349,16 @@ class TestWaitDelivers(InboxBase):
 NL = chr(10)
 
 
+QUESTION_BLOCK = NL.join(["## Questions", "job: add a subtract button", "decide: which sign the button shows",
+                          "options:", "- minus: the button shows -", "- word: the button shows sub", ""])
+
+
 def REPORT(kind, seq):
-    return "type: %s%sseq: %d%s---%s" % (kind, NL, seq, NL, NL)
+    """A PM report in the required form: a `waiting` one names what it waits on, a `question` one
+    asks one question."""
+    on = "on: planner subagent a1%s" % NL if kind == "waiting" else ""
+    body = QUESTION_BLOCK if kind == "question" else ""
+    return "type: %s%sseq: %d%s%s---%s%s" % (kind, NL, seq, NL, on, NL, body)
 
 
 class TestPmWait(InboxBase):
@@ -608,7 +616,7 @@ class TestPmFolderUsers(ReviveBase):
         self.pm_job("fix-a", 4)
         self.fake({"agent list": [J({"agents": []})], "agent start --help": [OK], "agent prompt --help": [OK],
                    "agent wait --help": [OK], "agent read --help": [OK], "agent send-keys --help": [OK],
-                   "pane split --help": [OK], "worktree create --help": [OK]})
+                   "pane split --help": [OK], "tab create --help": [OK]})
         self.assertEqual(self.cli("status"), 0)
         out = json.loads(self.out)
         self.assertEqual(out["jobs"]["fix-a"]["pm_seq"], 4)

@@ -283,9 +283,10 @@ class BgRuntime(object):
                 raise  # already stopped: rm still applies
         run_claude(["rm", place])
 
-    def worktree_create(self, repo, branch, label, start=None):
+    def worktree_create(self, repo, branch, label, start=None, near=None):
         """A worktree inside the repository: a folder in a trusted folder is trusted,
-        so `claude --bg` starts there (measured). A new branch starts at `start` (else HEAD)."""
+        so `claude --bg` starts there (measured). A new branch starts at `start` (else HEAD).
+        `near` is for the herdr runtime: here there are no tabs to place."""
         path = os.path.join(repo, ".claude", "worktrees", "oke-" + label)
         exists = subprocess.call(["git", "-C", repo, "rev-parse", "--verify", "--quiet", branch],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
@@ -311,11 +312,12 @@ class BgRuntime(object):
                 f.write(u"\n%s\n" % line)
         return {"id": path, "path": path, "place": path}
 
-    def worktree_workspace(self, repo, path):
-        return None  # no workspaces: the folder is all there is
+    def worktree_places(self, repo, path, own=()):
+        return []  # no tabs or workspaces: the folder is all there is
 
-    def worktree_remove(self, wid, force=False):
-        git_worktree_remove(wid, force=force)
+    def worktree_remove(self, wid=None, force=False, path=None, repo=None):
+        """The worktree's id is its path: there is nothing to close."""
+        git_worktree_remove(path or wid, repo, force=force)
 
 
 def git_worktree_remove(wid, main=None, force=False):

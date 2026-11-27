@@ -5,7 +5,8 @@ type Run = { argv: readonly string[] }
 
 const BOARD = [{
   name: 'toy', key: 'toy', pm: null,
-  jobs: [{ job: 'calc-sub', phase: 'reviewing', deliver: 'delivered', pending: 'question', size: 'small', agents: [{
+  jobs: [{ job: 'calc-sub', phase: 'reviewing', deliver: 'delivered', pending: 'question', size: 'small',
+    words: 'add a subtract button to the calculator', step: 'reviewing', left: ['delivery'], agents: [{
     agent: 'calc-sub-w1', role: 'worker', status: 'working', pane: 'w7:p9', report: null,
     board: '## Now\nwriting sub', revives: 1, cost: 0.4, todos: [
       { content: 'write sub', status: 'completed' }, { content: 'test sub', status: 'in_progress' },
@@ -17,6 +18,7 @@ const BOARD = [{
 
 let tickRole = 'worker'
 let tickBoard: unknown = BOARD
+let tickRecent: unknown = []
 let answeredNow: string[] = []
 let autoCompact = true
 let contextPercent = 34
@@ -35,7 +37,7 @@ let failCheck = false  // oke path-check prints no JSON
 function answer(args: readonly string[]) {
   if (args[0] === 'tick') {
     if (failTick) return undefined
-    return { role: tickRole, agent: unrecorded ? null : tickRole === 'pm' ? 'pm-toy' : 'calc-sub-w1', folder: tickFolder, home: 'C:/oke', wiki: 'C:/oke/wiki', claude_dir: 'C:/Users/u/.claude', job: 'calc-sub', seq: 2, events: [], events_offset: 0, write_areas: writeAreas, memories: ['C:/Users/u/.claude/projects/x/memory', 'C:/Users/u/.claude/projects/C--repo/memory'], board: tickRole === 'worker' ? null : tickBoard }
+    return { role: tickRole, agent: unrecorded ? null : tickRole === 'pm' ? 'pm-toy' : 'calc-sub-w1', folder: tickFolder, home: 'C:/oke', wiki: 'C:/oke/wiki', claude_dir: 'C:/Users/u/.claude', job: 'calc-sub', seq: 2, events: [], events_offset: 0, write_areas: writeAreas, memories: ['C:/Users/u/.claude/projects/x/memory', 'C:/Users/u/.claude/projects/C--repo/memory'], board: tickRole === 'worker' ? null : tickBoard, recent: tickRecent }
   }
   if (args[0] === 'take-mail') {
     if (args.includes('--give-back')) return { text: null, given_back: 1 }
@@ -225,6 +227,8 @@ test('the board lists an agent and expands its board.md', async ($, on) => {
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
+    expect(await ui.find({ key: 'open-calc-sub-w1' })).toBeFalsy()  // agents show once the job is open
+    await ui.press({ key: 'open-job:calc-sub' })
     expect((await ui.find({ key: 'open-calc-sub-w1' }))?.text).toMatch(/● w1 working .*revived 1x/)
     expect(await ui.find({ type: 'Text', text: /## Now/ })).toBeFalsy()
     expect(await ui.find({ key: 'go-calc-sub-w1' })).toBeFalsy()
@@ -232,27 +236,63 @@ test('the board lists an agent and expands its board.md', async ($, on) => {
     expect(await ui.find({ type: 'Text', text: /## Now/ })).toBeTruthy()
     expect(await ui.find({ key: 'go-calc-sub-w1' })).toBeTruthy()
     await ui.press({ key: 'open-calc-sub-w1' })
+    await ui.press({ key: 'open-job:calc-sub' })
     await ui.unmount()
   }
   tickRole = 'worker'
 })
 
-test('the board puts what waits on the user first and folds finished jobs', async ($, on) => {
+test('the board puts what waits on the user first, then each job in the user words, then the last done', async ($, on) => {
   mock.clock(on)
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
   tickRole = 'orchestrator'
+  const long = 'make the calculator round every result to two decimals, also for division and the square root, and show it'
+  tickRecent = [
+    { job: 'calc-add', pm: 'toy', words: 'add an add button', phase: 'done', answer: false, result: 'the add button works', branch: 'oke/calc-add' },
+    { job: 'why-slow', pm: 'gone', words: 'why is it slow?', phase: 'done', answer: true, result: 'the cache is off', branch: null }]
+  tickBoard = [{ ...BOARD[0], jobs: [...BOARD[0]!.jobs, { job: 'calc-round', phase: 'awaiting_approval', deliver: 'none',
+    pending: 'plan', words: long, step: 'awaiting approval', left: ['your approval', 'work', 'review', 'delivery'], agents: [] }] }]
   engine(on, [], [])
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /waiting on you 1/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /calc-sub: PM asks/ })).toBeTruthy()
+  const all = async () => (await ui.findAll({ type: 'Text' })).map((t: any) => t.text as string)
+  let texts = await all()
+  const at = (re: RegExp) => texts.findIndex((t: string) => re.test(t))
+  expect(at(/To do for you: 1 approval · 1 question$/)).toBe(0)
+  expect(await ui.find({ type: 'Text', text: /▸ add a subtract button to the calculator: PM asks/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^▍toy$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /calc-sub · small\s+delivered ✓/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /plan ›\s*approve\s*›\s*work\s*›\s*review\s*›\s*deliver\s*$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /✓ calc-add done/ })).toBeTruthy()
+  // words first, then where it is, then what is left
+  const sub = at(/^add a subtract button to the calculator$/)
+  expect(sub).toBeGreaterThan(0)
+  expect(texts[sub + 1]).toMatch(/^\s*calc-sub\s+▸$/)
+  expect(texts.slice(sub).find((t: string) => t.startsWith('now '))).toMatch(/^now\s+reviewing\s+PM asks$/)
+  expect(texts.slice(sub).find((t: string) => t.startsWith('left '))).toBe('left delivery')
+  expect(await ui.find({ type: 'Text', text: /left your approval › work › review › delivery/ })).toBeTruthy()
+  // long words fold at 100 characters and open whole
+  expect(await ui.find({ type: 'Text', text: `${long.slice(0, 100).trimEnd()}…` })).toBeTruthy()
+  await ui.press({ key: 'open-job:calc-round' })
+  expect(await ui.find({ type: 'Text', text: long })).toBeTruthy()
+  // size, delivery, cost, PM and agents only once a job is open
+  expect(await ui.find({ type: 'Text', text: /small\s+delivered ✓/ })).toBeFalsy()
+  expect(await ui.find({ key: 'open-calc-sub-w1' })).toBeFalsy()
+  await ui.press({ key: 'open-job:calc-sub' })
+  expect(await ui.find({ type: 'Text', text: /small\s+delivered ✓\s+\$0\.40/ })).toBeTruthy()
+  expect(await ui.find({ key: 'open-calc-sub-w1' })).toBeTruthy()
+  // the last finished jobs, from the archive: words, result, branch; under their PM, a removed PM's last
+  texts = await all()
+  expect(at(/^Done$/)).toBeGreaterThan(at(/calc-sub/))
+  expect(at(/^Done$/)).toBeLessThan(at(/add an add button/))
+  expect(texts.lastIndexOf('Done')).toBeGreaterThan(at(/add an add button/))
+  expect(texts.lastIndexOf('Done')).toBeLessThan(at(/why is it slow/))
+  expect(await ui.find({ type: 'Text', text: '✓ add an add button  calc-add · the add button works · branch oke/calc-add' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '✓ why is it slow?  why-slow · answered · the cache is off' })).toBeTruthy()
   expect(await ui.find({ key: 'open-calc-add-w1' })).toBeFalsy()
+  // no internal words in the frame
+  expect(texts.some((t: string) => /baseline|regression|research|phase|seq/.test(t))).toBe(false)
   await ui.unmount()
+  tickBoard = BOARD
+  tickRecent = []
   tickRole = 'worker'
 })
 
@@ -266,7 +306,7 @@ test('the step line names the PMs a job waits on', async ($, on) => {
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /plan\s*\(wait PM api\)\s*›\s*approve/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /^now\s+plan\s+\(wait PM api\)$/ })).toBeTruthy()
   await ui.unmount()
   tickBoard = BOARD
   tickRole = 'worker'
@@ -284,6 +324,7 @@ test('a held job shows its closed agents as off, like an idle PM, not as dead', 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /on hold/ })).toBeTruthy()
+  await ui.press({ key: 'open-job:calc-sub' })
   expect((await ui.find({ key: 'open-calc-sub-w1' }))?.text).toMatch(/– w1 off/)
   expect(await ui.find({ type: 'Text', text: /✗|dead/ })).toBeFalsy()
   await ui.unmount()
@@ -299,6 +340,8 @@ test('the board marks done, current and open todos apart', async ($, on) => {
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /✓ write sub/ })).toBeFalsy()  // a job's agents show once it is open
+  await ui.press({ key: 'open-job:calc-sub' })
   expect(await ui.find({ type: 'Text', text: /✓ write sub/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /▸ test sub/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /○ docs/ })).toBeTruthy()
@@ -1046,6 +1089,7 @@ test('the board names each PM and each job its path', async ($, on) => {
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /▍backend/ })).toBeTruthy()
+  await ui.press({ key: 'open-job:fix-a' })
   expect(await ui.find({ type: 'Text', text: /^c:\/work\/api$/ })).toBeTruthy()  // its own line: a long path is not cut off
   await ui.unmount()
   tickBoard = BOARD

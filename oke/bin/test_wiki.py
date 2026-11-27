@@ -147,11 +147,16 @@ class TestWiki(SpawnBase):
             with self.assertRaises(ValueError):
                 oke.repo_key(path)
 
-    def test_status_says_direct_and_research_may_look_while_a_direct_job_runs(self):
+    def test_status_says_direct_and_an_answer_may_look_while_a_direct_job_runs(self):
         folder = self.path("plain")
         os.makedirs(folder)
         self.assertEqual(self.cli("job", "new", "calc", "--repo", folder), 0, self.err)
-        self.assertEqual(self.cli("job", "new", "look", "--repo", folder, "--research"), 0, self.err)
+        self.assertEqual(self.cli("job", "new", "look", "--pm", self.pm), 0, self.err)
+        self.assertEqual(self.cli("interview", "look", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
+        self.assertEqual(self.cli("job", "phase", "look", "planning"), 0, self.err)
+        self.assertEqual(self.cli("job", "path", "look", folder), 1)  # a change would overlap the direct job
+        self.assertEqual(self.cli("job", "answer", "look"), 0, self.err)
+        self.assertEqual(self.cli("job", "path", "look", folder), 0, self.err)  # an answer only reads
         os.environ["HERDR_ENV"] = "1"
         os.environ["HERDR_PANE_ID"] = "w7:p1"
         fake = help_ok()
@@ -159,7 +164,7 @@ class TestWiki(SpawnBase):
         self.fake(fake)
         self.assertEqual(self.cli("status"), 0, self.err)
         jobs = json.loads(self.out)["jobs"]
-        self.assertEqual((jobs["calc"]["direct"], jobs["look"]["size"]), (True, "research"))
+        self.assertEqual((jobs["calc"]["direct"], jobs["look"]["output"]), (True, "result"))
 
     def test_the_shared_wiki_catches_git_bash_paths_and_ignores_a_root(self):
         if not oke.os.name == "nt":
@@ -465,7 +470,7 @@ class TestWiki(SpawnBase):
                 return "t1"
 
             def close(self, pane):
-                raise oke.HerdrError("confirmation_required", "worktree group root")
+                raise oke.HerdrError("confirmation_required", "pane refused to close")
         real = oke.runtime
         oke.runtime = lambda *a: Stub()
         try:

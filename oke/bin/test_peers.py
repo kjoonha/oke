@@ -254,6 +254,13 @@ class TestReviewFixes3(PeerBase):
         self.assertEqual(oke.check_pm_once("pm-a", "pm-a"), "report question fix-a")
         self.assertEqual(list(oke.peer_waiting(oke.load_state(), "fix-a")), ["pm-c"])
 
+    def test_a_question_out_of_form_goes_back_while_peers_still_owe_answers(self):
+        self.ask()
+        self.pm_job("fix-a", 1, "type: question\nseq: 1\n---\n## Questions\nblue or red?\n")
+        self.fake({"agent get": [AGENT("idle")]})
+        out = oke.check_pm_once("pm-a", "pm-a")
+        self.assertTrue(out.startswith("?bad_report fix-a its Questions section holds no question"), out)
+
     def test_after_the_plan_report_a_late_answer_is_logged_and_mailed(self):
         from test_slice3 import REPORT
         self.ask()
@@ -317,6 +324,12 @@ class TestReviewFixes5(PeerBase):
         self.pm_job("fix-a", 1, REPORT("question", 1))
         item = self.item()
         self.assertEqual((item["kind"], item["peers"]), ("question", ["pm-c"]))
+
+    def test_a_question_out_of_form_still_shows_the_pms_to_rule_on(self):
+        oke.peer_nudge("pm-c", "fix-a")
+        self.pm_job("fix-a", 1, "type: question\nseq: 1\n---\n## Questions\nblue or red?\n")
+        item = self.item()
+        self.assertEqual((item["kind"], item["peers"]), ("peer", ["pm-c"]))  # never lost in the queue
 
     def test_status_keeps_a_pm_being_ruled_on_out_of_no_answer(self):
         oke.peer_nudge("pm-c", "fix-a")

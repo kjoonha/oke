@@ -6,7 +6,7 @@
 
 How to change a page: `$OKE wiki read <page> --job <job>` prints a JSON line with `base`, then the page. Write the whole new page to a file in your folder and run `$OKE wiki write <page> --job <job> --from <file> --base <base> --note "<what changed>"` (`--base new` for a new page). A refused write says why: fix that and write again.
 
-Write a fact only when this job's checked work shows it (`oke wiki write --job` refuses before the job is delivered, or the review of a job with no code to deliver (a folder job, an experiment) passed; research may write; a job you will ask to end with no change gets only its `wiki log` line, before the question). Each line is one rule plus one clause of why, not a story:
+Write a fact only when this job's checked work shows it (`oke wiki write --job` refuses before the job is delivered, or the review of a job with no code to deliver (a folder job, an experiment) passed; an answered job (`job answer`) may write; a job you will ask to end with no change gets only its `wiki log` line, before the question). Each line is one rule plus one clause of why, not a story:
 
 - Keep exact names, commands, flags, paths (name the folder or checkout a fact is about: the next planner finds jobs' paths here) and numbers: a rule made vague teaches nothing.
 - No job names, dates, ticket numbers or quotes of the user.

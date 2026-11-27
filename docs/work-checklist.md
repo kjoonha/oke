@@ -16,7 +16,7 @@
   - 실패하면 실패한 테스트 이름만 기억해 온다. `git` 이 없거나 오래된 경우 저장소 관련 테스트가 실패한다.
 - [ ] herdr pane 안에서 `echo $HERDR_ENV` 가 `1`
 - [ ] 아래 7개가 모두 도움말을 출력한다 (오류 없이). 하나라도 없으면 herdr 를 올려야 한다.
-  - `herdr agent start --help`, `herdr agent prompt --help`, `herdr agent wait --help`, `herdr agent read --help`, `herdr agent send-keys --help`, `herdr pane split --help`, `herdr worktree create --help`
+  - `herdr agent start --help`, `herdr agent prompt --help`, `herdr agent wait --help`, `herdr agent read --help`, `herdr agent send-keys --help`, `herdr pane split --help`, `herdr tab create --help`
 - [ ] `cd ~ && pwd -P` 와 `echo $HOME` 이 같은가. 다르면 home 이 symlink 다. 이때 reviewer 가 report.md 를 못 쓰면 ("보고 없이 쉼" 두 번) 그 사실을 기억해 온다.
 - [ ] `python3 -c "import sys; print(sys.getfilesystemencoding())"` 가 `utf-8` 인가. `ascii` 면 저장소 경로와 job 내용에 한글을 쓰지 않는다 (또는 `setenv LANG en_US.UTF-8`).
 - [ ] 단위 테스트에서 symlink 테스트 2개가 skip 되지 않고 통과하는가 (개인 PC Windows 에서는 skip 됨).
@@ -53,9 +53,9 @@ orchestrator 에게 지시: `~/oke-toy 저장소에 sub(a, b) 함수와 unittest
 | 시점 | 확인 |
 |---|---|
 | 접수 뒤 | - [ ] 사이드바에 `toy` agent 가 뜬다 (자기 이름의 workspace). 신뢰 창에서 멈추지 않는다 |
-| 계획 뒤 | - [ ] 계획 승인 팝업에 job 의 경로 (`~/oke-toy`) 가 나오고 미리보기에 검증 명령이 있다 |
+| 계획 뒤 | - [ ] 계획 승인 팝업에 job 의 경로 (`~/oke-toy`) 와 "checked by: `python3 -m unittest`" 가 나오고 미리보기에 검증 명령이 있다. 보드 맨 위가 `To do for you: 1 approval · 0 questions` 이다 |
 | 승인 뒤 | - [ ] worker (`<job>-w1`) 가 뜨고, 끝나면 reviewer (`<job>-rv`) 가 뜬다 |
-| 리뷰 뒤 | - [ ] orchestrator 가 브랜치 `oke/<job>` 와 merge 명령을 알려 준다. `~/.oke/jobs/<job>/<job>-rv/report.md` 에 `verdict:` 가 있다 |
+| 리뷰 뒤 | - [ ] orchestrator 가 브랜치 `oke/<job>` 와 merge 명령을 알려 준다. `~/.oke/jobs/<job>/<job>-rv/report.md` 에 `verdict:` 가 있고, 수용 기준마다 `VERIFIED` 와 근거가 있다 |
 | 끝난 뒤 | - [ ] `git -C ~/oke-toy log --oneline oke/<job>` 에 새 commit (main 은 그대로), `~/.oke/wiki/toy/log.md` 에 한 줄, `~/.oke/archive/` 에 job 폴더 |
 
 멈추는 경우의 확인:
@@ -63,19 +63,26 @@ orchestrator 에게 지시: `~/oke-toy 저장소에 sub(a, b) 함수와 unittest
 - [ ] agent 가 "보고 없이 쉼" 으로 두 번 올라오면: 그 pane 의 화면에 API 오류가 있는지 본다. 있으면 서버 문제이고 OKe 문제가 아니다 (자동 부활은 다음 조각).
 - [ ] tcsh 에서 pane 에 입력된 시작 명령이 깨져 보이면 그 사실만 기억해 온다.
 
+## 5-1. 질문 하나
+
+orchestrator 에게: `~/oke-toy 의 add 는 음수도 되나?`
+
+- [ ] 일반 job 으로 접수된다 (조사 job 을 따로 묻지 않는다). PM 이 읽기만 하고 답한다: 계획 승인 팝업, worktree, worker, reviewer 가 없다
+- [ ] orchestrator 가 답을 알려 주고 job 을 끝낸다. 보드의 "Done" 에 사용자가 한 말과 `answered` 가 나온다
+- [ ] `git -C ~/oke-toy status --short` 가 비어 있다
+
 ## 6. 끊김
 
 - [ ] 5장을 다시 시작해 worker 가 도는 중에 PM pane 을 닫는다. orchestrator 에서 `/oke:start` 를 다시 실행한다.
   - 기대: 그 job 에 대해 "이어 하기 / 보관 / 그대로 둠" 팝업. "이어 하기" 를 고르면 PM 이 새 pane 에 다시 뜬다.
   - 개인 PC 에서는 PM 프로세스를 강제 종료한 뒤 "이어 하기" 로 PM 이 같은 세션으로 새 pane 에 돌아오는 것까지 확인했다.
-  - PM pane 이 worktree 묶음의 뿌리면 herdr 가 닫기를 거부한다. 그 경우 pane 안의 claude 를 종료시켜 시험한다.
   - `conservative` 모드는 개인 PC 에서 팝업 경로까지 확인했다. 동작은 하지만 agent 가 명령을 `&&` 나 `|` 로 엮을 때마다 팝업이 떠서 느리다.
 
 ## 7. job 두 개 동시에 (조각 3)
 
 5장이 끝난 저장소에 job 두 개를 연달아 준다: "`~/oke-toy 에 mul(a, b) 함수를 추가해줘`", "`~/oke-toy 에 div(a, b) 함수를 추가해줘`" (같은 `calc.py` 를 고치므로 두 번째를 merge 하면 충돌이 날 수 있다). 경로를 말했으므로 PM 을 묻는 팝업에서는 `toy` 가 추천으로 맨 위에 있다.
 
-- [ ] PM 은 `toy` 한 명만 뜨고, worktree 가 job 마다 하나씩 생긴다
+- [ ] PM 은 `toy` 한 명만 뜨고, worktree 가 job 마다 하나씩 생겨 PM 의 workspace 안에 job 이름의 탭으로 열린다
 - [ ] 계획 승인은 팝업 하나에 job 마다 탭 하나로 묶여 뜨고 (최대 4개), job 하나만 보류할 수 있다. 남은 건 수를 한 줄로 알린다
 - [ ] 두 job 이 각자 브랜치로 끝나고 main 은 그대로다. 첫 브랜치를 merge 한 뒤에도 두 번째 job 이 아직 deliver 전이면, deliver 가 rebase 하고 충돌이면 worker 가 풀고 다시 리뷰받는다
 - [ ] `~/.oke/inbox/<agent>/read/` 에 배달된 메시지가 남아 있다 (수신함 배달은 `oke wait` 가 한다. mod 가 없어도 된다)
