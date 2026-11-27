@@ -479,6 +479,24 @@ class TestRuntimeCommands(SpawnBase):
         self.assertEqual(self.closes(), [])  # the PM's workspace stays
         self.assertFalse(os.path.exists(wt))
 
+    def test_a_tab_herdr_lost_is_never_oke_s_again(self):
+        self.job("fix-a", "working")
+        self.pm_pane("w1:p3")
+        self.fake({"pane get": [self.PM_PANE], "tab create": [self.TAB]})
+        self.assertEqual(self.cli("worktree", "fix-a"), 0, self.err)
+        wt = self.wt_path("fix-a")
+        rt = runtime_herdr.HerdrRuntime()
+        self.fake({"pane list": [self.panes(("w1:t4", wt))]})
+        oke.forget_gone_tabs(rt)  # still there: kept
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["worktree"]["tabs"], ["w1:t4"])
+        self.fake({"pane list": [self.panes()]})  # herdr restarted: no w1:t4
+        oke.forget_gone_tabs(rt)
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["worktree"]["tabs"], [])
+        # the user opens a tab in the checkout and herdr gives it w1:t4: OKe leaves it open
+        self.fake({"pane list": [self.panes(("w1:t4", wt))], "tab close": [J({})]})
+        self.assertEqual(self.cli("worktree", "--remove", "w1:t4", "--job", "fix-a"), 0, self.err)
+        self.assertEqual(self.closes(), [])
+
     def test_herdr_refusal_is_exit_1(self):
         self.fake({"agent focus": [E("agent_not_found")]})
         self.assertEqual(self.cli("attach", "nobody"), 1)

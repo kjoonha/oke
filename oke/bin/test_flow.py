@@ -7,6 +7,7 @@ import os
 import re
 import time
 import unittest
+from contextlib import redirect_stdout
 
 from test_oke import AGENT
 from test_slice3 import InboxBase, REPORT, S3Base, NL
@@ -124,7 +125,7 @@ class TestWaitingOn(FlowWait):
         oke.write_json_atomic(oke.stuck_path(), seen)
         self.assertTrue(self.wait().startswith("stuck_wait fix-a"))
 
-    def test_a_new_report_starts_the_grace_again(self):
+    def test_the_same_stuck_wait_rewritten_keeps_its_grace(self):
         oke.STUCK_GRACE = 60
         self.child(2, "done")
         self.pm_job("fix-a", 2, WAITING(2, "fix-a-w1"))
@@ -134,11 +135,38 @@ class TestWaitingOn(FlowWait):
         seen["fix-a"]["since"] -= 61
         oke.write_json_atomic(oke.stuck_path(), seen)
         report = os.path.join(self.home, "jobs", "fix-a", "pm", "report.md")
-        os.utime(report, (time.time() + 5, time.time() + 5))  # the PM wrote its report again
+        os.utime(report, (time.time() + 5, time.time() + 5))  # the PM wrote the same wait again
+        self.assertTrue(self.wait().startswith("stuck_wait fix-a"))
+        self.pm_job("fix-a", 2, WAITING(2, "fix-a-w2"))  # a wait on something else: a grace of its own
         self.assertIsNone(self.wait())
         self.child(3)  # a new instruction: the wait is fine again, and its mark is dropped
+        self.pm_job("fix-a", 2, WAITING(2, "fix-a-w1"))
         self.assertIsNone(self.wait())
         self.assertNotIn("fix-a", oke.read_json(oke.stuck_path(), {}))
+
+    def rewrite(self, text):
+        report = self.put(os.path.join(self.home, "jobs", "fix-a", "pm", "report.md"), text)
+        os.utime(report, (time.time() + 5, time.time() + 5))
+
+    def test_a_pm_rewriting_a_stuck_wait_still_goes_silent(self):
+        self.child(2, "done")
+        self.pm_job("fix-a", 2, WAITING(2, "fix-a-w1"))
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertTrue(self.wait().startswith("stuck_wait fix-a"))
+        self.rewrite(WAITING(2, "fix-a-w1"))  # the nudged PM writes the same wait again
+        self.assertTrue(self.wait().startswith("stuck_wait again fix-a"))
+        self.rewrite(WAITING(2, "fix-a-w1"))
+        self.assertIsNone(self.wait())  # told twice: the user sees it
+        self.assertEqual(oke.pending_item("fix-a", oke.load_state()["jobs"]["fix-a"])["kind"], "silent")
+
+    def test_a_missing_report_fixed_into_a_stuck_wait_stays_counted(self):
+        self.pm_job("fix-a", 2, WAITING(1, "fix-a-w1"))
+        self.fake({"agent get": [AGENT("idle")]})
+        self.assertEqual(self.wait(), "idle_no_report fix-a")
+        self.assertEqual(self.wait(), "idle_no_report again fix-a")
+        self.child(2, "done")
+        self.rewrite(WAITING(2, "fix-a-w1"))  # valid in form, but on a worker that already reported
+        self.assertEqual(oke.pending_item("fix-a", oke.load_state()["jobs"]["fix-a"])["kind"], "silent")
 
 
 class TestQuestionForm(FlowWait):
@@ -444,6 +472,53 @@ class TestReviewRound1(S3Base):
         import shutil
         shutil.rmtree(d)  # gone from the archive: gone from the list
         self.assertEqual(oke.recent_jobs(oke.load_state()), [])
+
+
+class TestDoneList(S3Base):
+    def archived(self, name, info):
+        d = os.path.join(self.home, "archive", name)
+        oke.write_json_atomic(os.path.join(d, "job.json"), info)
+        return os.path.join(d, "job.json")
+
+    def test_a_rewritten_archive_is_read_again_and_an_empty_one_skipped(self):
+        path = self.archived("old-20261101-100000", {"pm": "pm-toy", "phase": "done"})
+        self.archived("empty-20261101-100001", {})
+        self.archived("nophase-20261101-100002", {"pm": "pm-toy"})
+        self.assertEqual([(r["job"], r["phase"]) for r in oke.recent_jobs(oke.load_state())], [("old", "done")])
+        oke.write_json_atomic(path, {"pm": "pm-toy", "phase": "failed"})  # `job clean` rewrites it
+        os.utime(path, (time.time() + 5, time.time() + 5))
+        self.assertEqual([(r["job"], r["phase"]) for r in oke.recent_jobs(oke.load_state())], [("old", "failed")])
+
+    def test_a_branch_shows_only_while_it_exists(self):
+        key = oke.repo_key(self.repo)
+        info = {"pm": "pm-toy", "phase": "done", "output": "code", "git_key": key,
+                "worktree": {"id": None, "path": self.path("wt")}}
+        self.archived("fix-x-20261101-100000", info)
+        self.assertIsNone(oke.recent_jobs(oke.load_state())[0]["branch"])  # merged and deleted
+        oke.git_out(self.repo, "branch", "oke/fix-y")
+        self.archived("fix-y-20261101-100001", dict(info))
+        self.assertEqual(oke.recent_jobs(oke.load_state())[0]["branch"], "oke/fix-y")
+
+    def test_the_board_takes_a_broken_entry(self):
+        lines = [t for _, t in oke.board_lines([], [{"pm": None}, {"job": "x", "pm": None, "words": ""}])]
+        self.assertIn("Done", lines)
+
+
+class TestOlderInstructions(S3Base):
+    def test_research_on_job_new_is_ignored_and_working_says_what_to_do(self):
+        self.job("fix-a", "working")
+        pm = oke.load_state()["jobs"]["fix-a"]["pm"]
+        self.assertEqual(self.cli("job", "new", "look", "--pm", pm, "--research"), 0, self.err)
+        self.assertIn("job answer", json.loads(self.out)["note"])
+        self.assertFalse(oke.is_answer(oke.load_state()["jobs"]["look"]))
+        self.assertEqual(self.cli("interview", "look", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
+        self.assertEqual(self.cli("job", "phase", "look", "working"), 1)  # the older flow's next step
+        self.assertIn("`$OKE job answer look`", self.err)
+        self.assertIn("awaiting_approval", self.err)
+        with self.assertRaises(SystemExit):
+            with redirect_stdout(io.StringIO()) as shown:
+                oke.main(["job", "new", "--help"])
+        self.assertNotIn("--research", shown.getvalue())  # hidden from help
 
 
 class TestLenientForms(S3Base):

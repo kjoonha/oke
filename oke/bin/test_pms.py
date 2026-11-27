@@ -473,16 +473,25 @@ class TestJobPath(PmBase):
         self.assertIsNone(oke.write_problem(st, me, drive + "/oke-test-nowhere/x.txt"))
         self.assertIsNone(oke.write_problem(st, me, drive + "\\x.txt"))
 
-    def test_a_taken_branch_at_job_path_tells_the_pm_to_ask(self):
+    def test_a_taken_branch_counts_once_the_plan_goes_to_the_user(self):
         self.git(self.repo, "branch", "oke/fix-b")
-        self.assertEqual(self.new("fix-b", "a", "--path", self.repo), 1)
-        self.assertIn("pick another job name", self.err)  # the orchestrator names the job: it picks another
-        self.assertEqual(self.new("fix-b", "a"), 0, self.err)
-        self.assertEqual(self.cli("job", "path", "fix-b", self.repo), 1)
-        self.assertIn("report a question: branch oke/fix-b already exists in %s (an earlier job); the user decides: "
-                      "delete that branch, or cancel this job and start it under another name" % self.norm(self.repo),
-                      self.err)
-        self.assertIsNone(oke.load_state()["jobs"]["fix-b"].get("path"))
+        # a job still investigating only reads: it gets its path
+        self.assertEqual(self.new("fix-b", "a", "--path", self.repo), 0, self.err)
+        self.assertEqual(self.new("fix-c", "a"), 0, self.err)
+        self.git(self.repo, "branch", "oke/fix-c")
+        self.assertEqual(self.cli("job", "path", "fix-c", self.repo), 0, self.err)
+        self.advance("fix-b", "planning")
+        self.assertEqual(self.cli("job", "phase", "fix-b", "awaiting_approval"), 1)  # now it would change it
+        self.assertIn("branch oke/fix-b already exists in %s (an earlier job): ask the user: delete that branch, or "
+                      "cancel this job and start it under another name" % self.norm(self.repo), self.err)
+        self.assertEqual(oke.load_state()["jobs"]["fix-b"]["phase"], "planning")
+        self.git(self.repo, "branch", "-D", "oke/fix-b")
+        self.assertEqual(self.cli("job", "phase", "fix-b", "awaiting_approval"), 0, self.err)
+        # approved once: a later path change is checked at once
+        st = oke.load_state()
+        st["jobs"]["fix-c"]["approved"] = True
+        oke.save_state(st)
+        self.assertTrue(oke.changes_now(oke.load_state()["jobs"]["fix-c"]))
 
     def test_an_answered_job_ignores_a_taken_branch(self):
         self.git(self.repo, "branch", "oke/look")  # an answer never makes a branch
@@ -496,11 +505,17 @@ class TestJobPath(PmBase):
         inner = self.folder("top/inner")
         self.pmc("add", "b")
         self.assertEqual(self.new("calc", "a", "--path", inner), 0, self.err)
-        self.assertEqual(self.new("calc2", "b", "--path", top), 1)  # holds calc's folder
+        self.assertEqual(self.new("calc2", "b", "--path", top), 0, self.err)  # both only read so far
+        self.advance("calc", "awaiting_approval")  # calc2 reads only: no clash yet
+        self.assertEqual(self.new("calc3", "b", "--path", self.folder("top/inner/deep")), 0, self.err)
+        self.advance("calc2", "planning")
+        self.assertEqual(self.cli("job", "phase", "calc2", "awaiting_approval"), 1)  # holds calc's folder
         self.assertIn("calc", self.err)
-        self.assertEqual(self.new("calc3", "b", "--path", self.folder("top/inner/deep")), 1)  # inside it
+        self.advance("calc3", "planning")
+        self.assertEqual(self.cli("job", "phase", "calc3", "awaiting_approval"), 1)  # inside it
         self.assertIn("calc", self.err)
         self.assertEqual(self.new("calc4", "b", "--path", self.folder("top/side")), 0, self.err)  # a sibling
+        self.advance("calc4", "awaiting_approval")
 
     def test_a_job_without_a_path_cannot_execute_or_deliver(self):
         self.assertEqual(self.new("fix-a", "a"), 0, self.err)

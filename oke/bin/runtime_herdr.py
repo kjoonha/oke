@@ -562,6 +562,10 @@ class HerdrRuntime(object):
             wid = made["workspace"]["workspace_id"]
         return {"id": wid, "path": path, "place": made["root_pane"]["pane_id"]}
 
+    def tab_ids(self):
+        """The ids of the tabs open now (those with a pane)."""
+        return set(p["tab_id"] for p in herdr("pane", "list").get("panes", []) if p.get("tab_id"))
+
     def worktree_places(self, repo, path, own=()):
         """What to close for the worktree at `path`: the ids in `own` (the tabs and the
         fallback workspace OKe opened for the job) of the open tabs and workspaces whose panes

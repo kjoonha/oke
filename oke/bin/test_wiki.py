@@ -154,7 +154,7 @@ class TestWiki(SpawnBase):
         self.assertEqual(self.cli("job", "new", "look", "--pm", self.pm), 0, self.err)
         self.assertEqual(self.cli("interview", "look", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
         self.assertEqual(self.cli("job", "phase", "look", "planning"), 0, self.err)
-        self.assertEqual(self.cli("job", "path", "look", folder), 1)  # a change would overlap the direct job
+        self.assertEqual(self.cli("job", "path", "look", folder), 0, self.err)  # it only reads while it plans
         self.assertEqual(self.cli("job", "answer", "look"), 0, self.err)
         self.assertEqual(self.cli("job", "path", "look", folder), 0, self.err)  # an answer only reads
         os.environ["HERDR_ENV"] = "1"
@@ -165,6 +165,19 @@ class TestWiki(SpawnBase):
         self.assertEqual(self.cli("status"), 0, self.err)
         jobs = json.loads(self.out)["jobs"]
         self.assertEqual((jobs["calc"]["direct"], jobs["look"]["output"]), (True, "result"))
+
+    def test_status_names_the_shared_wiki_curation_the_orchestrators(self):
+        self.assertEqual(self.cli("job", "new", "tidy", "--pm", self.pm, "--shared-wiki"), 0, self.err)
+        self.assertEqual(self.cli("job", "new", "fix-a", "--pm", self.pm), 0, self.err)
+        os.environ["HERDR_ENV"] = "1"
+        os.environ["HERDR_PANE_ID"] = "w7:p1"
+        fake = help_ok()
+        fake["agent list"] = [J({"agents": []})]
+        self.fake(fake)
+        self.assertEqual(self.cli("status"), 0, self.err)
+        jobs = json.loads(self.out)["jobs"]
+        self.assertEqual(jobs["tidy"]["class"], "orchestrator")  # never resumed, restarted or asked about
+        self.assertNotEqual(jobs["fix-a"]["class"], "orchestrator")
 
     def test_the_shared_wiki_catches_git_bash_paths_and_ignores_a_root(self):
         if not oke.os.name == "nt":

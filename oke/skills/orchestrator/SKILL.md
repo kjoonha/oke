@@ -39,7 +39,7 @@ Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`.
 4. `orchestrator_conflict` set: say which pane already runs the orchestrator, stop.
 5. Run `$OKE status --claim`.
 6. `state_recovered` true: tell the user state.json was unreadable and saved as `state.json.bad`.
-7. A job with class `disconnected`, or an entry in `orphan_job_dirs`: read and follow `${CLAUDE_PLUGIN_ROOT}/skills/orchestrator/references/recovery.md`. Jobs with class `closed` (finished jobs of a PM that no longer exists) are not asked either. Jobs with class `held` are not asked: name them in one line ("On hold: <jobs>. Say so to continue or drop one.").
+7. A job with class `disconnected`, or an entry in `orphan_job_dirs`: read and follow `${CLAUDE_PLUGIN_ROOT}/skills/orchestrator/references/recovery.md`. Jobs with class `closed` (finished jobs of a PM that no longer exists) are not asked either. A job with class `orchestrator` is your own shared-wiki curation: no PM resumes it; finish it as `references/curate.md` says. Jobs with class `held` are not asked: name them in one line ("On hold: <jobs>. Say so to continue or drop one.").
 8. For each PM (`status.pms`) that has a job with class `alive`, start its wait (see "Wait").
 9. Run the queue (see "Queue"). Jobs with class `awaiting_user` come back there.
 10. Started by `/oke:resume` (everything was down, for example after a reboot): do not ask at step 7. Run `$OKE resume-all` instead; it revives every PM that has an unfinished job (a held job does not count), and each PM restarts its own children when it comes back. Name the held jobs as step 7 does. Then steps 8 and 9.

@@ -678,7 +678,7 @@ def cmd_rt(args):
                 # children may run outside the tab, in the checkout: on Windows git cannot
                 # delete a folder a shell sits in (half deleted, then "Permission denied")
                 close_children(job, info.get("pm"))
-                close_worktree_places(rt, repo, path, own=[args.remove] + own_places(info))
+                close_worktree_places(rt, repo, path, own=own_places(info))
                 rt.worktree_remove(path=path, repo=repo)
                 left = path
             elif rt.name == "bg":
@@ -966,21 +966,10 @@ def set_job_path(state, name, path, branch_taken=None):
     is the advice when branch oke/<name> exists already (default: pick another name)."""
     job = state["jobs"][name]
     key, folder, direct = path_facts(path)
-    if direct and not is_answer(job):
-        # an answer changes nothing: never in the way. A folder inside another's, or holding
-        # it, is the same files
-        busy = sorted(n for n, j in state["jobs"].items()
-                      if n != name and j.get("direct") and j.get("path") and not is_answer(j)
-                      and j.get("phase") not in DONE_PHASES
-                      and (under(folder, j["path"]) or under(j["path"], folder)))
-        if busy:
-            raise ValueError("job %s already changes %s in place (no git, no undo), which overlaps %s: "
-                             "finish or archive it first" % (busy[0], state["jobs"][busy[0]]["path"], folder))
-    if not direct and not is_answer(job) and subprocess.call(["git", "-C", native_path(folder), "show-ref", "--verify", "--quiet",
-                                       "refs/heads/oke/" + name]) == 0:
-        raise ValueError(branch_taken % {"job": name, "checkout": folder} if branch_taken else
-                         "branch oke/%s already exists in %s (an earlier job): pick another job name"
-                         % (name, folder))
+    if changes_now(job):
+        problem = path_clash(state, name, folder, direct, branch_taken)
+        if problem:
+            raise ValueError(problem)
     # the branch the main checkout is on now: `job deliver` brings the job's branch onto it
     base = None if direct else git_out(native_path(folder), "symbolic-ref", "-q", "--short", "HEAD")[1]
     job.update(path=folder, git_key=key, base=base or None)
@@ -993,6 +982,35 @@ def set_job_path(state, name, path, branch_taken=None):
         places.remove(folder)
     places.insert(0, folder)
     return job
+
+
+def changes_now(job):
+    """A job that may change its path: not an answer, and approved (or past planning) once. A job
+    still investigating only reads, so it never clashes with another job's folder or branch; the
+    clash is checked when its plan goes to the user (`job phase awaiting_approval`)."""
+    if is_answer(job):
+        return False
+    return not (job.get("phase") in GATE_PHASES and not (job.get("approved") or job.get("worked")))
+
+
+def path_clash(state, name, folder, direct, branch_taken=None):
+    """Why job `name` cannot change `folder`: another open job changes the same files in place
+    (no git, no undo), or branch oke/<name> exists already. None when it can."""
+    if direct:
+        # a folder inside another's, or holding it, is the same files
+        busy = sorted(n for n, j in state["jobs"].items()
+                      if n != name and j.get("direct") and j.get("path") and changes_now(j)
+                      and j.get("phase") not in DONE_PHASES
+                      and (under(folder, j["path"]) or under(j["path"], folder)))
+        if busy:
+            return ("job %s already changes %s in place (no git, no undo), which overlaps %s: "
+                    "finish or archive it first" % (busy[0], state["jobs"][busy[0]]["path"], folder))
+        return None
+    if subprocess.call(["git", "-C", native_path(folder), "show-ref", "--verify", "--quiet",
+                        "refs/heads/oke/" + name]) == 0:
+        return (branch_taken % {"job": name, "checkout": folder} if branch_taken else
+                "branch oke/%s already exists in %s (an earlier job): pick another job name" % (name, folder))
+    return None
 
 
 def pm_fields(pm, job):
@@ -1819,12 +1837,10 @@ def stuck_reason(state, key, job, header):
 def stuck_wait(state, key, job, seq, header):
     """The `?stuck_wait` verdict for a PM idle on a wait that will not end, once it has lasted
     STUCK_GRACE (the PM's own wait may be about to wake it), or None."""
-    try:
-        written = os.path.getmtime(os.path.join(pm_job_dir(job), "report.md"))
-    except OSError:
-        written = 0
-    mark = [seq, header.get("on"), written]  # a new report starts the grace again
     reason = stuck_reason(state, key, job, header)
+    # the grace starts once per wait: a report rewritten with the same seq, `on:` and reason keeps
+    # it (a PM rewriting a stuck wait every minute is still stuck)
+    mark = [seq, header.get("on"), reason]
     with locked("stuck"):  # every PM's wait writes this file
         seen = read_json(stuck_path(), {})
         seen = seen if isinstance(seen, dict) else {}
@@ -1879,13 +1895,18 @@ def is_silent(name, job, seq):
 
 def rewritten_valid(name, warned, seq, header, mtime):
     """The PM rewrote its report since its last warning, and the report is now valid for this seq
-    (a `waiting` with a right `on:`, or a final report in the required form): the warnings are spent.
-    A wait that then proves stuck counts from one again."""
+    (a `waiting` with a right `on:` on something that can still come, or a final report in the
+    required form): the warnings are spent."""
     if len(warned) < 3 or warned[2] == mtime or header.get("seq") != seq:
         return False
     kind = header.get("type")
     if kind == "waiting":
-        return not waiting_problem(name, header)
+        if waiting_problem(name, header):
+            return False
+        state = load_state()
+        info = state["jobs"].get(name) or {}
+        # a wait on what will not come is no recovery: the same stuck wait rewritten counts on
+        return not stuck_reason(state, info.get("pm"), name, header)
     if kind == "question":
         return not pm_question_problem(name)
     return kind in FINAL_TYPES
@@ -2388,6 +2409,8 @@ def revive(name, auto=False):
     if not try_lock(lock):
         return "busy"
     try:
+        if runtime().inside():
+            forget_gone_tabs(runtime())  # a dead agent: herdr may have restarted
         return revive_locked(found[1], auto)
     finally:
         unlock(lock)
@@ -2581,11 +2604,13 @@ RECENT_DONE = 5  # finished jobs the board lists
 def recent_entry(name, info, d, at):
     """One finished job as the board's Done list shows it."""
     code = job_output(info) == "code" and info.get("phase") == "done"
+    branch = job_branch(name, info) if code and info.get("git_key") and (info.get("worktree") or {}).get("path") \
+        else None
+    if branch and git_out(info["git_key"], "show-ref", "--verify", "--quiet", "refs/heads/" + branch)[0] != 0:
+        branch = None  # merged and deleted, or `job clean` removed it: nothing left to merge
     return {"job": name, "pm": None if info.get("orchestrator_job") else info.get("pm"), "at": at, "words": users_words(d), "phase": info.get("phase"),
             "answer": is_answer(info) or bool(info.get("no_change")),
-            "result": first_summary_line(os.path.join(d, "pm", "report.md")),
-            "branch": job_branch(name, info) if code and info.get("git_key") and (
-                info.get("worktree") or {}).get("path") else None}
+            "result": first_summary_line(os.path.join(d, "pm", "report.md")), "branch": branch}
 
 
 def recent_index_path():
@@ -2604,18 +2629,24 @@ def archive_index():
     index = index if isinstance(index, dict) else {}
     kept = dict((n, e) for n, e in index.items() if n in names and isinstance(e, dict))
     for n in names:
-        if n in kept:
-            continue
         d = os.path.join(root, n)
-        info = read_json(os.path.join(d, "job.json"), None)
-        if not isinstance(info, dict):
+        try:
+            stamp = os.path.getmtime(os.path.join(d, "job.json"))
+        except OSError:
+            kept.pop(n, None)
             continue  # being moved in, or not a job: looked at again next time
+        if n in kept and kept[n].get("mtime") == stamp:
+            continue  # `job clean` rewrites job.json: then it is read again
+        info = read_json(os.path.join(d, "job.json"), None)
+        if not isinstance(info, dict) or not info.get("phase"):
+            kept.pop(n, None)
+            continue
         m = re.match(r"^(.+)-(\d{8}-\d{6})$", n)
         try:
             at = time.mktime(time.strptime(m.group(2), "%Y%m%d-%H%M%S"))
         except ValueError:
             at = 0
-        kept[n] = recent_entry(m.group(1), info, d, at)
+        kept[n] = dict(recent_entry(m.group(1), info, d, at), mtime=stamp)
     if kept != index:
         try:
             write_json_atomic(recent_index_path(), kept)
@@ -2631,14 +2662,14 @@ def recent_jobs(state, only_key=None):
     for name, info in state["jobs"].items():
         if info.get("phase") in DONE_PHASES:
             found.append(recent_entry(name, info, os.path.join(oke_home(), "jobs", name), info.get("phase_at") or 0))
-    found.extend(archive_index().values())
+    found.extend(e for e in archive_index().values() if e.get("job") and e.get("phase"))
     per_pm, out = {}, []
     for entry in sorted(found, key=lambda e: -(e.get("at") or 0)):
         if only_key and entry.get("pm") != only_key:
             continue
         per_pm[entry.get("pm")] = per_pm.get(entry.get("pm"), 0) + 1
         if per_pm[entry.get("pm")] <= RECENT_DONE:
-            out.append(dict((k, v) for k, v in entry.items() if k != "at"))
+            out.append(dict((k, v) for k, v in entry.items() if k not in ("at", "mtime")))
     return out
 
 
@@ -2741,10 +2772,11 @@ def board_lines(tree, recent=None, full=False):
     def done(entries, depth):
         out.append((depth, "Done"))
         for r in entries:
-            mark = "x" if r["phase"] == "failed" else "v"
-            what = "stopped" if r["phase"] == "failed" else "answered" if r.get("answer") else "done"
+            mark = "x" if r.get("phase") == "failed" else "v"
+            what = "stopped" if r.get("phase") == "failed" else "answered" if r.get("answer") else "done"
             tail = [t for t in (r.get("result"), "branch %s" % r["branch"] if r.get("branch") else "") if t]
-            out.append((depth + 1, "%s %s  (%s, %s)%s" % (mark, short_words(r.get("words"), r["job"]), r["job"],
+            out.append((depth + 1, "%s %s  (%s, %s)%s" % (mark, short_words(r.get("words"), r.get("job") or "?"),
+                                                         r.get("job") or "?",
                                                          what, ": " + " - ".join(tail) if tail else "")))
 
     def agent(n, depth):
@@ -3029,6 +3061,7 @@ def cmd_status(args):
                 save_state(current)
     if runtime().inside():
         herdr_info = (runtime().missing(), list_agents())
+        forget_gone_tabs(runtime())
     else:
         # outside the runtime's terminals nothing can be claimed or started, but the
         # state still answers (as `oke board` does); liveness unknown if unreachable
@@ -3038,6 +3071,37 @@ def cmd_status(args):
             herdr_info = ([], None)
     with locked():
         return status_locked(args, herdr_info)
+
+
+def forget_gone_tabs(rt):
+    """Drop the recorded worktree tabs herdr no longer has (it restarted, or the tab closed): herdr
+    reuses ids, so a later tab with one of them, maybe the user's, is never taken for OKe's. Run
+    at `oke status` (the orchestrator's start) and when a PM is revived."""
+    if not any((j.get("worktree") or {}).get("tabs") or ":t" in ((j.get("worktree") or {}).get("id") or "")
+               for j in load_state()["jobs"].values() if j.get("phase") not in DONE_PHASES):
+        return  # no tab recorded: nothing to ask herdr
+    try:
+        present = rt.tab_ids()
+    except HerdrError:
+        return
+    if present is None:
+        return  # no tabs in this runtime
+    with locked():
+        state = load_state()
+        changed = False
+        for j in state["jobs"].values():
+            wt = j.get("worktree") or {}
+            tabs = wt.get("tabs")
+            if tabs is None and wt.get("id") and ":t" in wt["id"]:
+                tabs = [wt["id"]]  # an older record: its id is its tab
+            if tabs is None:
+                continue
+            kept = [t for t in tabs if t in present or ":t" not in t]  # a workspace id is not a tab
+            if kept != wt.get("tabs"):
+                j["worktree"]["tabs"] = kept
+                changed = True
+        if changed:
+            save_state(state)
 
 
 def own_launch(pane, agents):
@@ -3099,6 +3163,9 @@ def status_locked(args, herdr_info):
                           for a, rec in children.items() if rec.get("job") == name)
         if job.get("phase") in DONE_PHASES and (not key or key not in state["pms"]):
             cls = "closed"  # nothing to resume: its PM is gone (or it is an old OKe's job)
+        elif job.get("orchestrator_job"):
+            cls = "orchestrator"  # the orchestrator's own (shared-wiki curation): no PM to resume or restart
+            job_agents = {}
         elif job.get("held") and job.get("phase") not in DONE_PHASES:
             cls = "held"
         elif job.get("phase") == "awaiting_approval":
@@ -4982,9 +5049,13 @@ def worktree_near(rt, info):
 
 
 def own_places(info):
-    """The tab and workspace ids OKe opened for a job's worktree (its record: `id` and `tabs`)."""
+    """The tab and workspace ids OKe opened for a job's worktree and herdr still had when OKe last
+    looked (`tabs`; an older record without it: its `id`). A tab id dropped from `tabs` is never
+    OKe's again, even when the stored `id` names it."""
     wt = info.get("worktree") or {}
-    return [t for t in [wt.get("id")] + list(wt.get("tabs") or []) if t]
+    if "tabs" not in wt:
+        return [wt["id"]] if wt.get("id") else []
+    return [t for t in wt["tabs"] if t] + ([wt["id"]] if wt.get("id") and ":t" not in wt["id"] else [])
 
 
 def close_worktree_places(rt, main, wt, own=()):
@@ -5144,14 +5215,17 @@ def job_locked(args):
                 return fail(str(e))
         save_state(state)
         info = state["jobs"][args.slug]
-        print(json.dumps({"job_dir": job_dir.replace("\\", "/"), "path": info.get("path"),
-                          "direct": bool(info.get("direct")) if info.get("path") else None,
-                          "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
-                          "pm_dir": pm_dir(args.pm).replace("\\", "/"),
-                          "pm_agent": args.pm,
-                          "wiki": wiki_dir(args.pm).replace("\\", "/"),
-                          "shared_wiki": os.path.join(load_config()["wiki_path"], "_shared").replace("\\", "/")},
-                         ensure_ascii=False))
+        out = {"job_dir": job_dir.replace("\\", "/"), "path": info.get("path"),
+               "direct": bool(info.get("direct")) if info.get("path") else None,
+               "pm_job_dir": pm_job_dir(args.slug).replace("\\", "/"),
+               "pm_dir": pm_dir(args.pm).replace("\\", "/"),
+               "pm_agent": args.pm,
+               "wiki": wiki_dir(args.pm).replace("\\", "/"),
+               "shared_wiki": os.path.join(load_config()["wiki_path"], "_shared").replace("\\", "/")}
+        if args.research:  # older instructions: the job starts like any other
+            out["note"] = ("--research is gone: every job starts the same way. A job that only answers ends "
+                           "with `job answer <job>` while it plans, then its done report")
+        print(json.dumps(out, ensure_ascii=False))
         return 0
     if args.slug not in state["jobs"]:
         return fail("unknown job: %s" % args.slug)
@@ -5254,11 +5328,26 @@ def job_locked(args):
             # an older research job that already works goes on as it was (a dialog sets working again)
             return fail("job %s is answered (`job answer`): it has no plan or work; it ends with `job phase %s "
                         "done` after its done report" % (args.slug, args.slug))
+        if args.phase == "working" and now in ("intake", "planning") and not is_answer(info):
+            # the older research flow set working at once: a job works only on an approved plan
+            return fail("job %s cannot go from %s to working: a job works only on an approved plan. If it only "
+                        "answers a question, its PM runs `$OKE job answer %s` and reports done (then `job phase %s "
+                        "done`); if it changes something, its plan goes to the user first (`job phase %s "
+                        "awaiting_approval`)" % (args.slug, now, args.slug, args.slug, args.slug))
         if allowed is not None and now not in allowed:
             return fail("job %s cannot go from %s to %s: allowed only from %s"
                         % (args.slug, now, args.phase, ", ".join(allowed)))
         if args.phase == "working" and not is_answer(info) and no_path(args.slug, info):
             return fail(no_path(args.slug, info))
+        if args.phase in ("awaiting_approval", "working") and not changes_now(info) and not is_answer(info) \
+                and info.get("path"):
+            # it read only so far: from now on it changes its path, so no other job may change the
+            # same files, and its branch must be its own
+            problem = path_clash(state, args.slug, info["path"], bool(info.get("direct")), branch_taken=(
+                "branch oke/%(job)s already exists in %(checkout)s (an earlier job): ask the user: delete that "
+                "branch, or cancel this job and start it under another name"))
+            if problem:
+                return fail(problem)
         if args.phase in ("awaiting_approval", "working", "reviewing", "done") and experiment_none(args.slug, info):
             return fail(experiment_none(args.slug, info))
         if args.phase == "working" and experiment(info) and not plan_own_worktree(args.slug):
@@ -6313,6 +6402,7 @@ def build_parser():
     new.add_argument("slug")
     new.add_argument("--pm", required=True, help="the PM the user picked")
     new.add_argument("--path", help="the folder the job changes, only when the user said it")
+    new.add_argument("--research", action="store_true", help=argparse.SUPPRESS)  # older instructions: ignored
     new.add_argument("--shared-wiki", action="store_true",
                      help="the orchestrator's own job, curating the shared wiki: --pm only for its wiki log, no PM "
                           "works on it")

@@ -312,6 +312,9 @@ class BgRuntime(object):
                 f.write(u"\n%s\n" % line)
         return {"id": path, "path": path, "place": path}
 
+    def tab_ids(self):
+        return None  # no tabs: the folder is all there is
+
     def worktree_places(self, repo, path, own=()):
         return []  # no tabs or workspaces: the folder is all there is
 
