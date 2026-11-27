@@ -218,7 +218,7 @@ class TestBaselineCheck(SpawnBase):
         self.assertEqual(json.loads(self.out)["new"][0], "<exited with code 1>")
 
     def test_a_base_that_cannot_run_fails_the_check(self):
-        self.plan("sh check.sh")
+        self.plan("bash check.sh")  # bash: a missing script is exit 127 everywhere (dash says 2)
         self.write(os.path.join(self.wt, "check.sh"), "echo FAILED x\nexit 1\n")  # not on the base
         self.assertEqual(self.cli("check", "q"), 1, self.err)
         self.assertIn("could not check the base: ", self.err)
@@ -378,7 +378,7 @@ class TestCheckInPlace(SpawnBase):
         self.assertEqual(os.listdir(os.path.join(self.home, "tmp")), [])
 
     def test_a_base_that_cannot_run_is_accepted_only_by_the_user(self):
-        self.plan("sh check.sh")
+        self.plan("bash check.sh")  # bash: a missing script is exit 127 everywhere (dash says 2)
         self.write(os.path.join(self.repo, "check.sh"), "echo FAILED x\nexit 1\n")  # not on the base
         self.assertEqual(self.cli("check", "q"), 1, self.err)
         out = json.loads(self.out)
@@ -491,7 +491,7 @@ class TestCheckInPlace(SpawnBase):
         self.assertNotIn("head_moved", json.loads(self.out))
 
     def test_job_auto_never_accepts_for_the_user(self):
-        self.plan("sh check.sh")
+        self.plan("bash check.sh")  # bash: a missing script is exit 127 everywhere (dash says 2)
         self.write(os.path.join(self.repo, "check.sh"), "echo FAILED x\nexit 1\n")  # not on the base
         self.assertEqual(self.cli("check", "q"), 1, self.err)
         target = json.loads(self.out)["commit"]

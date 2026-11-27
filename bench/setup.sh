@@ -12,7 +12,7 @@
 set -eu
 
 RUN="${1:?usage: setup.sh <run_dir>}"
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" && (pwd -W 2>/dev/null || pwd))"   # c:/... on Git Bash: Windows python needs it
 OKE_PY="$HERE/../oke/bin/oke.py"
 PY="$(command -v python3 || command -v python)"
 # python3 on Windows may be the Store stub: prefer one that runs

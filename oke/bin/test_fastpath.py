@@ -9,6 +9,7 @@ import time
 import unittest
 
 from test_slice3 import REPORT, S3Base, NL
+from test_oke import J
 import oke
 
 
@@ -96,6 +97,10 @@ class TestTriage(unittest.TestCase):
 
 
 class TriageBase(S3Base):
+    def setUp(self):
+        super(TriageBase, self).setUp()
+        self.fake({"agent list": [J({"agents": []})] * 20})  # status asks herdr, which CI lacks
+
     def intake(self, job, words):
         self.put(os.path.join(self.home, "jobs", job, "intake.md"),
                  u"job: %s\n---\n## Desired result\nx\n## User's words\n%s\n" % (job, words))

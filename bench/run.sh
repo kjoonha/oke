@@ -9,7 +9,7 @@ set -u
 export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'   # Git Bash must not rewrite /oke:start or paths
 # every herdr call reaches the bench session only: an inherited HERDR_* (a socket path) beats --session
 for v in $(env | sed -n 's/^\(HERDR_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" && (pwd -W 2>/dev/null || pwd))"   # c:/... on Git Bash: Windows python needs it
 PY="$(command -v python || command -v python3)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 KEEP=0
