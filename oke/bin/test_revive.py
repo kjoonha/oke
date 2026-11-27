@@ -189,7 +189,7 @@ class TestRevive(ReviveBase):
         self.assertEqual(self.argv_of("pane", "close"), [])
 
     def test_final_report_means_not_needed(self):
-        # a worker closed after merge has its done report
+        # a worker closed after the delivery has its done report
         self.write_file(os.path.join(self.child_dir, "report.md"), "type: done\nseq: 2\n---\n")
         self.revive_scenario()
         self.assertEqual(oke.revive("fix-a-w1"), "not_needed")
@@ -569,7 +569,7 @@ class TestTick(ReviveBase):
         self.assertEqual((job["job"], job["phase"]), ("fix-a", "working"))
         self.assertEqual(job["agents"][0]["agent"], "fix-a-w1")
         self.assertIn("coding", job["agents"][0]["board"])
-        self.assertEqual(job["merge"], "none")
+        self.assertEqual(job["deliver"], "none")
         self.assertIn("pending", job)
         self.assertEqual(job["agents"][0]["todos"], [])
         self.assertFalse(job["subagent"])

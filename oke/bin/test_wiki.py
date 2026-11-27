@@ -46,13 +46,12 @@ class TestWiki(SpawnBase):
         self.assertIn("build.md", self.err)
         self.assertEqual(self.page("tests.md", "- run make test before each commit\n", "new", "--dup-ok"), 0)
 
-    def test_lessons_wait_for_a_verified_merge(self):
+    def test_lessons_wait_for_the_delivery(self):
         src = self.write("src.md", "- a fact about the build system\n")
         args = ("wiki", "write", "build.md", "--job", "fix-a", "--from", src, "--base", "new", "--note", "n")
         self.assertEqual(self.cli(*args), 1)
-        self.assertIn("not verified", self.err)
-        oke.ledger_add("fix-a", "oke", "abc", "merge", "ok")
-        oke.ledger_add("fix-a", "oke", "abc", "verify", "pass")
+        self.assertIn("not checked", self.err)
+        oke.ledger_add("fix-a", "oke", "abc", "deliver", "ok", "branch=oke/fix-a base=master@abc")
         self.assertEqual(self.cli(*args), 0, self.err)
 
     def test_the_shared_wiki_takes_no_repository_path(self):
@@ -259,7 +258,7 @@ class TestWiki(SpawnBase):
         self.assertIn("on hold: fix-a", self.argv_of("agent", "prompt")[0][3])
         state = oke.load_state()
         state["jobs"]["fix-a"].pop("held")
-        state["jobs"]["fix-a"]["phase"] = "merging"
+        state["jobs"]["fix-a"]["phase"] = "done"
         oke.save_state(state)
         self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
 
@@ -356,7 +355,7 @@ class TestWiki(SpawnBase):
         self.assertIsNone(oke.pending_item("fix-a", state["jobs"]["fix-a"]))
         self.assertEqual(self.cli("job", "phase", "fix-a", "planning"), 1)
         self.assertIn("on hold", self.err)
-        self.assertEqual(self.cli("job", "merge", "fix-a"), 1)
+        self.assertEqual(self.cli("job", "deliver", "fix-a"), 1)
         self.assertIn("on hold", self.err)
         # with fix-b gone too, nothing keeps the PM alive
         state["jobs"]["fix-b"]["phase"] = "done"
@@ -400,14 +399,10 @@ class TestWiki(SpawnBase):
         state["jobs"]["fix-a"]["phase"] = "done"
         oke.save_state(state)
         self.assertEqual(self.cli("job", "cancel", "fix-a"), 1)
-        state["jobs"]["fix-a"]["phase"] = "merging"  # a merge that never reached main can be given up
+        state["jobs"]["fix-a"]["phase"] = "reviewing"  # delivered but not done: the branch stays, the job ends
         oke.save_state(state)
+        oke.ledger_add("fix-a", "oke", "abc", "deliver", "ok", "branch=oke/fix-a base=master@abc")
         self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
-        state["jobs"]["fix-a"]["phase"] = "merging"
-        oke.save_state(state)
-        oke.ledger_add("fix-a", "oke", "abc", "merge", "ok")
-        self.assertEqual(self.cli("job", "cancel", "fix-a"), 1)  # merged, not verified yet
-        self.assertIn("in main", self.err)
 
     def test_archive_closes_the_panes_a_pm_left_open(self):
         # live: a PM skipped closing a finished job's worker; archive closes it

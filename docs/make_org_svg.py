@@ -103,9 +103,9 @@ parts.append('<text x="548" y="44" class="note">one conversation</text><text x="
 
 parts.append(card("orchestrator", ocx, otop, ow, oh, "orchestrator", "interviews · queues · asks you", 1.2))
 parts.append('<text x="%d" y="%d" class="note">your Claude Code session</text>' % (ocx + ow // 2 + 18, otop + 64))
-parts.append('<text x="%d" y="%d" class="note">plans and merges need your OK</text>' % (ocx + ow // 2 + 18, otop + 80))
+parts.append('<text x="%d" y="%d" class="note">plans need your OK; you merge</text>' % (ocx + ow // 2 + 18, otop + 80))
 for i, (pcx, ptop) in enumerate(PMS):
-    parts.append(card("pm", pcx, ptop, 190, 124, "PM", "%s · plans · merges" % ("backend", "docs")[i], 1.0, 0.4 * i))
+    parts.append(card("pm", pcx, ptop, 190, 124, "PM", "%s · plans · delivers" % ("backend", "docs")[i], 1.0, 0.4 * i))
 parts.append('<text x="460" y="374" text-anchor="middle" class="note">PMs are roles you name; each finds its jobs\' paths</text>')
 for i, (kcx, role) in enumerate(KIDS):
     sub = "own pane + git worktree" if role == "worker" else "checks the commits"

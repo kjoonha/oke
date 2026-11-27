@@ -261,9 +261,9 @@ class TestPmCommands(PmBase):
         self.pmc("add", "a")
         self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
         self.assertEqual(self.new("fix-b", "a"), 0, self.err)
-        real = oke.merge_state
-        oke.merge_state = lambda job: ("verified",) if job == "fix-b" else real(job)
-        self.addCleanup(setattr, oke, "merge_state", real)
+        real = oke.cancel_problem
+        oke.cancel_problem = lambda state, job: "job fix-b refuses" if job == "fix-b" else real(state, job)
+        self.addCleanup(setattr, oke, "cancel_problem", real)
         self.assertEqual(self.pmc("remove", "a", "--cancel")[0], 1)
         self.assertIn("fix-b", self.err)
         st = oke.load_state()
@@ -409,9 +409,9 @@ class TestJobPath(PmBase):
         self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
         self.advance("fix-a", "awaiting_approval")
         st = oke.load_state()
-        st["jobs"]["fix-a"].update(phase="awaiting_merge", size="small")
+        st["jobs"]["fix-a"].update(phase="reviewing", size="small")
         oke.save_state(st)
-        self.assertEqual(self.cli("job", "phase", "fix-a", "merging"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "fix-a", "working"), 0, self.err)
         self.assertTrue(oke.load_state()["jobs"]["fix-a"]["approved"])
         st = oke.load_state()
         st["jobs"]["fix-a"]["phase"] = "planning"
@@ -461,7 +461,7 @@ class TestJobPath(PmBase):
         self.assertIsNone(oke.load_state()["jobs"]["fix-b"].get("path"))
 
     def test_a_research_job_ignores_a_taken_branch(self):
-        self.git(self.repo, "branch", "oke/look")  # research never makes or merges a branch
+        self.git(self.repo, "branch", "oke/look")  # research never makes a branch
         self.assertEqual(self.cli("job", "new", "look", "--pm", "a", "--research", "--path", self.repo), 0, self.err)
 
     def test_one_open_direct_job_per_folder_tree(self):
@@ -475,12 +475,12 @@ class TestJobPath(PmBase):
         self.assertIn("calc", self.err)
         self.assertEqual(self.new("calc4", "b", "--path", self.folder("top/side")), 0, self.err)  # a sibling
 
-    def test_a_job_without_a_path_cannot_execute_or_merge(self):
+    def test_a_job_without_a_path_cannot_execute_or_deliver(self):
         self.assertEqual(self.new("fix-a", "a"), 0, self.err)
         self.advance("fix-a", "awaiting_approval")
         self.assertEqual(self.cli("job", "phase", "fix-a", "working"), 1)
         self.assertIn("no path", self.err)
-        for args in (("worktree", "fix-a"), ("check", "fix-a"), ("baseline", "fix-a"), ("job", "merge", "fix-a"),
+        for args in (("worktree", "fix-a"), ("check", "fix-a"), ("baseline", "fix-a"), ("job", "deliver", "fix-a"),
                      ("job", "tree", "fix-a")):
             self.assertEqual(self.cli(*args), 1, args)
             self.assertIn("no path", self.err, args)
@@ -497,8 +497,7 @@ class TestJobSplit(PmBase):
 
     def test_split_makes_a_job_of_the_same_pm_with_the_intake_and_tells_the_orchestrator(self):
         api = self.git_repo("api")
-        self.assertEqual(self.cli("job", "split", "fix-a", "fix-a-api", "--path", api, "--after", "fix-a"), 0,
-                         self.err)
+        self.assertEqual(self.cli("job", "split", "fix-a", "fix-a-api", "--path", api), 0, self.err)
         st = oke.load_state()
         new = st["jobs"]["fix-a-api"]
         self.assertEqual((new["pm"], new["path"], new["phase"], new["split_from"]),
@@ -506,7 +505,8 @@ class TestJobSplit(PmBase):
         with io.open(os.path.join(self.home, "jobs", "fix-a-api", "intake.md"), encoding="utf-8") as f:
             intake = f.read()
         self.assertIn("both", intake)
-        self.assertIn("after: fix-a", intake)
+        self.assertIn("Split from job fix-a", intake)
+        self.assertNotIn("after", new)
         self.assertTrue(os.path.exists(oke.interview_path("fix-a-api")))
         out = json.loads(self.out)
         item = oke.pending_item("fix-a-api", new)
@@ -517,25 +517,6 @@ class TestJobSplit(PmBase):
                               oke.pm_job_dir("fix-a-api").replace("\\", "/")))
         self.assertEqual(item["text"], "PM a split job fix-a: new job fix-a-api (%s)" % self.norm(api))
         self.assertEqual(self.cli("job", "phase", "fix-a-api", "planning"), 0, self.err)  # interview copied
-        self.assertEqual(oke.after_jobs("fix-a-api"), ["fix-a"])  # no plan yet: the split's --after counts
-        self.write("home/jobs/fix-a-api/plan.md", "job: fix-a-api\nafter: other\n---\n")
-        self.assertEqual(oke.after_jobs("fix-a-api"), ["other", "fix-a"])
-
-    def test_a_direct_split_job_starts_only_after_its_after_job(self):
-        notes = self.folder("notes")
-        self.assertEqual(self.cli("job", "split", "fix-a", "fix-a-notes", "--path", notes, "--after", "fix-a"), 0,
-                         self.err)
-        with io.open(os.path.join(self.home, "jobs", "fix-a-notes", "intake.md"), encoding="utf-8") as f:
-            self.assertIn("It starts its work only after job fix-a", f.read())
-        st = oke.load_state()
-        st["jobs"]["fix-a-notes"]["phase"] = "awaiting_approval"
-        oke.save_state(st)
-        self.assertEqual(self.cli("job", "phase", "fix-a-notes", "working"), 1)
-        self.assertIn("it starts its work only after job fix-a", self.err)
-        st = oke.load_state()
-        st["jobs"]["fix-a"].update(phase="done", direct=True)
-        oke.save_state(st)
-        self.assertEqual(self.cli("job", "phase", "fix-a-notes", "working"), 0, self.err)
 
     def test_a_second_split_of_the_same_path_names_the_first(self):
         api = self.git_repo("api")
@@ -545,18 +526,6 @@ class TestJobSplit(PmBase):
         self.assertEqual(json.loads(self.out.strip().splitlines()[-1])["existing"], "fix-a-api")
         self.assertNotIn("fix-a-api2", oke.load_state()["jobs"])
         self.assertEqual(self.cli("job", "split", "fix-a", "fix-a-b", "--path", self.folder("b")), 0, self.err)
-
-    def test_a_split_after_a_parent_that_never_merges_waits_for_done_only(self):
-        st = oke.load_state()
-        st["jobs"]["fix-a"]["direct"] = True
-        oke.save_state(st)
-        self.assertIn("fix-a", oke.after_block(oke.load_state(), "fix-a"))
-        st = oke.load_state()
-        st["jobs"]["fix-a"]["phase"] = "done"
-        oke.save_state(st)
-        self.assertIsNone(oke.after_block(oke.load_state(), "fix-a"))
-        self.assertEqual(self.cli("job", "archive", "fix-a"), 0, self.err)
-        self.assertIsNone(oke.after_block(oke.load_state(), "fix-a"))  # archived: its kept job.json says so
 
     def test_split_refuses_a_taken_name_and_a_job_past_planning(self):
         self.assertEqual(self.cli("job", "split", "fix-a", "fix-a", "--path", self.repo), 1)
@@ -844,7 +813,7 @@ class TestBoardAndStatus(PmBase):
         self.assertEqual(json.loads(self.out)["jobs"]["fix-a-x"]["split_from"], "fix-a")  # the PM looks it up
 
 
-class TestAfterNotices(PmBase):
+class TestPendingStart(PmBase):
     def setUp(self):
         PmBase.setUp(self)
         self.pmc("add", "a")
@@ -852,98 +821,9 @@ class TestAfterNotices(PmBase):
         st["pms"]["a"]["pm"] = {"agent": "a"}
         oke.save_state(st)
 
-    def plan(self, job, after):
-        self.write("home/jobs/%s/plan.md" % job, "job: %s\nafter: %s\n---\n" % (job, after))
-
-    def texts(self):
-        """The PM's mail about after-jobs (not a cancelled job's own notice)."""
-        return [t for _, t in oke.inbox_messages("a") if "after-job" in t]
-
     def kinds(self):
         self.assertEqual(self.cli("pending"), 0, self.err)
         return dict((i["job"], i) for i in json.loads(self.out)["items"])
-
-    def test_a_folder_job_waits_at_its_start_and_becomes_after_ready(self):
-        self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
-        self.assertEqual(self.new("notes", "a", "--path", self.folder("notes")), 0, self.err)
-        self.plan("notes", "fix-a")
-        self.advance("notes", "awaiting_approval")
-        self.assertEqual(self.kinds()["notes"]["kind"], "plan")
-        self.assertEqual(self.cli("job", "phase", "notes", "working"), 1)  # the user approved; the gate holds it
-        self.assertIn("waiting for fix-a to merge", self.err)
-        self.assertIn("Write no assignment", self.err)
-        st = oke.load_state()["jobs"]["notes"]
-        self.assertEqual((st["phase"], st["approved"], st["start_after"]), ("awaiting_approval", True, True))
-        self.assertNotIn("notes", self.kinds())  # nothing to ask while it waits
-        board = dict((j["job"], j) for pm in oke.board_tree(oke.load_state(), []) for j in pm["jobs"])
-        self.assertEqual(board["notes"]["after_wait"], ["fix-a"])
-        lines = "\n".join(t for _, t in oke.board_lines(oke.board_tree(oke.load_state(), [])))
-        self.assertIn("waiting for after-job fix-a", lines)
-        self.advance("fix-a", "merging")
-        oke.ledger_add("fix-a", "oke", "abc1234", "merge", "pass")
-        self.assertEqual(self.cli("job", "verify", "fix-a", "--accept", "user checked"), 0, self.err)
-        item = self.kinds()["notes"]
-        self.assertEqual((item["kind"], item["rank"]), ("after_ready", 0))
-        self.assertEqual(item["text"], "job notes may start: after-job fix-a is finished")
-        self.assertEqual(self.texts(), [])  # no mail: the orchestrator starts it
-        self.assertEqual(self.cli("job", "phase", "notes", "working"), 0, self.err)
-        self.assertNotEqual((self.kinds().get("notes") or {}).get("kind"), "after_ready")
-        self.assertNotIn("start_after", oke.load_state()["jobs"]["notes"])
-
-    def gate(self, job, after, *extra):
-        """A folder job approved and held at its start by `after`."""
-        self.assertEqual(self.new(job, "a", *extra), 0, self.err)
-        self.plan(job, after)
-        self.advance(job, "awaiting_approval")
-        self.assertEqual(self.cli("job", "phase", job, "working"), 1)
-        return self.err
-
-    def test_a_cancelled_after_job_asks_the_user_and_the_after_can_be_dropped(self):
-        self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
-        self.gate("notes", "fix-a", "--path", self.folder("notes"))
-        self.assertNotIn("notes", self.kinds())
-        self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
-        item = self.kinds()["notes"]
-        self.assertEqual((item["kind"], item["after"], item["phase"]), ("after_broken", "fix-a", "awaiting_approval"))
-        self.assertEqual(item["text"], "job notes cannot start: after-job fix-a was cancelled; ask the user: "
-                                       "drop it (`$OKE job after notes --drop fix-a`) or cancel notes")
-        self.assertEqual(self.texts(), [])  # its PM is not told to ask too: one question, from the orchestrator
-        self.assertEqual(self.cli("job", "after", "notes", "--drop", "nope"), 1)
-        self.assertEqual(self.cli("job", "after", "notes", "--drop", "fix-a"), 0, self.err)  # the user's call
-        self.assertEqual(json.loads(self.out)["after"], [])
-        self.assertNotIn("after", oke.read_header(os.path.join(self.home, "jobs", "notes", "plan.md")))
-        item = self.kinds()["notes"]
-        self.assertEqual((item["kind"], item["text"]), ("after_ready", "job notes may start: its after-jobs were dropped"))
-        self.assertEqual(self.cli("job", "phase", "notes", "working"), 0, self.err)
-
-    def test_two_jobs_waiting_for_each_other_ask_the_user(self):
-        self.assertEqual(self.new("n2", "a", "--path", self.folder("n2")), 0, self.err)
-        self.plan("n2", "notes")
-        self.gate("notes", "n2", "--path", self.folder("notes"))
-        item = self.kinds()["notes"]
-        self.assertEqual(item["kind"], "after_broken", item)
-        self.assertIn("after-job n2 itself waits for notes (a cycle)", item["text"])
-        self.assertEqual(self.cli("job", "after", "notes", "--drop", "n2"), 0, self.err)
-        self.assertEqual(self.kinds()["notes"]["kind"], "after_ready")
-
-    def test_a_mistyped_after_job_asks_the_user(self):
-        self.assertIn("after-job fix-z is no known job", self.gate("notes", "fix-z, other", "--path", self.folder("n")))
-        item = self.kinds()["notes"]
-        self.assertEqual(item["kind"], "after_broken")
-        self.assertIn("after-job fix-z is no known job; ask the user: drop it (`$OKE job after notes --drop fix-z`)", item["text"])
-        self.assertEqual(self.cli("job", "after", "notes", "--drop", "fix-z"), 0, self.err)
-        self.assertEqual(oke.read_header(os.path.join(self.home, "jobs", "notes", "plan.md"))["after"], "other")
-
-    def test_a_report_still_shows_while_the_job_waits_at_its_start(self):
-        self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
-        self.gate("notes", "fix-a", "--path", self.folder("notes"))
-        self.write("home/jobs/notes/pm/assignment.md", "agent: a\nrole: pm\njob: notes\nseq: 1\n---\n")
-        st = oke.load_state()
-        st["jobs"]["notes"]["sent_seq"] = 1
-        oke.save_state(st)
-        self.assertNotIn("notes", self.kinds())
-        self.write("home/jobs/notes/pm/report.md", "type: question\nseq: 1\n---\nwhich file?\n")
-        self.assertEqual(self.kinds()["notes"]["kind"], "question")
 
     def test_an_approval_cut_before_its_assignment_is_unassigned_not_a_done_report(self):
         self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
@@ -1017,98 +897,6 @@ class TestAfterNotices(PmBase):
         self.assertEqual(self.cli("job", "split", "look", "look-b", "--path", self.folder("b")), 1)
         self.assertIn("research jobs are not split", self.err)
 
-    def test_a_git_split_job_at_its_merge_asks_once_when_its_after_job_is_cancelled(self):
-        self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
-        api = self.git_repo("api")
-        self.assertEqual(self.cli("job", "split", "fix-a", "fix-a-api", "--path", api, "--after", "fix-a"), 0,
-                         self.err)
-        self.advance("fix-a-api", "merging")
-        self.write("home/jobs/fix-a-api/pm/assignment.md", "agent: a\nrole: pm\njob: fix-a-api\nseq: 1\n---\n")
-        self.write("home/jobs/fix-a-api/pm/report.md", "type: waiting\nseq: 1\non: fix-a\n---\n")
-        st = oke.load_state()
-        st["jobs"]["fix-a-api"]["sent_seq"] = 1  # the PM keeps its merge waiting
-        oke.save_state(st)
-        self.assertEqual(self.cli("job", "merge", "fix-a-api"), 1)
-        self.assertIn("waiting for fix-a to merge", self.err)
-        self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
-        self.assertEqual(self.texts(), ["oke: Job fix-a-api: after-job fix-a was cancelled: the orchestrator asks "
-                                        "the user; keep the job waiting"])
-        self.assertEqual(self.cli("pending"), 0, self.err)
-        items = [i for i in json.loads(self.out)["items"] if i["job"] == "fix-a-api"]
-        self.assertEqual([(i["kind"], i.get("phase")) for i in items], [("after_broken", "merging")], items)
-        self.assertEqual(items[0]["text"], "job fix-a-api cannot merge: after-job fix-a was cancelled; ask the user: "
-                                           "drop it (`$OKE job after fix-a-api --drop fix-a`) or cancel fix-a-api")
-        self.assertEqual(self.cli("job", "merge", "fix-a-api"), 1)
-        self.assertIn("keep the job waiting", self.err)
-        self.assertEqual(self.cli("job", "after", "fix-a-api", "--drop", "fix-a"), 0, self.err)  # the split's --after
-        self.assertNotIn("after", oke.load_state()["jobs"]["fix-a-api"])
-        self.assertNotEqual((self.kinds().get("fix-a-api") or {}).get("kind"), "after_broken")
-        self.cli("job", "merge", "fix-a-api")  # the merge goes on past the after check
-        self.assertNotIn("after-job", self.err)
-
-    def test_a_folder_job_whose_plan_names_itself_starts(self):
-        self.assertEqual(self.new("notes", "a", "--path", self.folder("notes")), 0, self.err)
-        self.plan("notes", "notes")
-        self.advance("notes", "awaiting_approval")
-        self.assertEqual(oke.after_jobs("notes"), [])
-        self.assertEqual(self.cli("job", "phase", "notes", "working"), 0, self.err)
-        self.assertNotIn("start_after", oke.load_state()["jobs"]["notes"])
-
-    def test_a_job_back_from_review_is_not_held_by_the_gate(self):
-        self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
-        self.assertEqual(self.new("notes", "a", "--path", self.folder("notes")), 0, self.err)
-        self.advance("notes", "reviewing")
-        self.plan("notes", "fix-a")  # an after: that came later
-        self.assertEqual(self.cli("job", "phase", "notes", "working"), 0, self.err)
-        self.assertNotIn("start_after", oke.load_state()["jobs"]["notes"])
-
-    def seq(self, job, report="waiting"):
-        """The PM got its assignment and reported."""
-        self.write("home/jobs/%s/pm/assignment.md" % job, "agent: a\nrole: pm\njob: %s\nseq: 1\n---\n" % job)
-        self.write("home/jobs/%s/pm/report.md" % job, "type: %s\nseq: 1\n---\n" % report)
-        st = oke.load_state()
-        st["jobs"][job]["sent_seq"] = 1
-        oke.save_state(st)
-
-    def test_a_working_job_hears_of_a_cancelled_after_job_only_at_its_merge(self):
-        self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
-        self.assertEqual(self.new("fix-b", "a", "--path", self.repo), 0, self.err)
-        self.plan("fix-b", "fix-a")
-        self.advance("fix-b", "working")
-        self.seq("fix-b")
-        self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
-        self.assertEqual(self.texts(), [])  # it keeps working: nothing to wait for yet
-        self.assertNotIn("fix-b", self.kinds())
-        self.assertEqual(self.cli("job", "phase", "fix-b", "awaiting_merge"), 0, self.err)
-        item = self.kinds()["fix-b"]
-        self.assertEqual((item["kind"], item["phase"]), ("after_broken", "awaiting_merge"))
-        self.assertIn("job fix-b cannot merge: after-job fix-a was cancelled", item["text"])
-        self.assertEqual(self.cli("job", "after", "fix-b", "--drop", "fix-a"), 0, self.err)
-        self.assertEqual(self.kinds()["fix-b"]["kind"], "merge")  # the merge question comes back by itself
-
-    def test_a_started_folder_job_gets_no_mail_when_its_after_job_is_cancelled(self):
-        self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
-        self.assertEqual(self.new("notes", "a", "--path", self.folder("notes")), 0, self.err)
-        self.advance("notes", "working")
-        self.plan("notes", "fix-a")
-        self.assertEqual(self.cli("job", "cancel", "fix-a"), 0, self.err)
-        self.assertEqual(self.texts(), [])
-
-    def test_git_jobs_at_their_merge_hear_when_a_folder_job_is_done(self):
-        self.assertEqual(self.new("notes", "a", "--path", self.folder("notes")), 0, self.err)
-        for job, phase in (("fix-a", "merging"), ("fix-b", "awaiting_merge")):
-            self.assertEqual(self.new(job, "a", "--path", self.repo), 0, self.err)
-            self.plan(job, "notes")
-            self.advance(job, phase)
-        self.assertEqual(oke.after_block(oke.load_state(), "notes"), "waiting for notes to be done")
-        self.advance("notes", "working")
-        self.logged("notes")
-        self.assertEqual(self.texts(), [])
-        self.assertEqual(self.cli("job", "phase", "notes", "done"), 0, self.err)
-        self.assertEqual(sorted(self.texts()), ["oke: Job fix-a: after-job notes is finished",
-                                                "oke: Job fix-b: after-job notes is finished"])
-        self.assertIsNone(oke.after_block(oke.load_state(), "notes"))
-
 
 class TestCost(PmBase):
     def test_old_pms_usage_is_its_own_place(self):
@@ -1173,7 +961,7 @@ class TestMigration(SpawnBase):
 
 
 class TestOutputs(PmBase):
-    """What a job hands over: code (a merge), files (a folder job), result (an answer or a run)."""
+    """What a job hands over: code (a branch), files (a folder job), result (an answer or a run)."""
 
     def setUp(self):
         PmBase.setUp(self)
@@ -1218,10 +1006,8 @@ class TestOutputs(PmBase):
         self.assertIn("has worked on its plan", self.err)
         self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)  # the same again: fine
 
-    def test_an_experiment_needs_a_worktree_never_merges_and_ends_on_a_passing_review(self):
+    def test_an_experiment_needs_a_worktree_is_never_delivered_and_ends_on_a_passing_review(self):
         self.assertEqual(self.new("sim", "a", "--path", self.repo), 0, self.err)
-        self.assertEqual(self.new("after-sim", "a", "--path", self.folder("notes")), 0, self.err)
-        self.write("home/jobs/after-sim/plan.md", "job: after-sim\nafter: sim\n---\n")
         self.advance("sim", "planning")
         self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)
         self.plan("sim", worktree=False)
@@ -1231,9 +1017,8 @@ class TestOutputs(PmBase):
         self.plan("sim")
         self.assertEqual(self.cli("job", "phase", "sim", "working"), 0, self.err)
         self.worktree("sim")
-        self.assertEqual(self.cli("job", "phase", "sim", "awaiting_merge"), 1)
-        self.assertEqual(self.cli("job", "merge", "sim"), 1)
-        self.assertIn("nothing to merge", self.err)
+        self.assertEqual(self.cli("job", "deliver", "sim"), 1)
+        self.assertIn("not code", self.err)
         self.assertEqual(self.cli("wiki", "log", "--job", "sim", "--note", "none"), 0, self.err)
         self.report("sim", "sim-w1")
         self.assertEqual(self.cli("job", "phase", "sim", "done"), 1)  # no review yet
@@ -1246,7 +1031,6 @@ class TestOutputs(PmBase):
         self.assertEqual(self.cli("job", "phase", "sim", "done"), 1)
         os.utime(self.path("home/jobs/sim/sim-rv/report.md"), (later + 5, later + 5))
         self.assertEqual(self.cli("job", "phase", "sim", "done"), 0, self.err)
-        self.assertIsNone(oke.after_block(oke.load_state(), "sim"))  # finished for its waiters
         self.assertTrue(oke.wiki_verified("sim", oke.load_state()["jobs"]["sim"]))
 
     def test_an_archived_experiment_keeps_its_worktree_until_cleaned(self):
@@ -1262,20 +1046,19 @@ class TestOutputs(PmBase):
         self.assertEqual(self.cli("job", "archive", "sim"), 0, self.err)
         self.assertIn("kept_worktree: " + wt, self.out)
         self.assertEqual(self.cli("status"), 0, self.err)
-        self.assertEqual(json.loads(self.out)["kept_worktrees"], [{"job": "sim", "path": wt}])
+        self.assertEqual(json.loads(self.out)["kept_worktrees"], [{"job": "sim", "path": wt, "branch": None, "done": True}])
         self.assertEqual(self.cli("job", "clean", "sim"), 0, self.err)
         self.assertFalse(os.path.isdir(wt))
         self.assertNotIn("branch_left", json.loads(self.out))
         self.assertEqual(subprocess.check_output(["git", "-C", self.repo, "branch", "--list", "oke/sim"]), b"")
         self.assertEqual(self.cli("status"), 0, self.err)
         self.assertNotIn("kept_worktrees", json.loads(self.out))
-        self.assertEqual(self.cli("job", "clean", "sim"), 1)  # gone already: the archive says so
+        self.assertEqual(self.cli("job", "clean", "sim"), 0, self.err)  # gone already: nothing to do
+        self.assertEqual(json.loads(self.out)["result"], "already clean")
         self.assertEqual(self.cli("job", "clean", "nothing"), 1)
 
     def test_a_code_job_that_changed_nothing_ends_with_no_change(self):
         self.assertEqual(self.new("fix", "a", "--path", self.repo), 0, self.err)
-        self.assertEqual(self.new("next", "a", "--path", self.folder("notes")), 0, self.err)
-        self.write("home/jobs/next/plan.md", "job: next\nafter: fix\n---\n")
         self.plan("fix")
         self.advance("fix", "working")
         wt = self.worktree("fix")
@@ -1297,10 +1080,8 @@ class TestOutputs(PmBase):
                          [("orchestrator", "no-change", "accept")])
         self.assertEqual(self.cli("wiki", "log", "--job", "fix", "--note", "none"), 0, self.err)
         self.assertEqual(self.cli("job", "phase", "fix", "done"), 0, self.err)  # no review: the user accepted
-        self.assertIsNone(oke.after_block(oke.load_state(), "fix"))
         self.assertEqual(self.cli("job", "archive", "fix"), 0, self.err)
-        self.assertNotIn("kept_worktree", self.out)  # an experiment only
-        self.assertIsNone(oke.after_block(oke.load_state(), "fix"))  # archived: still finished
+        self.assertNotIn("kept_worktree", self.out)  # nothing kept: no change
 
     def test_a_start_in_the_main_checkout_takes_in_only_what_the_plan_names(self):
         self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)

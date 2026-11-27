@@ -1,4 +1,4 @@
-"""Slice 3: several jobs per PM, inbox, per-PM wait, user queue, merge line."""
+"""Slice 3: several jobs per PM, inbox, per-PM wait, user queue."""
 import io
 import json
 import os
@@ -48,27 +48,27 @@ class TestJobState(S3Base):
         self.assertTrue(info["pm_job_dir"].endswith("/jobs/fix-a/pm"))
         self.assertGreaterEqual(oke.load_state()["jobs"]["fix-a"]["phase_at"], before)
 
-    def test_phase_merging_is_accepted_and_moves_phase_at(self):
-        self.job("fix-a", "awaiting_merge")
+    def test_phase_reviewing_is_accepted_and_moves_phase_at(self):
+        self.job("fix-a", "working")
         oke.save_state(dict(oke.load_state(), jobs={"fix-a": dict(oke.load_state()["jobs"]["fix-a"], phase_at=1.0)}))
-        self.assertEqual(self.cli("job", "phase", "fix-a", "merging"), 0)
+        self.assertEqual(self.cli("job", "phase", "fix-a", "reviewing"), 0)
         job = oke.load_state()["jobs"]["fix-a"]
-        self.assertEqual(job["phase"], "merging")
+        self.assertEqual(job["phase"], "reviewing")
         self.assertGreater(job["phase_at"], 1.0)
 
-    def test_spawn_of_a_worker_is_allowed_while_merging(self):
-        # a merge conflict sends the worker back to rebase; a dead one must come back
-        self.job("fix-a", "merging")
+    def test_spawn_of_a_worker_is_allowed_while_reviewing(self):
+        # a rebase conflict at the delivery sends the worker back; a dead one must come back
+        self.job("fix-a", "reviewing")
         a = self.assignment("fix-a-w1", "worker", "fix-a")
         self.fake({"agent list": [J({"agents": []})], "agent start": [E("agent_not_ready")]})
         self.cli("spawn", a, "--pane", "w1:p2")
         self.assertNotIn("plan not approved", self.err)
 
     def test_defer_records_the_current_item_key(self):
-        self.job("fix-a", "awaiting_merge")
+        self.job("fix-a", "awaiting_approval")
         self.assertEqual(self.cli("job", "defer", "fix-a"), 0)
         job = oke.load_state()["jobs"]["fix-a"]
-        self.assertEqual(job["deferred"], "merge:%r" % job["phase_at"])
+        self.assertEqual(job["deferred"], "plan:%r" % job["phase_at"])
 
     def test_defer_with_nothing_pending_fails(self):
         self.job("fix-a", "working")
@@ -656,8 +656,8 @@ class TestPending(S3Base):
         oke.save_state(s)
 
     def test_order_is_rank_then_time(self):
-        self.job("m-old", "awaiting_merge")
-        self.at("m-old", 1.0)
+        self.job("p-old", "awaiting_approval")
+        self.at("p-old", 1.0)
         self.job("p-new", "awaiting_approval")
         self.at("p-new", 9.0)
         self.job("q", "working")
@@ -668,7 +668,7 @@ class TestPending(S3Base):
         self.pm_job("w", 1, REPORT("waiting", 1))
         items = self.pending()
         self.assertEqual([(i["job"], i["kind"]) for i in items],
-                         [("d", "report_done"), ("q", "question"), ("p-new", "plan"), ("m-old", "merge")])
+                         [("d", "report_done"), ("q", "question"), ("p-old", "plan"), ("p-new", "plan")])
 
     def test_a_report_of_an_old_seq_is_not_pending(self):
         self.job("q", "working")

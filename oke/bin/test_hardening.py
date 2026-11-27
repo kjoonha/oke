@@ -49,10 +49,10 @@ class TestOutageDuringRevive(ReviveBase):
 
 
 class TestPhaseGates(SpawnBase):
-    def test_merging_needs_awaiting_merge(self):
+    def test_the_merge_phases_are_gone(self):
         self.job("fix-a", "working")
         self.assertEqual(self.cli("job", "phase", "fix-a", "merging"), 1)
-        self.assertIn("awaiting_merge", self.err)
+        self.assertIn("bad phase", self.err)
         self.assertEqual(oke.load_state()["jobs"]["fix-a"]["phase"], "working")
 
     def test_working_needs_the_plan_approval_step(self):
@@ -60,16 +60,18 @@ class TestPhaseGates(SpawnBase):
         self.assertEqual(self.cli("job", "phase", "fix-a", "working"), 1)
         self.advance("fix-a", "working")
 
-    def test_done_needs_merging(self):
-        self.job("fix-a", "awaiting_merge")
+    def test_done_needs_the_work_started(self):
+        self.job("fix-a", "awaiting_approval")
+        self.logged("fix-a")
+        self.verified("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 1)
 
-    def test_done_needs_a_verified_merge(self):
-        # a PM that skipped `oke job merge` must not tell the user the work is in
-        self.job("fix-a", "merging")
+    def test_done_needs_a_delivery(self):
+        # a PM that skipped `oke job deliver` must not tell the user the work is ready
+        self.job("fix-a", "reviewing")
         self.logged("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 1)
-        self.assertIn("merge is none", self.err)
+        self.assertIn("not delivered", self.err)
         self.verified("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
 
@@ -77,12 +79,11 @@ class TestPhaseGates(SpawnBase):
         self.job("fix-a", "planning")
         self.logged("fix-a")
         self.verified("fix-a")
-        for step in ("awaiting_approval", "working", "awaiting_merge", "merging", "done"):
+        for step in ("awaiting_approval", "working", "reviewing", "done"):
             self.assertEqual(self.cli("job", "phase", "fix-a", step), 0, self.err)
 
-    def test_failed_and_a_merge_hold_are_always_allowed(self):
-        self.job("fix-a", "merging")
-        self.assertEqual(self.cli("job", "phase", "fix-a", "awaiting_merge"), 0)
+    def test_failed_is_always_allowed(self):
+        self.job("fix-a", "reviewing")
         self.assertEqual(self.cli("job", "phase", "fix-a", "failed"), 0)
 
 
@@ -199,7 +200,7 @@ class TestClaudeDevFixes(unittest.TestCase):
             args = oke.launch_args("worker", dict(self.config, autonomy=mode), "/h", "/p")
             self.assertIn("Bash(git push:*)", args[args.index("--disallowedTools") + 1:])
 
-    def test_a_worker_may_not_edit_the_files_the_merge_gate_trusts(self):
+    def test_a_worker_may_not_edit_the_files_the_delivery_gate_trusts(self):
         denied = self.denied("worker", "/h/jobs/j/j-w1")
         for tail in ("/*.md", "/j-rv*/**", "/pm/**", "/*.tsv"):
             self.assertIn(oke.edit_rules("/h/jobs/j", tail=tail)[0], denied)

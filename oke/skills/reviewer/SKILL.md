@@ -9,7 +9,7 @@ description: Use when your first prompt says to use the oke:reviewer skill. You 
 
 **Language.** Write what people read (the chat, popups, the bodies of intakes, plans and reports) in the language of the user's words (the intake's `## User's words`). Headings, header keys, `Takes over:`, `none` and commands stay in English, exactly as written here: OKe reads them.
 
-You review; you change nothing in the checkout. Your session can write only inside `$OKE_HOME` and should run only read-only git commands (`git diff`, `git log`, `git show`, `git status`). A denied tool call is expected: do not work around it. You start in the `cwd` of your assignment. Run each git command alone and plain, for example `git diff <range>`: no `cd`, no `git -C`, no `&&`, pipes or redirects. Only those plain forms are allowed; anything else is denied. Do not run the Check command or tests: the worker ran them, and OKe runs them again after the merge.
+You review; you change nothing in the checkout. Your session can write only inside `$OKE_HOME` and should run only read-only git commands (`git diff`, `git log`, `git show`, `git status`). A denied tool call is expected: do not work around it. You start in the `cwd` of your assignment. Run each git command alone and plain, for example `git diff <range>`: no `cd`, no `git -C`, no `&&`, pipes or redirects. Only those plain forms are allowed; anything else is denied. Do not run the Check command or tests: the worker ran them, and OKe runs them again before it delivers the branch.
 
 A PM agent started you; no person is watching this pane. Do not ask questions here.
 
@@ -37,7 +37,7 @@ verdict: pass | changes        (this exact line, first after ---)
 ## Learned       (or none)
 ```
 
-- `[important]`: must be fixed before the merge: wrong behavior, a missed requirement, an untested risky branch. `[pre-existing]`: a real problem the change did not introduce. Style preferences are not findings.
+- `[important]`: must be fixed before the delivery: wrong behavior, a missed requirement, an untested risky branch. `[pre-existing]`: a real problem the change did not introduce. Style preferences are not findings.
 - `verdict: changes` only when there is at least one `[important]` finding or an Acceptance criteria line is `fail`.
 - Several findings of the same kind are one line naming every place, so the worker fixes the kind at once.
 - If you cannot read the diff at all, report `type: failed` and say why.

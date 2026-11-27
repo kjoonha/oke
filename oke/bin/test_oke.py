@@ -88,7 +88,7 @@ class Base(unittest.TestCase):
         self.git(repo, "worktree", "add", "-q", p, "-b", "wt")
         return p
 
-    PATH = ("intake", "planning", "awaiting_approval", "working", "awaiting_merge", "merging", "done")
+    PATH = ("intake", "planning", "awaiting_approval", "working", "done")
 
     def advance(self, name, phase):
         """Walk job `name` through the phases up to `phase`, as the orchestrator does
@@ -107,9 +107,8 @@ class Base(unittest.TestCase):
             self.assertEqual(self.cli("job", "phase", name, step), 0, self.err)
 
     def verified(self, name):
-        """A merge OKe made and the PM verified, which `job phase done` asks for."""
-        oke.ledger_add(name, "oke", "abc1234", "merge", "ok")
-        oke.ledger_add(name, "pm", "abc1234", "verify", "pass")
+        """A delivery OKe recorded, which `job phase done` asks for of a code job."""
+        oke.ledger_add(name, "oke", "abc1234", "deliver", "ok", "main pre=abc1234")
 
     def logged(self, name):
         """The PM's wiki line for the job, which `job phase done` asks for."""
@@ -232,7 +231,7 @@ class TestState(Base):
         self.assertEqual(os.path.normcase(path), os.path.normcase(os.path.join(root, "backend")))
         self.assertTrue(os.path.isdir(path))
         self.assertEqual(oke.wiki_dir("backend"), path)
-    def test_size_is_set_while_planning_and_every_merge_is_approved_on_its_own(self):
+    def test_size_is_set_while_planning_and_only_grows_once_work_started(self):
         repo = self.git_repo("r")
         for job in ("tiny", "big"):
             self.assertEqual(self.cli("job", "new", job, "--repo", repo), 0)
@@ -242,12 +241,10 @@ class TestState(Base):
         self.assertEqual(oke.load_state()["jobs"]["tiny"]["size"], "small")
         for job in ("tiny", "big"):
             self.advance(job, "working")
-        for job in ("tiny", "big"):  # small too: the user approves the merge after the review
-            self.assertEqual(self.cli("job", "phase", job, "merging"), 1)
         self.assertEqual(self.cli("job", "size", "big", "normal"), 1)  # no shrinking once work started
         self.assertEqual(self.cli("job", "size", "tiny", "normal"), 0, self.err)  # a size may grow
-        self.advance("tiny", "merging")
-        self.assertEqual(self.cli("job", "size", "tiny", "large"), 1)  # not once merging
+        self.advance("tiny", "done")
+        self.assertEqual(self.cli("job", "size", "tiny", "large"), 1)  # not once done
 
     def test_an_old_lane_in_state_json_becomes_a_size(self):
         jobs = {"a": {"phase": "working", "lane": "trivial"}, "b": {"phase": "working", "lane": "small"},
@@ -339,7 +336,7 @@ class TestState(Base):
         self.assertNotIn("fix-b", oke.load_state()["jobs"])
 
     def test_job_new_refuses_a_name_whose_branch_exists(self):
-        # an archived job keeps its branch; reusing the name would review and merge the old branch
+        # an archived job keeps its branch; reusing the name would review and deliver the old branch
         repo = self.git_repo("r")
         self.git(repo, "branch", "oke/fix-a")
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 1)
@@ -374,7 +371,7 @@ class TestState(Base):
         repo = self.git_repo("r")
         self.assertEqual(self.cli("job", "new", "Bad Name", "--repo", repo), 1)
 
-    def test_a_folder_outside_git_is_a_direct_job_with_no_merge(self):
+    def test_a_folder_outside_git_is_a_direct_job_with_no_branch(self):
         folder = self.path("plain")
         os.makedirs(folder)
         self.assertEqual(self.cli("job", "new", "calc", "--repo", folder), 0, self.err)
@@ -382,20 +379,19 @@ class TestState(Base):
         self.assertEqual(oke.repo_key(folder), oke.load_state()["jobs"]["calc"]["git_key"])
         self.assertEqual(self.cli("job", "new", "x", "--repo", self.path("missing")), 1)
         self.advance("calc", "working")
-        self.assertEqual(self.cli("job", "phase", "calc", "awaiting_merge"), 1)
-        self.assertEqual(self.cli("job", "merge", "calc"), 1)
+        self.assertEqual(self.cli("job", "deliver", "calc"), 1)
         self.assertEqual(self.cli("job", "phase", "calc", "done"), 1)  # no wiki line yet
         self.logged("calc")
         self.assertEqual(self.cli("job", "phase", "calc", "done"), 0, self.err)
 
-    def test_research_skips_the_plan_and_the_merge(self):
+    def test_research_skips_the_plan_and_the_delivery(self):
         repo = self.git_repo("r")
         self.assertEqual(self.cli("job", "new", "look", "--repo", repo, "--research"), 0, self.err)
         self.assertEqual(self.cli("job", "phase", "look", "working"), 1)  # the interview first
         self.assertEqual(self.cli("interview", "look", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
         self.assertEqual(self.cli("job", "phase", "look", "working"), 0, self.err)
         self.assertEqual(self.cli("job", "size", "look", "small"), 1)
-        self.assertEqual(self.cli("job", "phase", "look", "merging"), 1)
+        self.assertEqual(self.cli("job", "deliver", "look"), 1)
         self.logged("look")
         self.assertEqual(self.cli("job", "phase", "look", "done"), 0, self.err)
 
@@ -1147,7 +1143,7 @@ class TestStatus(SpawnBase):
     def test_job_classes(self):
         self.set_pm()
         self.job("j-work", "working")
-        self.job("j-merge", "awaiting_merge")
+        self.job("j-plan", "awaiting_approval")
         oke.write_json_atomic(oke.children_path(self.pm), {
             "j-work-w1": {"agent": "j-work-w1", "job": "j-work", "pane": "w2:p1"},
             "j-work-rv": {"agent": "j-work-rv", "job": "j-work", "pane": "w2:p2"}})
@@ -1155,10 +1151,10 @@ class TestStatus(SpawnBase):
         work = alive["jobs"]["j-work"]
         self.assertEqual((work["phase"], work["class"], work["agents"]),
                          ("working", "alive", {"j-work-w1": "alive", "j-work-rv": "dead"}))
-        self.assertEqual(alive["jobs"]["j-merge"]["class"], "awaiting_user")
+        self.assertEqual(alive["jobs"]["j-plan"]["class"], "awaiting_user")
         dead = self.status([])
         self.assertEqual(dead["jobs"]["j-work"]["class"], "disconnected")
-        self.assertEqual(dead["jobs"]["j-merge"]["class"], "awaiting_user")
+        self.assertEqual(dead["jobs"]["j-plan"]["class"], "awaiting_user")
 
     def test_orphan_job_dir(self):
         os.makedirs(os.path.join(self.home, "jobs", "old-job"))

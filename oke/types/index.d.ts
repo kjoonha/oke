@@ -21,8 +21,8 @@ export type BoardJob = {
   job: string
   phase: string
   agents: BoardNode[]
-  /** The ledger: none, unverified, verified or rolled_back. */
-  merge: string
+  /** The ledger: none or delivered (unreadable when its key is lost). */
+  deliver: string
   /** The job size the PM chose: small, normal or large (or research). */
   size?: string
   /** What the job waits on the user for (`oke pending` kind), null when nothing or deferred. */
@@ -34,8 +34,6 @@ export type BoardJob = {
   path?: string
   /** PMs that still owe this job an answer (`oke peer ask`). */
   peer_wait?: string[]
-  /** After-jobs (plan `after:` or split `--after`) still holding this job: a git job's merge, or a folder job's start. A git after-job must merge and verify, a folder or research one be done; one that can never finish is listed too. */
-  after_wait?: string[]
 }
 
 /** One PM: its name, its node and its jobs. */

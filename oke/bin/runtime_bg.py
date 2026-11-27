@@ -283,18 +283,19 @@ class BgRuntime(object):
                 raise  # already stopped: rm still applies
         run_claude(["rm", place])
 
-    def worktree_create(self, repo, branch, label):
+    def worktree_create(self, repo, branch, label, start=None):
         """A worktree inside the repository: a folder in a trusted folder is trusted,
-        so `claude --bg` starts there (measured)."""
+        so `claude --bg` starts there (measured). A new branch starts at `start` (else HEAD)."""
         path = os.path.join(repo, ".claude", "worktrees", "oke-" + label)
         exists = subprocess.call(["git", "-C", repo, "rev-parse", "--verify", "--quiet", branch],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
-        args = ["git", "-C", repo, "worktree", "add", path] + ([branch] if exists else ["-b", branch])
+        args = ["git", "-C", repo, "worktree", "add"] + (
+            [path, branch] if exists else ["-b", branch, path] + ([start] if start else []))
         p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         out, err = p.communicate()
         if p.returncode != 0:
             raise HerdrError("worktree_failed", err.decode("utf-8", "replace").strip())
-        # main's `git status` must not list the worktree: `oke job merge` needs a clean checkout
+        # main's `git status` must not list the worktree: it is not the user's change
         exclude = subprocess.check_output(["git", "-C", repo, "rev-parse", "--git-path", "info/exclude"])
         exclude = os.path.join(repo, exclude.decode("utf-8").strip())
         line = "/.claude/worktrees/"

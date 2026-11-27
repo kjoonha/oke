@@ -18,7 +18,7 @@ PM 은 사용자가 만드는 역할 (`backend`, `docs` 같은 이름) 이다. P
 
 PM, worker, reviewer 는 OKe 홈 안의 자기 폴더 (PM 은 자기 열린 job 의 폴더도. ledger 처럼 OKe 만 쓰는 파일은 제외), OKe 의 `tmp/`, 자기 memory 폴더, 무언가를 바꾸는 열린 job 의 경로 (research 제외) 에만 Edit 나 Write 할 수 있다: git job 은 worktree (없으면 checkout), 폴더 job 은 그 폴더에서 아래의 git 저장소와 밖으로 나가는 링크를 뺀 곳 (`oke path-check`). 폴더 job 은 파일을 그 자리에서 바꾸고 백업은 없다.
 
-job 이 내놓는 것 (`oke status` 의 `output`) 은 세 가지다. `code` 는 main 브랜치에 merge 되는 변경으로, 사용자가 merge 를 승인한다 (`autonomy: full` 이 아니면 크기와 상관없이 따로 묻는다). `files` 는 git 이 아닌 폴더의 파일이 그 자리에서 바뀌는 것이다 (merge 없음). `result` 는 답 (조사 job) 이나 실행 결과 (실험 job: worktree 에서 임시 수정 후 sim 같은 것을 돌림) 다. 실험 job 은 아무것도 merge 하지 않는다. reviewer 가 출력이 계획의 기준을 만족하는지 보고, worktree 는 사용자가 지우라고 할 때까지 남는다 (`oke job clean <job>`). 하다 보니 바꿀 것이 없는 job 은 사용자가 동의하면 실패가 아닌 완료로 끝난다.
+job 이 내놓는 것 (`oke status` 의 `output`) 은 세 가지다. `code` 는 리뷰를 통과하고 최신 base 브랜치 위로 올려 검사까지 마친 브랜치 `oke/<job>` 이다. OKe 는 사용자의 브랜치에 merge 하지 않는다: job 이 끝나면 orchestrator 가 브랜치와 merge 명령 (`git merge oke/<job>`) 을 알려 주고, `origin` 이 GitHub 이면 PR 을 열지 묻는다 (`oke job pr <job>`: 브랜치를 push 하고 `gh pr create` 를 돌린다). worktree 와 브랜치는 남고, `oke job clean <job>` 이 지운다 (merge 안 된 브랜치나 커밋 안 된 파일이 있으면 `--force` 가 필요하다). `files` 는 git 이 아닌 폴더의 파일이 그 자리에서 바뀌는 것이다. `result` 는 답 (조사 job) 이나 실행 결과 (실험 job: worktree 에서 임시 수정 후 sim 같은 것을 돌림) 다. 실험 job 은 아무것도 넘기지 않는다. reviewer 가 출력이 계획의 기준을 만족하는지 보고, worktree 는 사용자가 지우라고 할 때까지 남는다 (`oke job clean <job>`). 하다 보니 바꿀 것이 없는 job 은 사용자가 동의하면 실패가 아닌 완료로 끝난다.
 
 PM 관리: "PM 추가", "PM <x> 이름 바꿔", "PM <x> 지워" 라고 말한다. 열린 job 이나 보류 job 이 있는 PM 은 그 job 들을 취소하는 데 동의해야 지운다 (wiki 는 `<name>.removed-<time>` 으로 옮겨 둔다). 이름은 열린 job 이나 보류 job 이 있는 동안에만 못 바꾼다. 끝난 job 은 새 이름을 따라간다. 셸에서는 `oke pm list` 로 본다.
 
@@ -63,7 +63,7 @@ herdr pane 또는 일반 터미널에서 Claude Code 를 켜고 `/oke:start`. �
 
 `oke status` (와 `oke board`) 는 어느 터미널에서나 된다: orchestrator 가 고른 runtime 을 읽는다. 그 runtime 의 터미널 밖 (예: OKe 가 herdr 에서 도는데 일반 셸) 에서는 보여 주기만 하고 아무것도 띄우지 못한다.
 
-검사: 계획에는 번호 붙은 수용 기준 (`## Acceptance criteria`) 과 검사 명령 하나 (`## Check command`, 백틱 안) 가 있다. 일을 시작하기 전에 `oke baseline <job>` 이 손대지 않은 checkout 에서 명령을 돌려 원래 깨진 것을 저장한다. worker 는 `oke check <job>` 으로 검사한다: OKe 가 명령을 돌리고, baseline 에 없던 실패 줄만 새 실패로 친다. 결과는 OKe 가 job 장부에 적고 줄마다 서명한다. 서명 키 (`$OKE_HOME/ledger.key`) 는 agent 가 읽을 수 없고, 손으로 적거나 복사한 줄은 서명이 맞지 않아 세지 않는다. `oke job merge` 는 리뷰가 계획의 현재 `criteria_rev` (수용 기준과 명령의 해시) 를 적었고, 장부에 리뷰한 커밋에서 통과한 `oke check` 가 있을 때만 합친다. 합친 뒤 `oke job verify <job>` 은 합친 코드가 검사를 통과한 코드와 같으면 돌리지 않고 통과로 적고, 검사 뒤 다른 merge 가 main 을 바꿨으면 바뀐 파일 목록을 보여 주고 PM 이 정한다: 그 파일이 결과를 바꿀 수 없으면 (예: 문서) `--skip "<이유>"` 로 이유와 파일 목록을 장부에 남기고, 아니면 `--run` 으로 main 에서 명령을 돌려 새 실패가 있을 때 merge 를 되돌린다.
+검사: 계획에는 번호 붙은 수용 기준 (`## Acceptance criteria`) 과 검사 명령 하나 (`## Check command`, 백틱 안) 가 있다. 일을 시작하기 전에 `oke baseline <job>` 이 손대지 않은 checkout 에서 명령을 돌려 원래 깨진 것을 저장한다. worker 는 `oke check <job>` 으로 검사한다: OKe 가 명령을 돌리고, baseline 에 없던 실패 줄만 새 실패로 친다. 결과는 OKe 가 job 장부에 적고 줄마다 서명한다. 서명 키 (`$OKE_HOME/ledger.key`) 는 agent 가 읽을 수 없고, 손으로 적거나 복사한 줄은 서명이 맞지 않아 세지 않는다. `oke job deliver <job>` 은 리뷰가 계획의 현재 `criteria_rev` (수용 기준과 명령의 해시) 를 적었고, 장부에 리뷰한 커밋에서 통과한 `oke check` 가 있을 때만 브랜치를 넘긴다. base 브랜치가 앞서 갔으면 worktree 에서 rebase 한다: 충돌이면 worker 에게 돌아가고, 같은 변경 (`git patch-id` 가 같음) 이면 리뷰가 새 커밋으로 이어지고 PM 이 거기서 `oke check` 를 돌린 뒤 다시 넘긴다. 마지막 deliver 가 브랜치 끝과 같아야 job 이 끝난다. main checkout 에서 일한 job 은 리뷰한 변경이 거기에 커밋된다.
 
 ## 예약 실행: `/oke:automate`
 
@@ -106,7 +106,7 @@ OKe 는 파일을 `~/.oke` 에 둔다. 다른 폴더를 쓰려면 `~/.claude/set
   - 컬러 스킴 (역할 색을 그 스킴의 팔레트에서 가져온다): `tokyo-night`, `catppuccin` (mocha), `github` (dark), `dracula`, `nord`, `gruvbox`, `solarized`, `one-dark`, `monokai`, `rose-pine`, `everforest`, `kanagawa`, `ayu`, `material`, `synthwave-84`.
   - 모르는 이름이면 `disco`.
 
-- `autonomy`: `conservative` (worker 가 명령마다 승인을 묻는다), `balanced` (기본), `full`. `full` 이면 orchestrator 가 계획과 merge 를 묻지 않고 승인하고, 죽은 (`gone`) PM 이나 자식을 한 번은 묻지 않고 다시 띄운다 (`oke revive <name> --auto`); 한 줄로 알려 준다 (PM 은 다시 띄운 자식을 자기 board 에 적는다). 그 뒤 아무 보고 없이 또 죽으면 묻는다 (resume / hold / cancel). hold 한 job 은 다시 띄우지 않는다. `conservative` 와 `balanced` 는 늘 묻는다.
+- `autonomy`: `conservative` (worker 가 명령마다 승인을 묻는다), `balanced` (기본), `full`. `full` 이면 orchestrator 가 계획을 묻지 않고 승인하고, 죽은 (`gone`) PM 이나 자식을 한 번은 묻지 않고 다시 띄운다 (`oke revive <name> --auto`); 한 줄로 알려 준다 (PM 은 다시 띄운 자식을 자기 board 에 적는다). 그 뒤 아무 보고 없이 또 죽으면 묻는다 (resume / hold / cancel). hold 한 job 은 다시 띄우지 않는다. `conservative` 와 `balanced` 는 늘 묻는다.
 - `lean_launch`: PM / worker / reviewer 를 사용자 plugin, hook, MCP 서버 없이 띄운다 (`--setting-sources project,local --strict-mcp-config`). 사용자 `settings.json` 에서 herdr hook 과 `env` 만 `~/.oke/lean-settings.json` 으로 옮긴다. 시작 context 가 약 76k 에서 40k token 으로 준다. 도구도 역할별 핵심 도구만 켠다 (`--tools`, 시작 context 약 15k token). PM 이 job 마다 assignment header 의 `tools:`, `mcp:`, `plugins:` 로 필요한 것만 더 켠다 (`oke.py extras` 가 목록을 보여준다). 자식에게 개인 설정 전부가 필요하면 `false`.
 - `models`: 역할 (`pm`, `worker`, `reviewer`) 마다 쓸 model. 기본 `opus`.
 - `effort`: 역할 (`pm`, `worker`, `reviewer`) 마다 effort 수준: `low`, `medium`, `high`, `xhigh`, `max`. `lean_launch` 이면 빠진 역할은 사용자 설정의 `effortLevel` 이 아니라 Claude Code 기본 effort 로 돈다. `lean_launch` 가 `false` 면 자식이 사용자 설정을 읽는다.

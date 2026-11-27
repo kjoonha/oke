@@ -24,8 +24,8 @@ import runtime_herdr
 import wiki
 from runtime_herdr import DialogError, HerdrError, herdr, herdr_text, replace_file, session_of, write_private  # noqa: F401 (tests)
 
-PHASES = ("intake", "planning", "awaiting_approval", "working", "reviewing",
-          "awaiting_merge", "merging", "done", "failed")
+PHASES = ("intake", "planning", "awaiting_approval", "working", "reviewing", "done", "failed")
+OLD_PHASES = {"awaiting_merge": "reviewing", "merging": "reviewing"}  # state.json of an OKe that merged
 EMPTY_STATE = {"orchestrator": {}, "pms": {}, "jobs": {}}
 
 
@@ -75,7 +75,7 @@ def load_config():
         "models": {"pm": "opus", "worker": "opus", "reviewer": "opus"},
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
         "max_review_rounds": 10,  # a job's reviews stop there and the PM asks the user; null: no limit
-        "merge_ignore_untracked": [".omc/"],  # other tools' untracked folders never block a merge
+        "merge_ignore_untracked": [".omc/"],  # other tools' untracked folders: never the job's work
         # effortLevel per role ("low" .. "max"); a lean child of a role left out uses the default
         "effort": {},
         "theme": "disco",  # the band's characters: disco (default), slime, mushroom, cute-dog, cute-cat, ... (README lists all)
@@ -176,6 +176,8 @@ def load_state(recover=False):
         if isinstance(loaded.get(key), dict):
             state[key] = loaded[key]
     for job in state["jobs"].values():
+        if isinstance(job, dict) and job.get("phase") in OLD_PHASES:
+            job["phase"] = OLD_PHASES[job["phase"]]
         if isinstance(job, dict) and "lane" in job:
             lane = job.pop("lane")
             if lane in OLD_LANES:
@@ -421,10 +423,10 @@ GIT_DENY_RULES = ["Bash(git push:*)", "Bash(git reset --hard:*)", "Bash(git rese
 
 
 def worker_deny_rules(folder):
-    """Edit rules a worker may not have: the job's files the merge gate trusts (plan,
+    """Edit rules a worker may not have: the job's files the delivery gate trusts (plan,
     ledger, the reviewer's and the PM's folders). Its own folder stays writable.
     shortcut: Bash can still write them (`echo > ...`); the mod's workerDenied and the
-    user's merge approval are the other layers."""
+    reviewer's look at the branch are the other layers."""
     job_dir = os.path.dirname(folder)
     if os.path.basename(os.path.dirname(job_dir)) != "jobs":
         return []
@@ -660,7 +662,7 @@ def cmd_rt(args):
             owner = [n for n, j in load_state()["jobs"].items()
                      if (j.get("worktree") or {}).get("id") == args.remove
                      and (n != args.remove_job if args.remove_job
-                          else j.get("phase") not in DONE_PHASES + ("merging",))]
+                          else j.get("phase") not in DONE_PHASES)]
             if owner:
                 return fail("worktree %s is job %s's now, and that job still works in it: not removed"
                             % (args.remove, owner[0]))
@@ -693,16 +695,28 @@ def cmd_rt(args):
                 return fail(no_path(args.job, info))
             if info.get("direct"):
                 return fail("job %s changes a folder outside git: no worktree" % args.job)
-            # shortcut: `oke job merge` merges only oke/<job>, so the branch name is fixed here
-            out = rt.worktree_create(native_path(info["path"]), "oke/" + args.job, args.job)
+            other = plan_continues(args.job)
+            start = None
+            if other:  # its own branch oke/<job>, made at the tip of oke/<other>
+                start = continue_start(args.job, info, other)
+                if start is None:
+                    return 1
+            # shortcut: `oke job deliver` delivers only oke/<job>, so the branch name is fixed here
+            out = rt.worktree_create(native_path(info["path"]), "oke/" + args.job, args.job,
+                                     start=start["commit"] if start else None)
             with locked():
                 state = load_state()
                 if args.job in state["jobs"]:  # for --remove once its id is gone
                     for j in state["jobs"].values():  # herdr reuses workspace ids after a restart
                         if (j.get("worktree") or {}).get("id") == out["id"]:
-                            j.pop("worktree")
-                    state["jobs"][args.job]["worktree"] = {"id": out["id"], "path": out["path"]}
+                            j["worktree"] = dict(j["worktree"], id=None)  # its folder stays its own
+                    mine = state["jobs"][args.job]
+                    mine["worktree"] = {"id": out["id"], "path": out["path"]}
+                    if start:
+                        mine.update(continues=other, start_commit=start["commit"], base=start["base"])
                     save_state(state)
+            if start:
+                out.update(continues=other, review_base=start["commit"], base=start["base"])
     print(json.dumps(out, ensure_ascii=False))
     return 0
 
@@ -921,7 +935,7 @@ def set_job_path(state, name, path, branch_taken=None):
         raise ValueError(branch_taken % {"job": name, "checkout": folder} if branch_taken else
                          "branch oke/%s already exists in %s (an earlier job): pick another job name"
                          % (name, folder))
-    # the branch the main checkout is on now: `job merge` merges only into it
+    # the branch the main checkout is on now: `job deliver` brings the job's branch onto it
     base = None if direct else git_out(native_path(folder), "symbolic-ref", "-q", "--short", "HEAD")[1]
     job.update(path=folder, git_key=key, base=base or None)
     if direct:
@@ -1000,7 +1014,7 @@ def agent_cwd(me):
     return (read_header(os.path.join(folder, "assignment.md")) or {}).get("cwd") if folder else None
 
 
-# files under $OKE_HOME only OKe writes, also inside a folder an agent may write: the merge
+# files under $OKE_HOME only OKe writes, also inside a folder an agent may write: the delivery
 # gate, the interview, the peer talk, a PM's children and every agent's launch settings
 GATE_FILE = re.compile(r"^(ledger\.(tsv|head)|baseline\.(json|log)|interview\.json|peers\.(json|md)|intake\.md|"
                        r"children\.json|(lean-|bg-)?settings\.json|mcp\.json|(check|verify)-\d+\.log)$")
@@ -1050,7 +1064,7 @@ def write_problem(state, me, target):
             return ("%s is OKe's own file, not this agent's to write. It may write in: %s. %s"
                     % (target, may_write(state, me), next_step(me)))
         if GATE_FILE.match(os.path.basename(p)):
-            return ("%s is written only by OKe (`oke` commands keep it; the merge gate trusts it): leave it. %s"
+            return ("%s is written only by OKe (`oke` commands keep it; the delivery gate trusts it): leave it. %s"
                     % (target, next_step(me)))
         return None
     cwd = agent_cwd(me)
@@ -1160,11 +1174,8 @@ def cancel_for_pm(name, jobs):
 def cancel_problem(state, job):
     """Why `job cancel` refuses `job`, or None."""
     info = state["jobs"][job]
-    merged = merge_state(job)[0]
-    if info.get("phase") == "done" or merged in ("unverified", "verified"):
-        return ("job %s is %s: its merge is in main or under way. Let it finish (verify, or "
-                "roll it back), not cancel" % (job, info.get("phase") if merged == "none" else
-                                               "merged (%s)" % merged))
+    if info.get("phase") == "done":
+        return "job %s is done: its work is delivered, nothing to cancel" % job
     return None
 
 
@@ -1398,7 +1409,7 @@ def cmd_spawn(args):
             return fail("unknown job %r in assignment" % header.get("job"))
         if job.get("held"):
             return fail("job %s is on hold: start none of its agents" % header["job"])
-        if job["phase"] not in ("working", "reviewing", "merging"):
+        if job["phase"] not in ("working", "reviewing"):
             return fail("plan not approved: job %s is in phase %s" % (header["job"], job["phase"]))
         over = role == "reviewer" and over_rounds(header["job"], job, config, int(header["seq"]))
         if over:
@@ -1439,7 +1450,7 @@ def cmd_spawn(args):
             children[agent] = record
             write_json_atomic(children_path(key), children)
             now = current["jobs"].get(record["job"]) or {}
-            return not now.get("held") and now.get("phase") in ("working", "reviewing", "merging")
+            return not now.get("held") and now.get("phase") in ("working", "reviewing")
 
     def gone_pm(place):
         """The PM was removed while it started: close its new pane (best effort)."""
@@ -1949,7 +1960,7 @@ def agent_folder(role, name, key, record):
 
 
 def should_be_alive(state, role, key, name, record):
-    """Only agents with work left are revived: never a worker closed after merge."""
+    """Only agents with work left are revived: never a worker closed after its job is done."""
     if role == "orchestrator":
         return record.get("argv") is not None and bool(open_jobs(state))
     if role == "pm":
@@ -2276,21 +2287,17 @@ def board_tree(state, agents, only_key=None):
             pm_report = read_header(os.path.join(pm_job_dir(job), "report.md")) or {}
             subagent = pm_report.get("type") == "waiting" and "subagent" in str(pm_report.get("on") or "")
             try:
-                merge = merge_state(job)[0]
-                after = [o for o in after_jobs(job) if after_block(state, o)] \
-                    if info.get("phase") in ("awaiting_merge", "merging") else \
-                    start_after(state, job) if gated(info) else []
+                delivered = deliver_state(job)[0]
             except StateError:  # the ledger key is missing or damaged: the board still shows the rest
-                merge, after = "unreadable", []
+                delivered = "unreadable"
             jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
                          "size": info.get("size"), "direct": bool(info.get("direct")), "output": job_output(info),
-                         "merge": merge, "held": bool(info.get("held")), "subagent": subagent,
+                         "deliver": delivered, "held": bool(info.get("held")), "subagent": subagent,
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None,
                          # where it works: its worktree, or the path itself
                          "path": native_path((info.get("worktree") or {}).get("path") or info["path"])
                          if info.get("path") else "path?",
-                         "peer_wait": sorted(peer_waiting(state, job)),
-                         "after_wait": after})
+                         "peer_wait": sorted(peer_waiting(state, job))})
         node = board_node("pm", pm["agent"], key, pm, agents) if pm and pm.get("agent") else None
         if node and node["status"] == "dead" and not open_jobs(state, key):
             node["status"] = "off"  # nothing for it to do (its jobs are done or on hold): not stuck
@@ -2319,11 +2326,10 @@ def board_lines(tree):
         for job in repo["jobs"]:
             if job["phase"] in DONE_PHASES:
                 continue
-            out.append((1, "job %s: %s%s%s%s%s" % (
+            out.append((1, "job %s: %s%s%s%s" % (
                 job["job"], job["phase"], ", on hold" if job.get("held") else "",
                 ", waiting for you (%s)" % job["pending"] if job["pending"] else "",
-                ", waiting for PM %s" % ", ".join(job["peer_wait"]) if job.get("peer_wait") else "",
-                ", waiting for after-job %s" % ", ".join(job["after_wait"]) if job.get("after_wait") else "")))
+                ", waiting for PM %s" % ", ".join(job["peer_wait"]) if job.get("peer_wait") else "")))
             out.append((2, "at %s" % (job.get("path") or "path?")))
             for n in job["agents"]:
                 agent(n, 2)
@@ -2625,7 +2631,7 @@ def status_locked(args, herdr_info):
             cls = "closed"  # nothing to resume: its PM is gone (or it is an old OKe's job)
         elif job.get("held") and job.get("phase") not in DONE_PHASES:
             cls = "held"
-        elif job.get("phase") in ("awaiting_approval", "awaiting_merge"):
+        elif job.get("phase") == "awaiting_approval":
             cls = "awaiting_user"
         elif result["pms"].get(key, {}).get("pm") == "alive":
             cls = "alive"
@@ -2638,6 +2644,8 @@ def status_locked(args, herdr_info):
                                 "size": job.get("size"), "direct": bool(job.get("direct")), "output": job_output(job),
                                 "held": job.get("held"), "base": job.get("base"),
                                 "split_from": job.get("split_from")}
+        if job.get("continues"):  # its branch starts at another job's branch: its own work is after that
+            result["jobs"][name].update(continues=job["continues"], review_base=review_base(name, job))
 
     here = runtime().whoami()
     recorded = state["orchestrator"].get("pane")
@@ -2780,11 +2788,12 @@ def cmd_job(args):
             if me and me[0] != "orchestrator":
                 return fail("only the orchestrator sets a job's phase: write your report (`type: done`) "
                             "and the orchestrator moves the job")
-    if args.action == "merge":
-        # git can take a while: not under the state lock, but one merge per git key at a time
-        key = (load_state()["jobs"].get(args.slug) or {}).get("git_key")
-        with locked("merge-" + repo_name(key) if key else "merge", timeout=120):
-            return merge_job(args.slug)
+    if args.action == "deliver":  # git can take a while: not under the state lock
+        return deliver_job(args.slug)
+    if args.action == "pr":
+        return pr_job(args.slug)
+    if args.action == "base":
+        return set_base(args.slug, args.branch)
     if args.action == "tree":
         info = load_state()["jobs"].get(args.slug)
         if not info:
@@ -2810,12 +2819,6 @@ def cmd_job(args):
         info = load_state()["jobs"][args.slug]
         # closes its agents, drops its queued mail but not the hold notice job_locked queued
         return cancel_children(args.slug, info.get("pm"))
-    if args.action == "verify":
-        if len([x for x in (args.command, args.accept, args.skip, args.run) if x]) > 1:
-            return fail("give at most one of: the Check command, --accept, --skip, --run")
-        if args.skip is not None and not args.skip.strip():
-            return fail("--skip needs the reason")
-        return verify_job(args.slug, args.command, args.accept, args.skip, args.run)  # can take hours
     key = left = None
     if args.action in ("archive", "unhold"):
         key = (load_state()["jobs"].get(args.slug) or {}).get("pm")
@@ -2833,8 +2836,8 @@ def cmd_job(args):
         except Exception:  # noqa: BLE001 - cleanup only
             left = None
         drop_job_mail(args.slug, key)
-    if args.action == "clean":  # runtime and git, and only an archived job: no state lock
-        return clean_job(args.slug)
+    if args.action == "clean":  # runtime and git, and only a finished job: no state lock
+        return clean_job(args.slug, args.force)
     with locked():
         code = job_locked(args)
     if code == 0 and getattr(args, "drop_worktree", None):
@@ -2853,10 +2856,6 @@ def cmd_job(args):
                   "user says so)" % (wt, args.slug))
         if branch_left:
             print("branch_left: %s" % branch_left)
-    if code == 0 and getattr(args, "drop_branch", None):
-        # -d only: git keeps a branch that is not merged, or that a worktree still has checked out
-        subprocess.call(["git", "-C", native_path(repo_dir(args.drop_branch["git_key"])), "branch", "-q", "-d",
-                         "oke/" + args.slug], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if code == 0 and key and args.action == "unhold":
         drop_job_mail(args.slug, key, HOLD_NOTICE.split(":")[0] % args.slug)  # if the PM has not read it
     if code == 0 and left:
@@ -2897,154 +2896,98 @@ def git_out(cwd, *args):
     return p.returncode, p.stdout.decode("utf-8", "replace").strip()
 
 
-def after_jobs(job):
-    """The jobs that must be finished before `job` merges (or, for a job that never merges, starts):
-    its plan's `after:` and its split's `--after`."""
-    header = read_header(os.path.join(oke_home(), "jobs", job, "plan.md")) or {}
-    names = [n.strip() for n in str(header.get("after") or "").split(",") if n.strip()]
-    split = (load_state()["jobs"].get(job) or {}).get("after")  # `job split --after`
-    if split and split not in names:
-        names.append(split)
-    return [n for n in names if n != job]  # a job never waits for itself
-
-
-def after_block(state, other):
-    """Why `other` still holds back a job that must merge after it, or None."""
-    info = state["jobs"].get(other)
-    if info is not None:
-        if info.get("phase") == "failed":
-            return "after-job %s was cancelled" % other
-        if never_merges(info):
-            # it never merges: done is all it does
-            return None if info.get("phase") == "done" else "waiting for %s to be done" % other
-        if merge_state(other)[0] != "verified":
-            return "waiting for %s to merge" % other
-        return None
-    archived = sorted(glob.glob(os.path.join(oke_home(), "archive", glob.escape(other) + "-*")))
-    archived = [d for d in archived if re.match(re.escape(other) + r"-\d{8}-\d{6}$", os.path.basename(d))]
-    if not archived:
-        return "after-job %s is no known job" % other
-    kept = read_json(os.path.join(archived[-1], "job.json"), {})  # its state entry, kept at the archive
-    if isinstance(kept, dict) and never_merges(kept) and kept.get("phase") == "done":
-        return None
-    if merge_state(other, os.path.join(archived[-1], "ledger.tsv"))[0] == "verified":
-        return None
-    return "after-job %s was archived without a verified merge" % other
-
-
-AFTER_FINISHED = "is finished"
-
-
-GATE_PHASES = ("intake", "planning", "awaiting_approval")  # a job held at its start is in one
-
-
-def gated(job):
-    """True for a job the start gate refused that has not started since."""
-    return bool(job.get("start_after")) and job.get("phase") in GATE_PHASES
-
-
-def after_blocks(state, job):
-    """(waits, broken) for `job`'s after-jobs: [(after-job, reason)] of those it still plainly
-    waits for, and of those that can never clear by themselves (cancelled, unknown,
-    archived without a verified merge), which the user decides."""
-    waits, broken = [], []
-    for other in after_jobs(job):
-        why = after_block(state, other)
-        if why and why.startswith("waiting for ") and waits_on(other, job):
-            why = "after-job %s itself waits for %s (a cycle)" % (other, job)
-        if why:
-            (waits if why.startswith("waiting for ") else broken).append((other, why))
-    return waits, broken
-
-
-def waits_on(job, target):
-    """Does `job` wait, through its after-jobs and theirs, for `target`?"""
-    seen, todo = set(), [job]
-    while todo:
-        cur = todo.pop()
-        for other in after_jobs(cur):
-            if other == target:
-                return True
-            if other not in seen:
-                seen.add(other)
-                todo.append(other)
-    return False
-
-
-def start_after(state, job):
-    """The after-jobs a folder job still waits for at its start: [] when none."""
-    info = state["jobs"].get(job) or {}
-    if not never_merges(info) or info.get("size") == "research":
-        return []
-    return [o for o, _ in after_blocks(state, job)[0] + after_blocks(state, job)[1]]
-
-
-def tell_after_waiters(state, job, news, phases=None):
-    """Queue `news` about `job` to the PM of every open job whose plan says `after: <job>`
-    (only jobs in `phases`, when given). A job held at its start gate needs no mail: its
-    `after_ready` item shows up in `oke pending` once nothing holds it."""
-    for other in sorted(open_jobs(state)):
-        if phases and state["jobs"][other].get("phase") not in phases:
-            continue
-        if other != job and job in after_jobs(other):
-            pm = (state["pms"].get(state["jobs"][other].get("pm")) or {}).get("pm") or {}
-            if pm.get("agent"):
-                queue_mail(pm["agent"], "oke", "Job %s: after-job %s %s" % (other, job, news))
+GATE_PHASES = ("intake", "planning", "awaiting_approval")  # before the job's work starts
 
 
 def quality_block(job, review_asg, target):
     """Why the review or the check does not count for the current plan, or None. The review
     must name the current criteria_rev; OKe's last `oke check` row for the reviewed commit
     (or tree:<sha>) must be a pass under it."""
+    why = criteria_block(job, review_asg)
+    if why:
+        return why
     rev = criteria_rev(job)
-    if review_asg.get("criteria_rev") != rev:
-        return (u"the criteria or the Check command of %s changed since the review (or the review assignment "
-                u"names no criteria_rev): give the reviewer a new instruction with `criteria_rev: %s`"
-                % (job, rev))
     rows = [r for r in ledger_rows(job) if r["check"] == "check" and r["commit"] == target]
     if not rows or rows[-1]["result"] != "pass" or rows[-1]["detail"].split()[:1] != [rev]:
         return "no passing `oke check` on %s with the current criteria: run `$OKE check %s`" % (target, job)
     return None
 
 
-def merge_job(job):
-    """Merge oke/<job> into the main checkout, only if the user approved the merge and
-    the last review passed on the very commit the branch points at. A worker that
-    reported again (a rebase, a fix) needs a new review first (seen live: a PM skipped it).
-    The main checkout must be clean, on the job's base branch and not mid-merge: the
-    abort after a conflict must only ever undo OKe's own merge."""
-    state = load_state()
-    info = state["jobs"].get(job)
-    if info and info.get("held"):
-        return fail("job %s is on hold: no merge until it is back" % job)
+def criteria_block(job, review_asg):
+    rev = criteria_rev(job)
+    if review_asg.get("criteria_rev") != rev:
+        return (u"the criteria or the Check command of %s changed since the review (or the review assignment "
+                u"names no criteria_rev): give the reviewer a new instruction with `criteria_rev: %s`"
+                % (job, rev))
+    return None
+
+
+def job_branch(job, info):
+    """The branch a code job works on and delivers: oke/<job>."""
+    return "oke/" + job
+
+
+def carried_tips(job, reviewed):
+    """The commits a passing review of `reviewed` counts for: that commit, and each commit
+    `job deliver` rebased it to with the same patch id (its `review` rows `carried from`)."""
+    rows = [r for r in ledger_rows(job) if r["check"] == "review" and r["result"] == "pass"]
+    tips, grew = set([reviewed]), True
+    while grew:
+        grew = False
+        for r in rows:
+            words = r["detail"].split()
+            if words[:2] == ["carried", "from"] and len(words) > 2 and words[2] in tips and r["commit"] not in tips:
+                tips.add(r["commit"])
+                grew = True
+    return tips
+
+
+def patch_id(cwd, start, tip):
+    """`git patch-id --stable` of the diff start..tip ("" for no change), or None when git fails."""
+    diff = subprocess.run(["git", "-C", cwd, "-c", "core.quotepath=off", "diff", "--no-ext-diff",
+                           "--no-textconv", start, tip], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if diff.returncode != 0:
+        return None
+    if not diff.stdout.strip():
+        return ""
+    p = subprocess.run(["git", "-C", cwd, "patch-id", "--stable"], input=diff.stdout,
+                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if p.returncode != 0:
+        return None
+    out = p.stdout.decode("utf-8", "replace").split()
+    return out[0] if out else ""
+
+
+def left_work(job):
+    """A cancel or a hold since deliver_job's first checks: deliver nothing."""
+    with locked():
+        info = load_state()["jobs"].get(job, {})
+        if info.get("phase") in ("working", "reviewing") and not info.get("held"):
+            return False
+    fail("job %s was cancelled or put on hold meanwhile: nothing delivered" % job)
+    return True
+
+
+NOT_CODE = "the job has no branch to deliver (its output is not code): set phase done after its report"
+
+
+def deliver_job(job):
+    """`job deliver`: hand the reviewed work over, never into the main branch. A worktree job's
+    branch is brought onto the latest base branch inside its worktree and must pass the check
+    there; a job without a worktree gets its reviewed changes committed in the main checkout.
+    Only the work the last passing review covered: a worker that reported again needs a new
+    review first (seen live: a PM skipped it)."""
+    info = load_state()["jobs"].get(job)
     if not info:
         return fail("unknown job: %s" % job)
-    if no_path(job, info) and info.get("size") != "research":
+    if info.get("held"):
+        return fail("job %s is on hold: nothing is delivered until it is back" % job)
+    if not_code(info):
+        return fail("job %s: %s" % (job, NOT_CODE))
+    if no_path(job, info):
         return fail(no_path(job, info))
-    if never_merges(info):
-        return fail("job %s: %s" % (job, NO_MERGE))
-    if info.get("phase") != "merging":
-        return fail("job %s is in phase %s: set phase merging after the user approves the merge"
-                    % (job, info.get("phase")))
-    waits, broken = after_blocks(state, job)
-    if broken:
-        return fail("job %s: %s: the orchestrator asks the user; keep the job waiting" % (job, broken[0][1]))
-    if waits:
-        return fail("job %s: %s" % (job, waits[0][1]))
-    already = merge_state(job)[0]
-    if already in ("unverified", "verified"):
-        return fail("job %s is already merged (%s): run `$OKE job verify %s`, not a second merge"
-                    % (job, already, job))
-    # every job of this checkout, a failed or cancelled one too: its merge is still in main
-    for other in [n for n, j in state["jobs"].items() if j.get("git_key") == info["git_key"]]:
-        other_state, row = merge_state(other)
-        if other != job and other_state == "unverified":
-            return fail("the merge of %s is not verified yet: run `$OKE job verify %s` first"
-                        % (other, other))
-        if other != job and other_state == "rolled_back" and "already-in" in row["detail"].split():
-            # its failing code is still in main (nothing could be undone): a check here would fail on it
-            return fail("main still holds %s's code, whose check failed: no other merge until %s merges "
-                        "again or the user decides" % (other, other))
+    if info.get("phase") not in ("working", "reviewing"):
+        return fail("job %s is in phase %s: only a job at work is delivered" % (job, info.get("phase")))
     job_dir = os.path.join(oke_home(), "jobs", job)
     worker = latest_report(job_dir, r"-w\d+$")
     review = latest_report(job_dir, r"-rv\d*$")
@@ -3054,7 +2997,7 @@ def merge_job(job):
         return fail("the last review of %s did not pass: %s" % (job, review[1].replace("\\", "/")))
     if worker and worker[0] > review[0]:
         return fail("the worker reported after the last review (a rebase or a fix): give the reviewer "
-                    "a new instruction to review it, then merge")
+                    "a new instruction to review it, then deliver")
     main = native_path(repo_dir(info["git_key"]))
     # The review counts only for the commit its assignment named, and only once the
     # report answers that assignment: commits added after it were never reviewed.
@@ -3063,68 +3006,275 @@ def merge_job(job):
     if review_seq != review_asg.get("seq"):
         return fail("the review report of %s does not answer its current assignment (seq %s): wait for "
                     "the reviewer" % (job, review_asg.get("seq")))
-    code, tip = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/%s^{commit}" % job)
+    branch = job_branch(job, info)
+    code, tip = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/%s^{commit}" % branch)
     if code != 0 and review_asg.get("tree"):
         # no worktree: the review covered the uncommitted changes in the main checkout
         why = quality_block(job, review_asg, "tree:" + review_asg["tree"])
         if why:
             return fail(why)
-        return commit_direct(job, info, main, review[1], review_asg["tree"])
+        with locked("deliver-" + job, timeout=120):
+            return commit_direct(job, info, main, review[1], review_asg["tree"])
     reviewed = review_asg.get("commit")
     if code != 0:
-        return fail("branch oke/%s does not exist" % job)
+        return fail("branch %s does not exist" % branch)
     if not reviewed or not re.match(r"^[0-9a-f]{7,40}$", reviewed):
         # a branch name would resolve to the moving tip and pass any check
         return fail("the review assignment of %s names no commit sha in `commit:`: give the reviewer a new "
-                    "instruction with `commit: %s`, then merge" % (job, tip))
+                    "instruction with `commit: %s`, then deliver" % (job, tip))
     code, reviewed_full = git_out(main, "rev-parse", "-q", "--verify", reviewed + "^{commit}")
-    if code != 0 or reviewed_full != tip:
-        return fail("oke/%s is at %s but the review covered %s: give the reviewer a new instruction "
-                    "with `commit: %s`, then merge" % (job, tip[:12], reviewed, tip))
-    why = quality_block(job, review_asg, reviewed_full)
+    if code != 0 or tip not in carried_tips(job, reviewed_full):
+        return fail("%s is at %s but the review covered %s: give the reviewer a new instruction "
+                    "with `commit: %s`, then deliver" % (branch, tip[:12], reviewed, tip))
+    why = quality_block(job, review_asg, tip) if tip == reviewed_full else criteria_block(job, review_asg)
     if why:
         return fail(why)
-    if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
-        return fail("a merge is already in progress in %s: leave it to the user" % main)
-    code, dirty = main_changes(main)
-    if code != 0 or dirty:
-        return fail("the main checkout %s is not clean:\n%s" % (main, dirty))
     base = info.get("base")
-    current = git_out(main, "symbolic-ref", "-q", "--short", "HEAD")[1]
-    if not current or (base and current != base):
-        return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
-                    % (current or "a detached HEAD", base))
-    if left_merging(job):
+    if not base:
+        return fail("job %s has no base branch (the main checkout was on a detached HEAD when it began): "
+                    "report a question: the user names the branch it goes onto, and the orchestrator runs "
+                    "`$OKE job base %s <branch>`" % (job, job))
+    code, base_head = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/%s^{commit}" % base)
+    if code != 0:
+        return fail("the base branch %s of job %s does not exist in %s: report a question" % (base, job, main))
+    by = os.path.basename(os.path.dirname(review[1]))
+    if info.get("continues"):  # a hand rebase (after a conflict) leaves start_commit behind
+        start = review_base(job, info, tip)
+        if start and start != info.get("start_commit"):
+            with locked():
+                state = load_state()
+                if job in state["jobs"]:
+                    state["jobs"][job]["start_commit"] = start
+                    save_state(state)
+            info = dict(info, start_commit=start)
+    with locked("deliver-" + job, timeout=120):
+        # the base branch holds it already (merged by hand, or an older OKe merged it): never rewritten
+        already_in = git_out(main, "merge-base", "--is-ancestor", tip, base_head)[0] == 0
+        if not already_in and git_out(main, "merge-base", "--is-ancestor", base_head, tip)[0] != 0:
+            return rebase_onto(job, info, branch, tip, base, base_head, by)
+        why = quality_block(job, review_asg, tip)  # a rebased tip is checked again
+        if why:
+            return fail(why)
+        if left_work(job):
+            return 1
+        rows = ledger_rows(job)
+        if not any(r["check"] == "review" and r["result"] == "pass" and r["commit"] == tip for r in rows):
+            ledger_add(job, by, tip, "review", "pass", review[1].replace("\\", "/"))
+        last = deliver_state(job)[1]
+        if not last or last["commit"] != tip:
+            ledger_add(job, "oke", tip, "deliver", "ok", "branch=%s base=%s@%s%s"
+                       % (branch, base, base_head, " already-in" if already_in else ""))
+    wt = (info.get("worktree") or {}).get("path")
+    out = {"result": "delivered", "job": job, "branch": branch, "base": base, "commit": tip,
+           "worktree": native_path(wt) if wt else None, "main": main, "merge": "git merge %s" % branch}
+    if already_in:
+        out["already_in"] = True  # nothing left to merge: the base branch has it
+    if info.get("continues"):
+        out["contains"] = "oke/" + info["continues"]  # merging this branch brings that job's commits too
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+def rebase_onto(job, info, branch, tip, base, base_head, by):
+    """Bring the job's branch onto the base branch's head inside its worktree. Exit 4: rebased
+    with the same change (the review still counts), the check must run on the new tip; exit 2:
+    a conflict, undone; exit 1: refused, or a different change that needs a new review."""
+    wt = (info.get("worktree") or {}).get("path")
+    if not wt or not os.path.isdir(native_path(wt)):
+        return fail("%s is behind %s, and job %s has no worktree to rebase it in: report a question"
+                    % (branch, base, job))
+    cwd = native_path(wt)
+    for name in ("rebase-merge", "rebase-apply", "MERGE_HEAD"):  # mid-rebase HEAD is detached: ask this first
+        where = git_out(cwd, "rev-parse", "--git-path", name)[1]
+        if where and os.path.exists(os.path.join(cwd, where)):
+            return fail("a rebase or merge is in progress in %s: finish or abort it first" % cwd)
+    if git_out(cwd, "symbolic-ref", "-q", "--short", "HEAD")[1] != branch:
+        return fail("the worktree %s is not on %s: report a question" % (cwd, branch))
+    code, dirty = git_out(cwd, "status", "--porcelain", "-uno")
+    if code != 0 or dirty:
+        return fail("the worktree %s has uncommitted changes (the reviewed work is committed):\n%s" % (cwd, dirty))
+    fork = git_out(cwd, "merge-base", base_head, tip)[1]
+    start = fork
+    own = own_commits(cwd, info, tip)  # a continuing job: only the commits after the job it continues
+    if own is not None:
+        start = info["start_commit"]
+        linear = git_out(cwd, "rev-list", "--merges", "%s..%s" % (start, tip))[1] == ""
+        total = git_out(cwd, "rev-list", "--count", "%s..%s" % (fork, tip))[1] if fork else ""
+    before = patch_id(cwd, start, tip) if start else None
+    if before is None:
+        return fail("git cannot read the change of %s in %s" % (branch, cwd))
+    if left_work(job):
         return 1
-    pre = git_out(main, "rev-parse", "HEAD")[1]
-    if git_out(main, "merge-base", "--is-ancestor", tip, "HEAD")[0] == 0:
-        # already in main (the change was there, or a merge whose record was lost): git would
-        # only say "Already up to date". Recorded as merged at HEAD, so verify and done work.
-        ledger_add(job, os.path.basename(os.path.dirname(review[1])), tip, "review", "pass",
-                   review[1].replace("\\", "/"))
-        ledger_add(job, "oke", pre, "merge", "ok", "pre=%s already-in" % pre)
-        print(json.dumps({"result": "merged", "job": job, "commit": pre, "already_in": True}))
+    result = subprocess.run(["git", "-C", cwd, "rebase", "-q", base_head], stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT)
+    if result.returncode != 0:
+        files = git_out(cwd, "diff", "--name-only", "--diff-filter=U")[1].split()
+        if subprocess.call(["git", "-C", cwd, "rebase", "--abort"], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL) != 0 and git_out(cwd, "rev-parse", "HEAD")[1] != tip:
+            return fail("the rebase of %s onto %s stopped and `git rebase --abort` failed: %s is mid-rebase, "
+                        "report a question" % (branch, base, cwd))
+        if not files:
+            return fail("git rebase failed: %s" % result.stdout.decode("utf-8", "replace").strip())
+        print(json.dumps({"result": "conflict", "job": job, "branch": branch, "base": base, "files": files}))
+        return 2
+    new = git_out(cwd, "rev-parse", "HEAD")[1]
+    new_start = base_head
+    if own is not None:
+        # its own commits are the last `own` of the rebased branch only when the rebase kept every
+        # commit as one (no merges, nothing dropped) and they sit above the base; else the wider
+        # range from the base: a wider review, never a narrower one
+        moved = git_out(cwd, "rev-parse", "-q", "--verify", "%s~%d" % (new, own))[1] if own else new
+        kept = git_out(cwd, "rev-list", "--count", "%s..%s" % (base_head, new))[1]
+        if linear and moved and total and kept == total \
+                and git_out(cwd, "rev-list", "--count", "%s..%s" % (moved, new))[1] == str(own) \
+                and git_out(cwd, "merge-base", "--is-ancestor", base_head, moved)[0] == 0:
+            new_start = moved
+        with locked():
+            state = load_state()
+            if job in state["jobs"]:
+                state["jobs"][job]["start_commit"] = new_start
+                save_state(state)
+    after = patch_id(cwd, new_start, new)
+    if after != before or not after:
+        return fail("%s was rebased onto %s (%s, was %s), and its change is not the reviewed one any more (another "
+                    "patch id): give the reviewer a new instruction with `commit: %s`, run `$OKE check %s`, then "
+                    "deliver again" % (branch, base, new[:12], tip[:12], new, job))
+    ledger_add(job, by, new, "review", "pass", "carried from %s (rebased onto %s %s, same patch id)"
+               % (tip, base, base_head))
+    print(json.dumps({"result": "rebased", "job": job, "branch": branch, "base": base, "from": tip, "commit": new,
+                      "next": "run `$OKE check %s` in the background (no time limit), then `$OKE job deliver %s` "
+                              "again" % (job, job)}))
+    return 4
+
+
+def deliver_block(job, info):
+    """Why a code job may not be done yet, or None: its last `deliver ok` row must name its
+    branch's tip (a job without a worktree: be there at all)."""
+    status, row = deliver_state(job)
+    if status != "delivered":
+        return "job %s is not delivered: `$OKE job deliver %s` after its review passed, before done" % (job, job)
+    words = row["detail"].split()
+    if words and words[0].startswith("branch=") and info.get("git_key"):
+        branch = words[0][len("branch="):]
+        code, tip = git_out(native_path(repo_dir(info["git_key"])), "rev-parse", "-q", "--verify",
+                            "refs/heads/%s^{commit}" % branch)
+        if code == 0 and tip != row["commit"]:
+            return ("job %s: %s moved to %s after its delivery at %s: `$OKE job deliver %s` again (with a new "
+                    "review of a new change)" % (job, branch, tip[:12], row["commit"][:12], job))
+    return None
+
+
+def set_base(job, branch):
+    """`job base`: the user names the branch a job goes onto (its main checkout was detached
+    when it began, so it has none). Only before the job is delivered; a local branch."""
+    with locked():
+        state = load_state()
+        info = state["jobs"].get(job)
+        if info is None:
+            return fail("unknown job: %s" % job)
+        if info.get("phase") in DONE_PHASES:
+            return fail("job %s is %s: its base branch stays" % (job, info.get("phase")))
+        if not info.get("git_key") or not_code(info):
+            return fail("job %s has no branch to deliver: no base branch" % job)
+        if deliver_state(job)[0] == "delivered":
+            return fail("job %s is delivered onto %s already: its base branch stays" % (job, info.get("base")))
+        name = branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
+        main = native_path(repo_dir(info["git_key"]))
+        if name.startswith("oke/") or git_out(main, "rev-parse", "-q", "--verify", "refs/heads/" + name)[0] != 0:
+            return fail("%s is no local branch of %s (and never an oke/ branch): name one `git branch` lists"
+                        % (branch, main))
+        info["base"] = name
+        save_state(state)
+    print(json.dumps({"job": job, "base": name}))
+    return 0
+
+
+def gh_argv():
+    """The GitHub CLI as an argv prefix, or None. OKE_GH (a JSON list) replaces it in tests."""
+    if os.environ.get("OKE_GH"):
+        return json.loads(os.environ["OKE_GH"])
+    gh = shutil.which("gh")
+    return [gh] if gh else None
+
+
+def job_record(job):
+    """(info, archive folder) of a job: its state entry (folder None), else the job.json of its
+    newest archive; (None, None) when OKe knows no such job."""
+    info = load_state()["jobs"].get(job)
+    if info is not None:
+        return info, None
+    folder = archived_dir(job)
+    kept = read_json(os.path.join(folder, "job.json"), None) if folder else None
+    return (kept, folder) if isinstance(kept, dict) and kept else (None, None)
+
+
+def pr_job(job):
+    """`job pr`: push the delivered branch to origin and open a pull request onto its base."""
+    info, folder = job_record(job)
+    if info is None:
+        return fail("unknown job: %s" % job)
+    if not_code(info) or not info.get("git_key"):
+        return fail("job %s has no branch (its output is not code)" % job)
+    status, row = deliver_state(job, os.path.join(folder, "ledger.tsv") if folder else None)
+    if status != "delivered":
+        return fail("job %s is not delivered yet: no pull request" % job)
+    if not row["detail"].split()[:1] or not row["detail"].split()[0].startswith("branch="):
+        return fail("job %s was committed in the main checkout (no branch): nothing for a pull request" % job)
+    branch, base = job_branch(job, info), info.get("base")
+    main = native_path(repo_dir(info["git_key"]))
+    if git_out(main, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] != 0:
+        return fail("branch %s is gone (merged or deleted)" % branch)
+    code, origin = git_out(main, "remote", "get-url", "origin")
+    if code != 0:
+        return fail("%s has no remote `origin`: no pull request" % main)
+    if not GITHUB.search(origin):
+        return fail("remote `origin` of %s is not on GitHub (%s): no pull request; the user pushes %s "
+                    "themselves" % (main, origin, branch))
+    gh = gh_argv()
+    if not gh:
+        return fail("the GitHub CLI `gh` is not installed: install it (https://cli.github.com) and run "
+                    "`gh auth login`, or push %s and open the pull request yourself" % branch)
+    # OKe owns oke/* branches: a later rebase moves them, and the open pull request follows
+    ref = "refs/heads/" + branch
+    target = git_out(main, "remote", "get-url", "--push", "origin")[1] or "origin"  # where the push goes
+    code, remote = git_out(main, "ls-remote", target, ref)
+    if code != 0:
+        return fail("git cannot reach origin of %s: %s" % (main, remote))
+    seen = remote.split()[0] if remote.split() else ""  # "" : the branch must not be there yet
+    push = subprocess.run(["git", "-C", main, "push", "-q", "--force-with-lease=%s:%s" % (ref, seen), "origin",
+                           "%s:%s" % (ref, ref)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if push.returncode != 0:
+        return fail("git push of %s to origin failed: %s" % (branch, push.stdout.decode("utf-8", "replace").strip()))
+    def gh_run(argv):
+        try:
+            r = subprocess.run(gh + argv, cwd=main, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        except OSError as e:
+            return None, str(e)
+        return r.returncode, r.stdout.decode("utf-8", "replace")
+    code, text = gh_run(["pr", "list", "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url"])
+    if code is None:
+        return fail("could not run gh: %s" % text)
+    urls = re.findall(r"https?://\S+", text) if code == 0 else []
+    if urls:  # the branch has its pull request already: the push updated it
+        print(json.dumps({"job": job, "branch": branch, "base": base, "url": urls[-1], "existing": True}))
         return 0
-    result = subprocess.run(["git", "-C", main, "merge", "--no-ff", "--no-edit",
-                             "-m", "Merge branch 'oke/%s'" % job, tip],
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    if result.returncode == 0:
-        merged = git_out(main, "rev-parse", "HEAD")[1]
-        ledger_add(job, os.path.basename(os.path.dirname(review[1])), tip, "review", "pass",
-                   review[1].replace("\\", "/"))
-        ledger_add(job, "oke", merged, "merge", "ok", "pre=%s" % pre)
-        print(json.dumps({"result": "merged", "job": job, "commit": merged}))
-        return 0
-    files = git_out(main, "diff", "--name-only", "--diff-filter=U")[1].split()
-    if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
-        if subprocess.call(["git", "-C", main, "merge", "--abort"], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL) != 0:
-            return fail("git merge of oke/%s conflicted and `git merge --abort` failed: %s is "
-                        "mid-merge, ask the user" % (job, main))
-    if not files:
-        return fail("git merge failed: %s" % result.stdout.decode("utf-8", "replace").strip())
-    print(json.dumps({"result": "conflict", "job": job, "files": files}))
-    return 2
+    code, text = gh_run(["pr", "create", "--base", base, "--head", branch, "--fill"])
+    if code is None:
+        return fail("could not run gh: %s" % text)
+    urls = re.findall(r"https?://\S+", text)
+    if code != 0 and not (urls and "already exists" in text):
+        return fail("gh pr create failed: %s" % text.strip())
+    if not urls:
+        return fail("gh pr create printed no URL: %s" % text.strip())
+    out = {"job": job, "branch": branch, "base": base, "url": urls[-1]}
+    if code != 0:
+        out["existing"] = True
+    print(json.dumps(out))
+    return 0
+
+
+# a remote URL on GitHub: https://github.com/o/r(.git), git@github.com:o/r, ssh://git@github.com/o/r
+GITHUB = re.compile(r"(^|[@/])github\.com[:/]", re.I)
 
 
 # An untracked byproduct line of `git status --porcelain`: Python caches only.
@@ -3137,7 +3287,7 @@ ADD = ["add", "-u"]
 
 
 def byproduct(line):
-    """An untracked line of `git status --porcelain` that never blocks a merge: Python
+    """An untracked line of `git status --porcelain` that is never the job's work: Python
     caches, or a folder config `merge_ignore_untracked` names (another tool's state)."""
     if not line.startswith("?? "):
         return False
@@ -3146,15 +3296,8 @@ def byproduct(line):
         path == p or path.startswith(p.rstrip("/") + "/") for p in load_config().get("merge_ignore_untracked") or [])
 
 
-def main_changes(main):
-    """(code, porcelain lines) of the main checkout, untracked byproducts left out: every
-    verify run leaves Python caches (seen live), and they never block a merge."""
-    code, dirty = git_out(main, "status", "--porcelain")
-    return code, "\n".join(l for l in dirty.splitlines() if not byproduct(l))
-
-
 def pending_tree(main):
-    """Tree sha of the main checkout as `oke job merge` would commit it: what the PM
+    """Tree sha of the main checkout as `oke job deliver` would commit it: what the PM
     staged plus every tracked change. The real index is untouched. The review of a job without a worktree names this tree."""
     idx = os.path.join(oke_home(), "tree-%d.index" % os.getpid())
     env = dict(os.environ, GIT_INDEX_FILE=idx)
@@ -3181,50 +3324,41 @@ def pending_tree(main):
             pass
 
 
-def left_merging(job):
-    """A cancel since merge_job's first checks: merge nothing."""
-    with locked():
-        if load_state()["jobs"].get(job, {}).get("phase") == "merging":
-            return False
-    fail("job %s left phase merging (cancelled?): not merged" % job)
-    return True
-
-
 def commit_direct(job, info, main, review, reviewed):
-    """A job without a worktree: commit its reviewed, uncommitted changes in the main
-    checkout and record that commit as the job's merge, so it is verified like one.
-    Only the exact tree the review named: anything changed or added since is refused."""
+    """A job without a worktree: commit its reviewed, uncommitted changes in the main checkout
+    (the user chose to work there) and record that commit as its delivery. The check already
+    passed on that very tree; anything changed or added since the review is refused."""
     if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
-        return fail("a merge is already in progress in %s: leave it to the user" % main)
+        return fail("a merge is in progress in %s: leave it to the user" % main)
     base = info.get("base")
     current = git_out(main, "symbolic-ref", "-q", "--short", "HEAD")[1]
     if not current or (base and current != base):
         return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
                     % (current or "a detached HEAD", base))
+    by = os.path.basename(os.path.dirname(review))
     code, dirty = git_out(main, "status", "--porcelain", "-uno")  # untracked files are never committed
     if code == 0 and not dirty and git_out(main, "rev-parse", "HEAD^{tree}")[1] == reviewed:
-        # the review passed on main as it is (the change was already there): recorded like
-        # merge_job's already-in, so verify and done work
+        # the review passed on main as it is (the change was already there): delivered at HEAD
         new = [l[3:] for l in git_out(main, "status", "--porcelain")[1].splitlines()
                if l.startswith("?? ") and not byproduct(l)]
         if new:  # the job's new files, unstaged, would never be committed
             return fail("untracked files %s: if they are the job's, `git add` them, get a new tree "
-                        "review, then merge" % ", ".join(new))
-        if left_merging(job):
+                        "review, then deliver" % ", ".join(new))
+        if left_work(job):
             return 1
         pre = git_out(main, "rev-parse", "HEAD")[1]
-        ledger_add(job, os.path.basename(os.path.dirname(review)), pre, "review", "pass",
-                   review.replace("\\", "/"))
-        ledger_add(job, "oke", pre, "merge", "ok", "pre=%s direct already-in" % pre)
-        print(json.dumps({"result": "merged", "job": job, "commit": pre, "direct": True, "already_in": True}))
+        ledger_add(job, by, pre, "review", "pass", review.replace("\\", "/"))
+        ledger_add(job, "oke", pre, "deliver", "ok", "main already-in")
+        print(json.dumps({"result": "delivered", "job": job, "commit": pre, "direct": True, "main": main,
+                          "already_in": True}, ensure_ascii=False))
         return 0
     if code != 0 or not dirty:
         return fail("job %s has no branch oke/%s and no changes in %s to commit" % (job, job, main))
     tree = pending_tree(main)
     if tree != reviewed:
         return fail("the changes in %s are not the ones the review covered (tree %s, reviewed %s): give "
-                    "the reviewer a new instruction with `tree: %s`, then merge" % (main, tree, reviewed, tree))
-    if left_merging(job):
+                    "the reviewer a new instruction with `tree: %s`, then deliver" % (main, tree, reviewed, tree))
+    if left_work(job):
         return 1
     pre = git_out(main, "rev-parse", "HEAD")[1]
     for argv in (ADD, ["commit", "-q", "-m", "oke: %s" % job]):
@@ -3235,15 +3369,84 @@ def commit_direct(job, info, main, review, reviewed):
     if git_out(main, "rev-parse", "HEAD^{tree}")[1] != reviewed:  # changed between the check and the commit
         subprocess.call(["git", "-C", main, "reset", "-q", "--soft", pre])
         subprocess.call(["git", "-C", main, "reset", "-q"])
-        return fail("the changes in %s moved during the commit: run `$OKE job merge %s` again" % (main, job))
-    merged = git_out(main, "rev-parse", "HEAD")[1]
-    ledger_add(job, os.path.basename(os.path.dirname(review)), merged, "review", "pass",
-               review.replace("\\", "/"))
-    ledger_add(job, "oke", merged, "merge", "ok", "pre=%s direct" % pre)
+        return fail("the changes in %s moved during the commit: run `$OKE job deliver %s` again" % (main, job))
+    made = git_out(main, "rev-parse", "HEAD")[1]
+    ledger_add(job, by, made, "review", "pass", review.replace("\\", "/"))
+    ledger_add(job, "oke", made, "deliver", "ok", "main pre=%s" % pre)
     left = git_out(main, "ls-files", "--others", "--exclude-standard")[1].splitlines()
-    print(json.dumps({"result": "merged", "job": job, "commit": merged, "direct": True,
-                      "left_untracked": [f for f in left if f]}))
+    print(json.dumps({"result": "delivered", "job": job, "commit": made, "direct": True, "main": main,
+                      "left_untracked": [f for f in left if f]}, ensure_ascii=False))
     return 0
+
+
+# ---------------------------------------------------------------- continue a finished job
+
+def continue_start(job, info, other):
+    """Where a job that continues finished job `other` starts: its own branch oke/<job> starts
+    at the tip of oke/<other> (`other`'s worktree and branch are left alone), on `other`'s base.
+    Returns {commit, base}, or None after printing why not."""
+    if other == job:
+        fail("job %s cannot continue itself: name another job in `from oke/<job>`" % job)
+        return None
+    was, _ = job_record(other)
+    if was is None:
+        fail("job %s continues job %s, which is no job OKe knows" % (job, other))
+        return None
+    if was.get("phase") != "done" or not_code(was):
+        fail("job %s is %s: a job continues only a done code job (an open job takes the new request as new "
+             "requirements)" % (other, was.get("phase") if was.get("phase") != "done" else "not a code job"))
+        return None
+    if was.get("git_key") != info.get("git_key"):
+        fail("job %s worked in another checkout than job %s" % (other, job))
+        return None
+    main = native_path(repo_dir(info["git_key"]))
+    mine = "refs/heads/oke/" + job
+    has_mine = git_out(main, "rev-parse", "-q", "--verify", mine)[0] == 0
+    if has_mine and info.get("continues") == other and info.get("start_commit"):
+        # made by an earlier run: oke/<other> may be merged and deleted since
+        return {"commit": info["start_commit"], "base": info.get("base") or was.get("base")}
+    code, tip = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/%s^{commit}" % other)
+    if code != 0:
+        fail("branch oke/%s of job %s is gone (merged and deleted?): plan job %s with its own worktree from "
+             "the base branch, without `from oke/%s`" % (other, other, job, other))
+        return None
+    if has_mine:
+        if git_out(main, "merge-base", "--is-ancestor", tip, mine)[0] != 0:
+            fail("branch oke/%s exists and does not start at oke/%s: report a question" % (job, other))
+            return None
+    return {"commit": tip, "base": was.get("base")}
+
+
+def review_base(job, info, tip=None):
+    """Where a continuing job's own work starts below `tip` (default: its branch's tip): its
+    start_commit while that is below the tip, else (a rebase by hand moved the branch) where the
+    branch leaves its base branch. None for a job that continues nothing."""
+    if not info.get("continues") or not info.get("git_key"):
+        return None
+    main = native_path(repo_dir(info["git_key"]))
+    tip = tip or git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/%s^{commit}" % job)[1]
+    start = info.get("start_commit")
+    if not tip:
+        return start
+    if start and git_out(main, "merge-base", "--is-ancestor", start, tip)[0] == 0:
+        return start
+    if info.get("base"):
+        code, fork = git_out(main, "merge-base", "refs/heads/" + info["base"], tip)
+        if code == 0 and fork:
+            return fork
+    return start
+
+
+def own_commits(cwd, info, tip):
+    """How many commits of a continuing job's branch are its own (after its start_commit), or
+    None for a job that continues nothing (or whose start is no longer below the tip)."""
+    start = info.get("start_commit")
+    if not info.get("continues") or not start:
+        return None
+    if git_out(cwd, "merge-base", "--is-ancestor", start, tip)[0] != 0:
+        return None
+    code, n = git_out(cwd, "rev-list", "--count", "%s..%s" % (start, tip))
+    return int(n) if code == 0 and n.isdigit() else None
 
 
 # ---------------------------------------------------------------- ledger
@@ -3487,22 +3690,14 @@ def ledger_rows(job, path=None):
 
 
 # Rows only OKe itself writes; `oke ledger add` refuses them so nobody forges a verdict.
-OKE_CHECKS = ("review", "merge", "verify", "rollback", "check")
+OKE_CHECKS = ("review", "deliver", "check")
 
 
-def merge_state(job, path=None):
-    """(state, last merge row): state is none, unverified, verified or rolled_back.
-    `path`: a ledger.tsv elsewhere (an archived job's)."""
-    rows = ledger_rows(job, path)
-    merges = [i for i, r in enumerate(rows) if r["check"] == "merge"]
-    if not merges:
-        return "none", None
-    after = rows[merges[-1] + 1:]
-    if any(r["check"] == "rollback" for r in after):
-        return "rolled_back", rows[merges[-1]]
-    if any(r["check"] == "verify" and r["result"] == "pass" for r in after):
-        return "verified", rows[merges[-1]]
-    return "unverified", rows[merges[-1]]
+def deliver_state(job, path=None):
+    """(state, last delivery row): state is none or delivered. `path`: a ledger.tsv elsewhere
+    (an archived job's)."""
+    rows = [r for r in ledger_rows(job, path) if r["check"] == "deliver" and r["result"] == "ok"]
+    return ("delivered", rows[-1]) if rows else ("none", None)
 
 
 def find_bash():
@@ -3707,8 +3902,8 @@ def quality_target(job):
     info = load_state()["jobs"].get(job)
     if not info:
         return fail("unknown job: %s" % job)
-    if never_merges(info):
-        return fail("job %s has nothing to merge (its output is %s): no baseline or check"
+    if not_code(info):
+        return fail("job %s has no code to deliver (its output is %s): no baseline or check"
                     % (job, job_output(info)))
     if no_path(job, info):
         return fail(no_path(job, info))
@@ -3730,11 +3925,15 @@ def untracked_work(cwd):
 
 def base_point(info, cwd):
     """The commit the job's work starts from: in a worktree, where its branch leaves the
-    base branch; without one, the main checkout's HEAD."""
+    base branch (a job that continues another: its start_commit, where that job ended); without one,
+    the main checkout's HEAD."""
     main = native_path(repo_dir(info["git_key"]))
     code, head = git_out(main, "rev-parse", "HEAD")
     if not (info.get("worktree") or {}).get("path"):
         return head if code == 0 else None
+    start = info.get("start_commit")
+    if start and git_out(cwd, "merge-base", "--is-ancestor", start, "HEAD")[0] == 0:
+        return start
     code, point = git_out(cwd, "merge-base", "HEAD", info.get("base") or head)
     return point if code == 0 else None
 
@@ -3777,33 +3976,13 @@ def read_baseline(job, any_version=False):
     return base if any_version or base.get("version") == BASELINE_VERSION else None
 
 
-def reread_baseline(job, info, old):
-    """An older baseline with its signatures read from its baseline.log the current way;
-    None without the log. The run was in the job's checkout or a baseline checkout."""
-    log = os.path.join(oke_home(), "jobs", job, "baseline.log")
-    try:
-        recorded = time.mktime(time.strptime(old.get("recorded_at", ""), "%Y-%m-%dT%H:%M:%S"))
-        if os.path.getmtime(log) > recorded + 60:
-            return None  # written by a later run that saved no baseline: not this one's output
-        with io.open(log, encoding="utf-8", errors="replace") as f:
-            text = f.read()
-    except (IOError, OSError, ValueError, OverflowError):
-        return None
-    folders = [(info.get("worktree") or {}).get("path"), repo_dir(info["git_key"]),
-               os.path.join(oke_home(), "jobs", job, "baseline-checkout")]
-    sigs = []
-    for where in [f for f in folders if f]:
-        sigs += [l for l in signature_lines(text, where) if l not in sigs]
-    return dict(old, signatures=sigs)
+
 
 
 def cmd_baseline(args):
     found = quality_target(args.job)
     if isinstance(found, int):
         return found
-    if merge_state(args.job)[0] in ("unverified", "verified"):
-        # after the merge the starting point is the job's own tip: its failures would read as old
-        return fail("job %s is merged already: a baseline now would run on its own code" % args.job)
     info, command, cwd, target = found
     job_dir = os.path.join(oke_home(), "jobs", args.job)
     point = base_point(info, cwd)
@@ -3865,17 +4044,15 @@ def cmd_check(args):
     info, command, cwd, target = found
     loose = untracked_work(cwd) if (info.get("worktree") or {}).get("path") else []
     if loose:
-        fail("untracked files in %s: %s. `git add` the ones that are part of the work (the merge "
+        fail("untracked files in %s: %s. `git add` the ones that are part of the work (the branch "
              "carries only tracked files), delete the rest, then check again" % (cwd, ", ".join(loose)))
         return 2
     rev = criteria_rev(args.job)
     base = read_baseline(args.job)
     if base is None:
         if read_baseline(args.job, any_version=True) is not None:
-            merged = merge_state(args.job)[0] in ("unverified", "verified")
-            fail("the baseline of %s was recorded by an older OKe, which read failures differently: %s"
-                 % (args.job, "`$OKE job verify %s` reads its log again" % args.job if merged
-                    else "run `$OKE baseline %s` again" % args.job))
+            fail("the baseline of %s was recorded by an older OKe, which read failures differently: run "
+                 "`$OKE baseline %s` again" % (args.job, args.job))
         else:
             fail("job %s has no baseline: run `$OKE baseline %s` before the work starts" % (args.job, args.job))
         return 2
@@ -3906,176 +4083,7 @@ def cmd_check(args):
     return 1 if new else 0
 
 
-def same_tree_check(job, main, merged, rev):
-    """The target of a passing `oke check` under `rev` whose tree is the merged commit's, or None."""
-    code, tree = git_out(main, "rev-parse", merged + "^{tree}")
-    if code != 0:
-        return None
-    last = {}
-    for r in ledger_rows(job):
-        if r["check"] == "check":
-            last[r["commit"]] = r  # a later run on the same target supersedes an earlier one
-    for target, r in last.items():
-        if r["result"] != "pass" or r["detail"].split()[:1] != [rev]:
-            continue
-        if target.startswith("tree:"):
-            checked = target[len("tree:"):]
-        else:
-            ok, checked = git_out(main, "rev-parse", target + "^{tree}")
-            if ok != 0:
-                continue
-        if checked == tree:
-            return target
-    return None
 
-
-def changed_since_check(job, main, merged, rev):
-    """(target, tree, files) of the last passing `oke check` under `rev`, with the files the merged
-    commit changes against its tree: what other merges brought in meanwhile. None without one."""
-    last = {}  # target -> (position, its latest check row)
-    reviewed = None
-    for i, r in enumerate(ledger_rows(job)):
-        if r["check"] == "check":
-            last[r["commit"]] = (i, r)
-        elif r["check"] == "review" and r["result"] == "pass":
-            reviewed = r["commit"]
-    passing = sorted((i, t) for t, (i, r) in last.items()
-                     if r["result"] == "pass" and r["detail"].split()[:1] == [rev])
-    if not passing:
-        return None
-    # the reviewed commit is what was merged; a later check of other edits would list the job's own files
-    target = reviewed if reviewed in [t for _, t in passing] else passing[-1][1]
-    tree = target[len("tree:"):] if target.startswith("tree:") else git_out(main, "rev-parse", target + "^{tree}")[1]
-    code, out = git_out(main, "diff", "--name-only", tree, merged + "^{tree}")
-    if code != 0 or not tree:
-        return None
-    return target, tree, [f for f in out.splitlines() if f]
-
-
-def verify_job(job, command, accept=None, skip=None, run=False):
-    """Run the Check command on the merged main checkout. A failure undoes the merge, but never
-    anybody else's work: only while HEAD is still the merge, and with `reset --keep`,
-    which keeps local edits and refuses when they would be lost.
-    No time limit: a long simulation is a normal check. Run it in the background.
-    A second run (a restarted PM) waits for the first and then sees its result."""
-    info = load_state()["jobs"].get(job)
-    if not info:
-        return fail("unknown job: %s" % job)
-    lock = "verify-" + job
-    while not try_lock(lock):
-        time.sleep(5)
-    try:
-        return verify_locked(job, command, accept, info, skip, run)
-    finally:
-        unlock(lock)
-
-
-def verify_locked(job, command, accept, info, skip=None, run=False):
-    status, row = merge_state(job)
-    if status == "verified":
-        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "already": True}))
-        return 0
-    if status != "unverified":
-        return fail("job %s has no merge to verify (%s): run `$OKE job merge %s` first" % (job, status, job))
-    if accept:
-        # the user's call, e.g. after the main branch moved on: recorded as such
-        ledger_add(job, "user", row["commit"], "verify", "pass", "accepted: " + accept)
-        tell_after_waiters(load_state(), job, AFTER_FINISHED, ("merging", "awaiting_merge"))
-        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "accepted": True}))
-        return 0
-    main = native_path(repo_dir(info["git_key"]))
-    if git_out(main, "rev-parse", "HEAD")[1] != row["commit"]:
-        return fail("the main checkout moved past the merge of %s (%s): ask the user; if they accept "
-                    "the merge as it is, `$OKE job verify %s --accept \"<why>\"`" % (job, row["commit"][:12], job))
-    planned = plan_command(job)
-    if command and planned and command != planned:
-        return fail(u"the Check command given (%s) differs from plan.md's (%s): run `$OKE job verify %s` "
-                    u"without a command" % (command, planned, job))
-    command = planned or command
-    if not command:
-        return fail(u"give the Check command (plan.md names none), or --accept \"<why>\" when the user "
-                    u"accepts the merge as it is")
-    rev = criteria_rev(job)
-    same = same_tree_check(job, main, row["commit"], rev)
-    if same:
-        # the merged code is exactly what `oke check` passed on: running it again proves nothing new
-        ledger_add(job, "oke", row["commit"], "verify", "pass", "same tree as " + same)
-        tell_after_waiters(load_state(), job, AFTER_FINISHED, ("merging", "awaiting_merge"))
-        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "skipped": True,
-                          "same_tree_as": same}))
-        return 0
-    since = None if run else changed_since_check(job, main, row["commit"], rev)
-    if skip and not since:
-        return fail("nothing to skip: no passing `oke check` under the current plan; run `$OKE job verify %s --run`"
-                    % job)
-    if since and skip:
-        # the PM judged that what other merges brought in cannot change the check's result
-        target, _, files = since
-        shown = ", ".join(files[:20]) + (" (+%d more)" % (len(files) - 20) if len(files) > 20 else "")
-        ledger_add(job, "pm", row["commit"], "verify", "pass",
-                   "skipped by PM: %s (checked %s; changed: %s)" % (" ".join(skip.split()), target, shown))
-        tell_after_waiters(load_state(), job, AFTER_FINISHED, ("merging", "awaiting_merge"))
-        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "skipped": True,
-                          "skipped_by": "pm", "checked": target, "changed": files}))
-        return 0
-    if since:
-        # the code differs from what `oke check` passed on only by other merges: the PM decides
-        target, tree, files = since
-        code, stat = git_out(main, "diff", "--shortstat", tree, row["commit"] + "^{tree}")
-        print(json.dumps({"result": "changed_since_check", "job": job, "commit": row["commit"],
-                          "checked": target, "changed": files, "stat": stat}, ensure_ascii=False))
-        return 4
-    n = len([r for r in ledger_rows(job) if r["check"] == "verify"]) + 1
-    log = os.path.join(oke_home(), "jobs", job, "verify-%d.log" % n)
-    base = read_baseline(job)
-    old = read_baseline(job, any_version=True)
-    if not base and old and old.get("criteria_rev") == rev:
-        # recorded by an older OKe, which read failures differently: read its log again the
-        # current way (a new baseline now would run on the job's own merged code)
-        base = reread_baseline(job, info, old)
-        if not base:
-            return fail("the baseline of %s was recorded by an older OKe and its log is gone: ask the user; "
-                        "if they accept the merge as it is, `$OKE job verify %s --accept \"<why>\"`" % (job, job))
-    if (base or {}).get("criteria_rev") != rev:
-        base = None  # another command's failures say nothing about this one's
-    now = run_signatures(command, main, log)
-    code = now["exit"]
-    new, _ = diff_baseline(base, now)
-    with io.open(log, encoding="utf-8", errors="replace") as f:
-        tail = f.read().splitlines()[-40:]
-    log = log.replace("\\", "/")
-    if now["unrunnable"]:  # the shell could not run the command: not a verdict on the merge
-        return fail("the Check command could not run (exit %d, see %s): fix the command; the merge stays"
-                    % (code, log))
-    if not new:
-        ledger_add(job, "oke", row["commit"], "verify", "pass", command)
-        tell_after_waiters(load_state(), job, AFTER_FINISHED, ("merging", "awaiting_merge"))
-        print(json.dumps({"result": "verified", "job": job, "commit": row["commit"], "log": log}))
-        return 0
-    ledger_add(job, "oke", row["commit"], "verify", "fail", "exit %d: %s" % (code, command))
-    words = row["detail"].split()
-    if "already-in" in words:
-        # main held the branch before OKe's merge: nothing to undo, but the job goes back
-        # to the worker like any failed merge (rolled_back lets it merge again)
-        ledger_add(job, "oke", row["commit"], "rollback", "ok", "already-in: nothing undone")
-        print(json.dumps({"result": "verify_failed", "job": job, "exit": code, "log": log,
-                          "rolled_back_to": row["commit"], "already_in": True, "uncommitted": False,
-                          "tail": tail, "new": new}))
-        return 3
-    pre = words[0][len("pre="):] if words and words[0].startswith("pre=") else None
-    # a direct commit (no worktree) goes back to uncommitted changes for the worker to fix
-    mode = "--mixed" if "direct" in words else "--keep"
-    head = git_out(main, "rev-parse", "HEAD")[1]
-    if not pre or head != row["commit"] or subprocess.call(
-            ["git", "-C", main, "reset", "-q", mode, pre],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
-        return fail("the Check command failed on the merge of %s (log %s), and the merge was NOT undone: "
-                    "the main checkout moved on or has local edits in the merged files. Ask the user."
-                    % (job, log))
-    ledger_add(job, "oke", pre, "rollback", "ok", "after verify fail")
-    print(json.dumps({"result": "verify_failed", "job": job, "exit": code, "log": log,
-                      "rolled_back_to": pre, "uncommitted": mode == "--mixed", "tail": tail, "new": new}))
-    return 3
 
 
 def cmd_ledger(args):
@@ -4088,28 +4096,26 @@ def cmd_ledger(args):
             return fail("check %r is written by OKe itself; use a name like worker-verify" % args.check)
         ledger_add(args.job, args.by, args.commit, args.check, args.result, args.detail)
         return 0
-    status, _ = merge_state(args.job)
+    status, _ = deliver_state(args.job)
     rows, bad, _ = ledger_chain(args.job)
-    print(json.dumps({"job": args.job, "merge": status, "rows": rows, "ignored_lines": bad}, indent=2))
+    print(json.dumps({"job": args.job, "deliver": status, "rows": rows, "ignored_lines": bad}, indent=2))
     return 0
 
 
 # Phases that pass a user gate may only be entered from the phase before that gate
 # (or stay). Not proof of a user's approval, but a PM or an orchestrator slip cannot
 # skip the approval step. Phases not listed here are free.
-# Job sizes, which the PM decides while planning. small: a subagent does the work,
-# one approval covers plan and merge; normal: a worker pane, a review subagent;
-# large: worker and reviewer panes
+# Job sizes, which the PM decides while planning. small: a subagent does the work;
+# normal: a worker pane, a review subagent; large: worker and reviewer panes
 SIZES = ("small", "normal", "large")
 # state.json from before the rename kept a "lane" with the old names
 OLD_LANES = {"trivial": "small", "small": "normal", "normal": "large", "research": "research"}
 # What a job hands over (its output), apart from where it works:
-#   code    a git job's change, accepted by its verified merge
-#   files   a direct job's folder (outside git), changed in place: no branch, no merge
+#   code    a git job's change, delivered as its branch (or a commit in the main checkout)
+#   files   a direct job's folder (outside git), changed in place: no branch
 #   result  an answer or a run's outputs: research (the PM looks and reports, no worker, no plan
 #           approval), or an experiment in a worktree whose edits never reach the main branch
 OUTPUTS = ("code", "result")  # the ones `job output` sets: files comes from the path
-NO_MERGE = "the job has nothing to merge (its output is not code): set phase done after its report"
 
 
 def job_output(info):
@@ -4121,7 +4127,7 @@ def job_output(info):
     return info.get("output") or "code"
 
 
-def never_merges(info):
+def not_code(info):
     return job_output(info) != "code"
 
 
@@ -4131,14 +4137,35 @@ def experiment(info):
     return info.get("size") != "research" and job_output(info) == "result" and not info.get("no_change")
 
 
-def plan_worktree(job):
-    """Does the job's plan give it a worktree (its `## Workspace` section names its branch)?"""
+def place_lines(job):
+    """The `## Workspace` section without its Takes over line (it names files, which may
+    contain oke/<job> too), or None."""
     section = plan_place(job)
     if section is None:
-        return False
-    # the Takes over line names files, which may contain oke/<job> too
-    lines = [l for l in section.splitlines() if not TAKEN_LINE.match(l)]
-    return ("oke/" + job) in "\n".join(lines)
+        return None
+    return "\n".join(l for l in section.splitlines() if not TAKEN_LINE.match(l))
+
+
+def plan_own_worktree(job):
+    """Does the job's plan give it its own worktree (its `## Workspace` section names its branch
+    by its whole name: oke/fix is not in oke/fix-a)?"""
+    return bool(re.search(r"oke/%s(?![a-z0-9-])" % re.escape(job), place_lines(job) or ""))
+
+
+def plan_continues(job):
+    """The finished job whose branch the plan's worktree starts from (`from oke/<name>` in its
+    `## Workspace` section), or None."""
+    m = CONTINUES.search(place_lines(job) or "")
+    return m.group(1).lower() if m else None
+
+
+def plan_worktree(job):
+    """Does the job's plan give it a worktree?"""
+    return plan_own_worktree(job)
+
+
+# a plan's worktree that starts from another job's branch: `new worktree (branch oke/b, from oke/a)`
+CONTINUES = re.compile(r"\bfrom\s+`?oke/([a-z][a-z0-9-]{0,23})(?![a-z0-9-])`?", re.I)
 
 
 # a plan's work-place section
@@ -4195,10 +4222,9 @@ def plan_uncommitted(job):
 
 
 PHASE_FROM = {
-    "planning": ("intake", "planning", "awaiting_approval", "working", "reviewing", "awaiting_merge"),
-    "working": ("awaiting_approval", "working", "reviewing", "awaiting_merge", "merging"),
-    "merging": ("awaiting_merge", "merging"),
-    "done": ("merging", "done"),
+    "planning": ("intake", "planning", "awaiting_approval", "working", "reviewing"),
+    "working": ("awaiting_approval", "working", "reviewing"),
+    "done": ("working", "reviewing", "done"),
 }
 
 
@@ -4276,41 +4302,58 @@ def cmd_interview(args):
     return 0
 
 
+def archived_dirs(job):
+    """The archive folders of `job`, oldest first."""
+    return sorted(d for d in glob.glob(os.path.join(oke_home(), "archive", glob.escape(job) + "-*"))
+                  if re.match(re.escape(job) + r"-\d{8}-\d{6}$", os.path.basename(d)))
+
+
 def archived_dir(job):
     """The newest archive folder of `job`, or None."""
-    found = sorted(d for d in glob.glob(os.path.join(oke_home(), "archive", glob.escape(job) + "-*"))
-                   if re.match(re.escape(job) + r"-\d{8}-\d{6}$", os.path.basename(d)))
+    found = archived_dirs(job)
     return found[-1] if found else None
 
 
 def kept_worktree(kept):
-    """The worktree an archived job left for the user (an experiment's outputs, or one a
-    no-change end could not remove), or None."""
+    """The worktree an archived job left for the user (a code job's delivered branch, an
+    experiment's outputs, one a no-change end could not remove), or None."""
     wt = (kept.get("worktree") or {}).get("path") if isinstance(kept, dict) else None
-    if wt and (experiment(kept) or kept.get("no_change")) and not kept.get("worktree_removed") \
-            and os.path.isdir(native_path(wt)):
+    if wt and not kept.get("worktree_removed") and os.path.isdir(native_path(wt)):
         return wt
     return None
 
 
 def kept_worktrees():
-    """[{job, path}] of archived jobs whose worktree is still there for the user."""
-    out = []
-    for path in sorted(glob.glob(os.path.join(oke_home(), "archive", "*", "job.json"))):
-        wt = kept_worktree(read_json(path, {}))
-        if wt:
-            out.append({"job": re.sub(r"-\d{8}-\d{6}$", "", os.path.basename(os.path.dirname(path))),
-                        "path": wt})
-    return out
+    """[{job, path, branch, done}] of archived jobs whose worktree is still there for the user
+    (newest archive of a name wins). `branch`: oke/<job> while it exists (else None); `done`:
+    the job finished (a cancelled job's worktree is kept too). A done code job with a branch is
+    one a new request may continue."""
+    out = {}
+    for path in sorted(glob.glob(os.path.join(oke_home(), "archive", "*", "job.json")),
+                       key=lambda p: os.path.basename(os.path.dirname(p))[-15:]):
+        kept = read_json(path, {})
+        wt = kept_worktree(kept)
+        if not wt:
+            continue
+        job = re.sub(r"-\d{8}-\d{6}$", "", os.path.basename(os.path.dirname(path)))
+        branch = None
+        if kept.get("git_key") and not not_code(kept):
+            main = native_path(repo_dir(kept["git_key"]))
+            if git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/" + job)[0] == 0:
+                branch = "oke/" + job
+        out[normalize_path(wt)] = {"job": job, "path": wt, "branch": branch, "done": kept.get("phase") == "done"}
+    return sorted(out.values(), key=lambda k: k["job"])
 
 
 def remove_kept_worktree(job, kept, force):
-    """Remove an archived job's worktree and its branch. With force (no change was checked, or the
-    user said to throw it away) the branch goes even when it holds commits a revert undid; otherwise
-    only with -d. Returns (removed, branch_left)."""
-    wt = native_path(kept["worktree"]["path"])
+    """Remove a finished job's worktree (when it is still there) and its branch. With force (no
+    change was checked, or the user said to throw it away, or the branch is in its base) the
+    branch goes even when git calls it unmerged; otherwise only with -d. Returns (removed,
+    branch_left)."""
+    wt = native_path(kept["worktree"]["path"]) if (kept.get("worktree") or {}).get("path") else None
     main = native_path(repo_dir(kept["git_key"]))
-    if os.path.isdir(wt):
+    branch = job_branch(job, kept)
+    if wt and os.path.isdir(wt):
         # through the runtime first: herdr closes the worktree's workspace and the panes in it
         # (on Windows git cannot delete a folder a shell still sits in). Found by its path, never
         # by the stored id: herdr reuses ids, and that id may be another job's workspace now
@@ -4321,39 +4364,82 @@ def remove_kept_worktree(job, kept, force):
                 rt.worktree_remove(wid, force=force)
         except HerdrError:
             pass  # no workspace open for it (its last pane went): git removes the folder
-    if os.path.isdir(wt):
+    if wt and os.path.isdir(wt):
         try:
             runtime_bg.git_worktree_remove(wt, main, force=force)
         except HerdrError:
             pass
     subprocess.call(["git", "-C", main, "worktree", "prune"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if os.path.isdir(wt):
+    if wt and os.path.isdir(wt):
         return False, None
-    subprocess.call(["git", "-C", main, "branch", "-q", "-D" if force else "-d", "oke/" + job],
+    subprocess.call(["git", "-C", main, "branch", "-q", "-D" if force else "-d", branch],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    left = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/" + job)[0] == 0
-    return True, ("oke/" + job) if left else None
+    left = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] == 0
+    return True, branch if left else None
 
 
-def clean_job(job):
-    """`job clean <job>`: remove an archived job's kept worktree (the user said so)."""
-    found = sorted(d for d in glob.glob(os.path.join(oke_home(), "archive", glob.escape(job) + "-*"))
-                   if re.match(re.escape(job) + r"-\d{8}-\d{6}$", os.path.basename(d))
-                   and kept_worktree(read_json(os.path.join(d, "job.json"), {})))
-    if not found:
-        return fail("job %s has no archived worktree left to remove" % job)
-    folder = found[-1]
-    kept = read_json(os.path.join(folder, "job.json"), {})
-    wt = kept["worktree"]["path"]
-    # --force: its edits and outputs are what the user said to throw away
-    removed, branch_left = remove_kept_worktree(job, kept, force=True)
-    if not removed:
-        return fail("could not remove %s: close what still runs in it, then run this again" % wt)
-    kept["worktree_removed"] = True
-    write_json_atomic(os.path.join(folder, "job.json"), kept)
-    out = {"job": job, "removed": wt}
-    if branch_left:
-        out["branch_left"] = branch_left
+def clean_job(job, force=False):
+    """`job clean <job>`: remove a finished job's worktree and branch (the user said so). An
+    experiment's edits are thrown away; a code job's branch that is not in its base branch,
+    or a worktree with uncommitted files, goes only with --force (the user agreed). What
+    the user removed already counts as clean."""
+    info, folder = job_record(job)
+    if info is None:
+        return fail("job %s is no job OKe knows" % job)
+    for d in reversed(archived_dirs(job) if folder else []):  # the newest archive of that name that had a worktree
+        kept = read_json(os.path.join(d, "job.json"), None)
+        if isinstance(kept, dict) and (kept.get("worktree") or {}).get("path"):
+            info, folder = kept, d
+            break
+    if folder is None and info.get("phase") not in DONE_PHASES:
+        return fail("job %s is %s: clean only a finished job" % (job, info.get("phase")))
+    if not info.get("git_key") or info.get("direct") or info.get("size") == "research":
+        return fail("job %s has no worktree or branch" % job)
+    main = repo_dir(info["git_key"])
+    if not main or not os.path.isdir(native_path(main)):
+        return fail("the checkout of job %s is gone" % job)
+    main = native_path(main)
+    wt = (info.get("worktree") or {}).get("path")
+    branch = job_branch(job, info)
+    has_dir = bool(wt) and os.path.isdir(native_path(wt))
+    has_branch = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] == 0
+    throwaway = not_code(info)  # an experiment's edits, a no-change end: nothing to keep
+    if has_dir and not throwaway and not force:
+        cwd = native_path(wt)
+        code, dirty = git_out(cwd, "status", "--porcelain", "-uno")
+        loose = untracked_work(cwd)
+        if code != 0 or dirty or loose:
+            return fail("the worktree %s has uncommitted files (%s): ask the user; `$OKE job clean %s --force` "
+                        "deletes them" % (wt, ", ".join(([l[3:] for l in dirty.splitlines()] + loose)[:5]) or "git status failed",
+                                         job))
+    if has_branch and not throwaway and not force:
+        base = info.get("base")
+        merged = bool(base) and git_out(main, "merge-base", "--is-ancestor", "refs/heads/" + branch,
+                                        "refs/heads/" + base)[0] == 0
+        if not merged:
+            return fail("branch %s has commits that are not in %s (not merged): ask the user; `$OKE job clean %s "
+                        "--force` deletes it" % (branch, base or "its base branch", job))
+    out = {"job": job}
+    if not has_dir and not has_branch:
+        subprocess.call(["git", "-C", main, "worktree", "prune"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        out["result"] = "already clean"
+    else:
+        # checked above: what goes is the user's call, or only byproducts and a merged branch
+        removed, branch_left = remove_kept_worktree(job, info, force=True)
+        if not removed:
+            return fail("could not remove %s: close what still runs in it, then run this again" % wt)
+        out.update(result="removed", worktree=wt if has_dir else None, branch=branch if has_branch else None)
+        if branch_left:
+            out["branch_left"] = branch_left
+    if folder:
+        info["worktree_removed"] = True
+        write_json_atomic(os.path.join(folder, "job.json"), info)
+    else:
+        with locked():
+            state = load_state()
+            if job in state["jobs"]:
+                state["jobs"][job]["worktree_removed"] = True
+                save_state(state)
     print(json.dumps(out, ensure_ascii=False))
     return 0
 
@@ -4469,8 +4555,6 @@ def job_locked(args):
             return fail("job %s exists already (or was archived): pick another name" % new)
         if info.get("phase") not in SPLIT_PHASES or info.get("held"):
             return fail("job %s is past planning (%s): split it only while planning" % (args.slug, info.get("phase")))
-        if args.after and args.after not in state["jobs"]:
-            return fail("unknown job for --after: %s" % args.after)
         try:
             folder = path_facts(args.path)[1]
         except ValueError as e:
@@ -4490,20 +4574,15 @@ def job_locked(args):
         os.makedirs(new_dir)
         src = os.path.join(home, "jobs", args.slug, "intake.md")
         intake = io.open(src, encoding="utf-8").read() if os.path.exists(src) else u""
-        starts_late = state["jobs"][new].get("direct")
-        intake += u"\n## Split\nSplit from job %s by its PM: this job changes only %s.%s\n" % (
-            args.slug, state["jobs"][new]["path"],
-            (u" It starts its work only after job %s (plan `after: %s`)." if starts_late else
-             u" It merges only after job %s (plan `after: %s`).") % (args.after, args.after) if args.after else u"")
+        intake += u"\n## Split\nSplit from job %s by its PM: this job changes only %s.\n" % (
+            args.slug, state["jobs"][new]["path"])
         with io.open(os.path.join(new_dir, "intake.md"), "w", encoding="utf-8", newline="\n") as f:
             f.write(intake)
         if os.path.exists(interview_path(args.slug)):
             shutil.copyfile(interview_path(args.slug), interview_path(new))
-        if args.after:
-            state["jobs"][new]["after"] = args.after
         save_state(state)
         out = {"job": new, "split_from": args.slug, "path": state["jobs"][new]["path"],
-               "direct": bool(state["jobs"][new].get("direct")), "after": args.after}
+               "direct": bool(state["jobs"][new].get("direct"))}
         out.update(pm_fields(info.get("pm"), new))
         print(json.dumps(out, ensure_ascii=False))
         return 0
@@ -4515,13 +4594,9 @@ def job_locked(args):
         now = state["jobs"][args.slug].get("phase")
         allowed = PHASE_FROM.get(args.phase)
         info = state["jobs"][args.slug]
-        no_merge = never_merges(info)
-        if no_merge and args.phase in ("awaiting_merge", "merging"):
-            return fail("job %s: %s" % (args.slug, NO_MERGE))
-        if no_merge and args.phase == "done":
-            allowed = allowed + ("working", "reviewing")
-            if info.get("no_change"):  # the user ended it before it worked
-                allowed = allowed + GATE_PHASES
+        no_code = not_code(info)
+        if no_code and args.phase == "done" and info.get("no_change"):  # the user ended it before it worked
+            allowed = allowed + GATE_PHASES
         if info.get("size") == "research" and args.phase == "working":
             allowed = allowed + ("intake", "planning")  # no plan to approve
         if allowed is not None and now not in allowed:
@@ -4529,7 +4604,7 @@ def job_locked(args):
                         % (args.slug, now, args.phase, ", ".join(allowed)))
         if args.phase == "working" and info.get("size") != "research" and no_path(args.slug, info):
             return fail(no_path(args.slug, info))
-        if args.phase == "working" and experiment(info) and not plan_worktree(args.slug):
+        if args.phase == "working" and experiment(info) and not plan_own_worktree(args.slug):
             return fail("job %s is an experiment (output result): its plan's `## Workspace` must name branch "
                         "oke/%s, so its edits never reach the main checkout" % (args.slug, args.slug))
         if args.phase == "working" and info.get("git_key") and not info.get("direct") \
@@ -4546,21 +4621,6 @@ def job_locked(args):
                             u"(%s): working there, the job would commit them. Ask the user, then give the PM "
                             u"`kind: plan`: a worktree, or `Takes over: <files>` naming them as the job's"
                             % (main, args.slug, ", ".join(unnamed[:5])))
-        if args.phase == "working" and never_merges(info) and info.get("size") != "research" \
-                and now in GATE_PHASES:
-            # it never merges, so `after:` holds its start instead of its merge (a move back
-            # from reviewing has started already: no gate)
-            for other in after_jobs(args.slug):
-                block = after_block(state, other)
-                if block:
-                    info["start_after"] = True  # `oke pending` names it as after_ready once free
-                    if now == "awaiting_approval":
-                        info["approved"] = True  # the user approved the plan; it only waits
-                    save_state(state)
-                    return fail("job %s: %s (it starts its work only after job %s). Write no assignment: "
-                                "`$OKE pending` shows it as after_ready when it may start, or after_broken if "
-                                "the after-job can never finish"
-                                % (args.slug, block, other))
         if args.phase == "done" and experiment(info) and not info.get("no_change"):
             job_dir = os.path.join(oke_home(), "jobs", args.slug)
             review = latest_report(job_dir, r"-rv\d*$")
@@ -4568,10 +4628,9 @@ def job_locked(args):
             if not review or review_verdict(review[1]) != "pass" or (worker and worker[0] > review[0]):
                 return fail("job %s is an experiment: done needs the reviewer's `verdict: pass` on its latest "
                             "result" % args.slug)
-        if args.phase == "done" and not no_merge and merge_state(args.slug)[0] != "verified":
-            # done tells the user the work is in: only after OKe's merge and its verify
-            return fail("job %s: its merge is %s: `$OKE job merge`, then `$OKE job verify`, before done"
-                        % (args.slug, merge_state(args.slug)[0]))
+        if args.phase == "done" and not no_code and deliver_block(args.slug, info):
+            # done tells the user the work is ready: its branch on the latest base, checked there
+            return fail(deliver_block(args.slug, info))
         if args.phase == "done" and info.get("pm") and not wiki.logged(wiki_dir(info["pm"]), args.slug,
                                                                          info.get("created")):
             return fail("job %s: the PM has not recorded what it taught. It writes the lessons with "
@@ -4591,7 +4650,6 @@ def job_locked(args):
                 state["jobs"][args.slug]["start_seq"] = seq
             else:
                 state["jobs"][args.slug].pop("start_seq", None)
-        info.pop("start_after", None)
         if args.phase == "working":
             info["worked"] = True  # a later re-plan does not undo the edits already made
             if not plan_worktree(args.slug):
@@ -4601,41 +4659,6 @@ def job_locked(args):
         if args.phase not in ("intake", "planning", "awaiting_approval", "failed"):
             info["approved"] = True  # past its approval once: its path stays
         save_state(state)
-        if args.phase == "done" and no_merge:  # it never merges: done finishes it for `after:`
-            tell_after_waiters(state, args.slug, AFTER_FINISHED, ("merging", "awaiting_merge"))
-        return 0
-    if args.action == "after":
-        info = state["jobs"][args.slug]
-        if info.get("phase") in DONE_PHASES:
-            return fail("job %s is finished" % args.slug)
-        if args.drop not in after_jobs(args.slug):
-            return fail("job %s does not wait for %s (after: %s)"
-                        % (args.slug, args.drop, ", ".join(after_jobs(args.slug)) or "none"))
-        plan = os.path.join(home, "jobs", args.slug, "plan.md")
-        try:
-            with io.open(plan, encoding="utf-8") as f:
-                text = f.read()
-        except (IOError, OSError):
-            text = None
-        if text is not None:
-            head, sep, body = text.partition("\n---\n")
-            lines = []
-            for line in head.split("\n"):
-                m = re.match(r"^after:(.*)$", line)
-                if m:
-                    left = [n.strip() for n in m.group(1).split(",") if n.strip() and n.strip() != args.drop]
-                    if not left:
-                        continue
-                    line = "after: " + ", ".join(left)
-                lines.append(line)
-            tmp = "%s.%d.tmp" % (plan, os.getpid())
-            with io.open(tmp, "w", encoding="utf-8", newline="") as f:
-                f.write("\n".join(lines) + sep + body)
-            replace_file(tmp, plan)
-        if info.get("after") == args.drop:
-            info.pop("after")
-        save_state(state)
-        print(json.dumps({"job": args.slug, "after": after_jobs(args.slug)}, ensure_ascii=False))
         return 0
     if args.action == "rounds":
         info = state["jobs"][args.slug]
@@ -4659,7 +4682,7 @@ def job_locked(args):
         grows = SIZES.index(args.size) > SIZES.index(info.get("size") or "large")
         if info.get("phase") not in ("intake", "planning", "awaiting_approval") and not (
                 grows and info.get("phase") in ("working", "reviewing")):
-            return fail("job %s: in phase %s a size can only grow, before the merge"
+            return fail("job %s: in phase %s a size can only grow, while it works"
                         % (args.slug, info.get("phase")))
         state["jobs"][args.slug]["size"] = args.size
         save_state(state)
@@ -4675,14 +4698,8 @@ def job_locked(args):
         info = state["jobs"][args.slug]
         if info.get("held"):
             return 0  # held already: cmd_job only retries the closes; no second notice, same held_at
-        if (info.get("phase") in DONE_PHASES or info.get("phase") == "merging"
-                or merge_state(args.slug)[0] in ("unverified", "verified")):
-            return fail("job %s is %s: only a job before its merge can go on hold"
-                        % (args.slug, info.get("phase")))
-        merged, row = merge_state(args.slug)
-        if merged == "rolled_back" and "already-in" in row["detail"].split():
-            return fail("job %s blocks the merges into its git checkout (its failing code is in main): fix "
-                        "it, or cancel and archive it, not hold it" % args.slug)
+        if info.get("phase") in DONE_PHASES:
+            return fail("job %s is %s: only an open job can go on hold" % (args.slug, info.get("phase")))
         early = info.get("size") == "research" or (
             info.get("phase") in ("intake", "planning", "awaiting_approval") and not info.get("worked"))
         if info.get("direct") and not early:
@@ -4692,7 +4709,7 @@ def job_locked(args):
         # a plan with a worktree names its branch: main's changes are the user's, not this job's
         uses_worktree = plan_worktree(args.slug)
         if not early and not uses_worktree and info.get("git_key") \
-                and git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/" + args.slug)[0] != 0:
+                and git_out(main, "rev-parse", "-q", "--verify", "refs/heads/" + job_branch(args.slug, info))[0] != 0:
             # no branch: its edits (a worker's or the PM's own) sit uncommitted in the main
             # checkout, in every other job's way. Not judged by main's state: a PM subagent the
             # hold cannot close may still write there after it
@@ -4733,10 +4750,6 @@ def job_locked(args):
             # queued before the phase changes: the PM's wait delivers it before it can say no_jobs
             queue_mail(pm["agent"], "oke", "Job %s was cancelled by the user. Forget it, close what is "
                        "left of it, and write no report for it." % args.slug)
-        # only a job at its merge waits on it now (after_broken asks the user); one still
-        # working sees it at its merge, and a folder job past its start never waits
-        tell_after_waiters(state, args.slug, "was cancelled: the orchestrator asks the user; keep the job waiting",
-                           ("awaiting_merge", "merging"))
         info.update(phase="failed", phase_at=time.time(), cancelled=True)
         save_state(state)  # nothing may start for this job from here on
         return 0
@@ -4759,7 +4772,7 @@ def job_locked(args):
                         os.remove(path)
                     except OSError:
                         pass
-            try:  # what it was (direct, research, done): a job after it still asks
+            try:  # what it was (its worktree and branch): `job clean`, `job pr` and a job continuing it ask
                 write_json_atomic(os.path.join(dst, "job.json"), state["jobs"][args.slug])
             except (IOError, OSError):
                 pass
@@ -4774,11 +4787,13 @@ def job_locked(args):
         wt = (info_was.get("worktree") or {}).get("path")
         if info_was.get("no_change") and wt and info_was.get("git_key"):
             args.drop_worktree = (dst, info_was)  # removed after the state lock: runtime and git are slow
-        elif job_output(info_was) == "code" and info_was.get("git_key") and info_was.get("phase") == "done":
-            args.drop_branch = info_was  # merged: its branch goes too, after the lock
-        if experiment(info_was) and wt:
+        elif experiment(info_was) and wt:
             print("kept_worktree: %s (the experiment's outputs: remove it with `$OKE job clean %s` when the user "
                   "says so)" % (wt, args.slug))
+        elif job_output(info_was) == "code" and wt and not info_was.get("worktree_removed"):
+            why = "for the user to merge" if info_was.get("phase") == "done" else "the cancelled job's work"
+            print("kept_worktree: %s (branch %s, %s: remove it with `$OKE job clean %s` when "
+                  "the user says so)" % (wt, job_branch(args.slug, info_was), why, args.slug))
         if hint:
             print(hint)
         return 0
@@ -4928,7 +4943,7 @@ def set_output(state, args):
             print(json.dumps(out))
             return 0
         # a replan may change it while nothing was made yet that the other output cannot use
-        if phase not in GATE_PHASES or merge_state(args.slug)[0] != "none" \
+        if phase not in GATE_PHASES or deliver_state(args.slug)[0] != "none" \
                 or ((info.get("worked") or info.get("worktree")) and job_changes(args.slug, info)):
             return fail("job %s has worked on its plan (%s): its output stays %s. Report a question: the user "
                         "decides (cancel it and start a new job)" % (args.slug, phase, job_output(info)))
@@ -4951,13 +4966,12 @@ def set_output(state, args):
                         "question")
     if args.output != "result":
         return fail("--no-change ends the job with output result")
-    if phase in DONE_PHASES or phase in ("awaiting_merge", "merging") \
-            or merge_state(args.slug)[0] != "none":
+    if phase in DONE_PHASES or deliver_state(args.slug)[0] != "none":
         return fail("job %s is %s: too late to end it with no change" % (args.slug, phase))
     # a folder outside git has nothing to compare with: the user's word is the check
     changed = None if info.get("direct") or not info.get("git_key") else job_changes(args.slug, info)
     if changed:
-        return fail("job %s changed something (%s): it does not end with no change; merge it, or cancel it"
+        return fail("job %s changed something (%s): it does not end with no change; finish it, or cancel it"
                     % (args.slug, changed))
     if info.get("pm") in state["pms"] and not wiki.logged(wiki_dir(info["pm"]), args.slug, info.get("created")):
         # the user ended it: `job phase done` needs a wiki line, and a job that changed nothing
@@ -5003,7 +5017,7 @@ def job_changes(job, info):
         loose = untracked_work(cwd)
         if loose:
             return "new files: " + ", ".join(loose[:5])
-    branch = "refs/heads/oke/" + job
+    branch = "refs/heads/" + job_branch(job, info)
     point = base_point(info, cwd)
     tips = [git_out(cwd, "rev-parse", "HEAD")[1]] if wt else []
     if branch and git_out(main, "rev-parse", "-q", "--verify", branch)[0] == 0:
@@ -5021,10 +5035,10 @@ def wiki_verified(job, info):
     sessions taught wrong rules)."""
     if info.get("size") == "research" or info.get("no_change"):
         return True
-    if never_merges(info):
+    if not_code(info):
         review = latest_report(os.path.join(oke_home(), "jobs", job), r"-rv\d*$")
         return bool(review) and review_verdict(review[1]) == "pass"
-    return merge_state(job)[0] == "verified"
+    return deliver_state(job)[0] == "delivered"
 
 
 def cmd_wiki(args):
@@ -5063,8 +5077,8 @@ def wiki_locked(args):
             return 0
         if args.action == "write":
             if args.job and args.page != "index.md" and not wiki_verified(args.job, state["jobs"][args.job]):
-                return fail("job %s is not verified yet (merge verified, the review of a job that never "
-                            "merges passed, research, or an end with no change): write its lessons after that"
+                return fail("job %s is not checked yet (delivered, the passing review of a job whose output is "
+                            "not code, research, or an end with no change): write its lessons after that"
                             % args.job)
             with io.open(args.source, encoding="utf-8-sig") as f:
                 text = f.read()
@@ -5459,9 +5473,9 @@ def cmd_take_mail(args):
 
 # ---------------------------------------------------------------- pending
 
-PENDING_RANKS = {"unsent": 0, "unassigned": 0, "split": 0, "after_ready": 0, "after_broken": 1, "report_done": 0, "no_change": 0, "silent": 1, "question": 1, "blocked": 1, "failed": 1,
-                 "peer": 1, "plan": 2, "merge": 3}
-ASKING_PHASES = ("planning", "working", "reviewing", "merging")
+PENDING_RANKS = {"unsent": 0, "unassigned": 0, "split": 0, "report_done": 0, "no_change": 0, "silent": 1,
+                 "question": 1, "blocked": 1, "failed": 1, "peer": 1, "plan": 2}
+ASKING_PHASES = ("planning", "working", "reviewing")
 
 
 WORK_KINDS = ("execute", "research", "curate")  # assignments that start a job's work
@@ -5500,30 +5514,11 @@ def pending_item(name, job):
     seq, report, mtime = pm_job_report(name)
     rtype = report.get("type") if seq is not None and report.get("seq") == seq else None
     ruling = peer_ruling(load_state(), name) if os.path.exists(peers_path(name)) else []
-    at_gate = gated(job)
-    waits, broken = after_blocks(load_state(), name) \
-        if at_gate or phase in ("awaiting_merge", "merging") else ([], [])
     if job.get("no_change"):
         # the user ended it with no change and a compaction came before `job phase done`
         kind, since, mark = "no_change", job.get("phase_at"), "end"
-    elif at_gate:
-        # held at its start: what an agent reports or a peer asks still shows; the gate
-        # itself shows only once it can move, or never will by itself
-        if seq is not None and job.get("sent_seq") != seq:
-            kind, since, mark = "unsent", job.get("phase_at"), seq
-        elif rtype in ("question", "blocked", "failed"):
-            kind, since, mark = rtype, mtime, seq
-        elif ruling:
-            kind, since, mark = "peer", os.path.getmtime(peers_path(name)), "%s:%s" % (
-                job.get("sent_seq"), ",".join(ruling))
-        elif broken:
-            kind, since, mark = "after_broken", job.get("phase_at"), broken[0][0]
-        elif waits:
-            return None  # approved, waiting for an after-job: nothing to ask yet
-        else:
-            kind, since, mark = "after_ready", job.get("phase_at"), "start"
     elif phase == "working" and "start_seq" in job and job["start_seq"] == seq:
-        # phase set first (approval, after_ready, a curate start), its assignment never
+        # phase set first (approval, a curate start), its assignment never
         # written: the report is not the work's, and this job must not look done
         kind, since, mark = "unassigned", job.get("phase_at"), seq
     elif seq is None and phase == "intake" and job.get("split_from"):
@@ -5537,14 +5532,10 @@ def pending_item(name, job):
     elif ruling:
         # the PMs are in the mark: a later missing answer is a new item, even after a deferral
         kind, since, mark = "peer", os.path.getmtime(peers_path(name)), "%s:%s" % (job.get("sent_seq"), ",".join(ruling))
-    elif broken:  # at its merge: an after-job that will never finish is the user's call
-        kind, since, mark = "after_broken", job.get("phase_at"), broken[0][0]
     elif rtype == "done" and phase in ASKING_PHASES:
         kind, since, mark = "report_done", mtime, seq
     elif phase == "awaiting_approval":
         kind, since, mark = "plan", job.get("phase_at"), job.get("phase_at")
-    elif phase == "awaiting_merge":
-        kind, since, mark = "merge", job.get("phase_at"), job.get("phase_at")
     else:
         return None
     key = "%s:%r" % (kind, mark)
@@ -5552,15 +5543,6 @@ def pending_item(name, job):
             "key": key, "deferred": job.get("deferred") == key}
     if ruling and kind in ("peer", "question", "blocked", "failed"):
         item["peers"] = ruling  # the answer that settles this item must settle these too
-    if kind == "after_ready":
-        left = after_jobs(name)
-        item["text"] = ("job %s may start: after-job %s %s" % (name, ", ".join(left), AFTER_FINISHED) if left
-                        else "job %s may start: its after-jobs were dropped" % name)
-    if kind == "after_broken":
-        other, why = broken[0]
-        item["text"] = "job %s cannot %s: %s; ask the user: drop it (`$OKE job after %s --drop %s`) or cancel %s" % (
-            name, "start" if at_gate else "merge", why, name, other, name)
-        item["after"], item["phase"] = other, phase  # merging: the PM's merge waits, tell it after a drop
     if kind == "no_change":
         item["text"] = ("job %s ended with no change (the user agreed): do not ask again; finish it as the "
                         "Flow row says (wiki, `job phase done`, archive)" % name)
@@ -5599,7 +5581,7 @@ def build_parser():
     new.add_argument("slug")
     new.add_argument("--pm", required=True, help="the PM the user picked")
     new.add_argument("--path", help="the folder the job changes, only when the user said it")
-    new.add_argument("--research", action="store_true", help="look and report: no change, no merge")
+    new.add_argument("--research", action="store_true", help="look and report: no change")
     jb = job_sub.add_parser("brief", help="the plan as the user reads it before approving")
     jb.add_argument("slug", nargs="?")
     jb.add_argument("--json", action="store_true", help="every job awaiting approval, as JSON")
@@ -5610,7 +5592,6 @@ def build_parser():
     sp.add_argument("slug")
     sp.add_argument("new")
     sp.add_argument("--path", required=True)
-    sp.add_argument("--after", help="the new job starts (folder) or merges (git) only after this job")
     phase = job_sub.add_parser("phase")
     phase.add_argument("slug")
     phase.add_argument("phase")
@@ -5623,33 +5604,29 @@ def build_parser():
     archive.add_argument("slug")
     defer = job_sub.add_parser("defer")
     defer.add_argument("slug")
-    af = job_sub.add_parser("after", help="drop a job from a job's after: (the user's call)")
-    af.add_argument("slug")
-    af.add_argument("--drop", required=True)
     rounds = job_sub.add_parser("rounds", help="show a job's review round and limit, or set the limit")
     rounds.add_argument("slug")
     rounds.add_argument("n", nargs="?", type=int)
-    output = job_sub.add_parser("output", help="what the job hands over: code (a merge) or result "
-                                "(an answer or a run's outputs, no merge)")
+    output = job_sub.add_parser("output", help="what the job hands over: code (its branch) or result "
+                                "(an answer or a run's outputs)")
     output.add_argument("slug")
     output.add_argument("output", choices=OUTPUTS)
     output.add_argument("--no-change", action="store_true",
                         help="the orchestrator, on the user's answer: end a job that changed nothing")
-    job_sub.add_parser("clean", help="remove an archived experiment's kept worktree").add_argument("slug")
+    clean = job_sub.add_parser("clean", help="remove a finished job's worktree and branch (the user said so)")
+    clean.add_argument("slug")
+    clean.add_argument("--force", action="store_true",
+                       help="the user agreed: also an unmerged branch or uncommitted files")
     size = job_sub.add_parser("size", help="the job's size, which the PM decides while planning")
     size.add_argument("slug")
     size.add_argument("size", choices=SIZES)
-    merge = job_sub.add_parser("merge")
-    merge.add_argument("slug")
+    job_sub.add_parser("deliver", help="after the review: the branch onto the latest base, checked there "
+                       "(no worktree: commit in the main checkout)").add_argument("slug")
+    job_sub.add_parser("pr", help="push the delivered branch and open a GitHub pull request").add_argument("slug")
+    jbase = job_sub.add_parser("base", help="the branch a job's work goes onto, when it has none (the user names it)")
+    jbase.add_argument("slug")
+    jbase.add_argument("branch")
     job_sub.add_parser("tree", help="the tree a review of a job without a worktree names").add_argument("slug")
-    verify = job_sub.add_parser("verify")
-    verify.add_argument("slug")
-    verify.add_argument("command", nargs="?", help="the plan's Check command, as one quoted string")
-    verify.add_argument("--accept", help="the user accepts the merge without (another) check: why")
-    verify.add_argument("--skip", help="the PM judged that the files other merges changed since the "
-                                       "check cannot change its result: why")
-    verify.add_argument("--run", action="store_true", help="run the Check command even though other merges "
-                                                          "changed the code since the check")
     job.set_defaults(func=cmd_job)
 
     wk = sub.add_parser("wiki", help="read and write a wiki: capped pages, read before write, a log line per job")

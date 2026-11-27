@@ -1,16 +1,16 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { THEME_NAMES, framesOf, keyDenied, orchestratorDenied, paletteOf, promptRole, withBriefs, workerDenied, writeVerdict } from './register'
+import { THEME_NAMES, framesOf, gitDenied, keyDenied, orchestratorDenied, paletteOf, promptRole, withBriefs, workerDenied, writeVerdict } from './register'
 
 type Run = { argv: readonly string[] }
 
 const BOARD = [{
   name: 'toy', key: 'toy', pm: null,
-  jobs: [{ job: 'calc-sub', phase: 'working', merge: 'rolled_back', pending: 'question', size: 'small', agents: [{
+  jobs: [{ job: 'calc-sub', phase: 'reviewing', deliver: 'delivered', pending: 'question', size: 'small', agents: [{
     agent: 'calc-sub-w1', role: 'worker', status: 'working', pane: 'w7:p9', report: null,
     board: '## Now\nwriting sub', revives: 1, cost: 0.4, todos: [
       { content: 'write sub', status: 'completed' }, { content: 'test sub', status: 'in_progress' },
       { content: 'docs', status: 'pending' }] }] },
-  { job: 'calc-add', phase: 'done', merge: 'verified', pending: null, agents: [{
+  { job: 'calc-add', phase: 'done', deliver: 'delivered', pending: null, agents: [{
     agent: 'calc-add-w1', role: 'worker', status: 'idle', pane: 'w7:p8', report: 'done',
     board: '', revives: 0, todos: [] }] }],
 }]
@@ -248,27 +248,25 @@ test('the board puts what waits on the user first and folds finished jobs', asyn
   expect(await ui.find({ type: 'Text', text: /waiting on you 1/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /calc-sub: PM asks/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /^▍toy$/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /calc-sub · small\s+rollback ✗/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /plan ›\s*approve\s*›\s*work\s*›\s*review\s*›\s*merge\s*›\s*verify/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /calc-sub · small\s+delivered ✓/ })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: /plan ›\s*approve\s*›\s*work\s*›\s*review\s*›\s*deliver\s*$/ })).toBeTruthy()
   expect(await ui.find({ type: 'Text', text: /✓ calc-add done/ })).toBeTruthy()
   expect(await ui.find({ key: 'open-calc-add-w1' })).toBeFalsy()
   await ui.unmount()
   tickRole = 'worker'
 })
 
-test('the step line names the PMs and the jobs a job waits on', async ($, on) => {
+test('the step line names the PMs a job waits on', async ($, on) => {
   mock.clock(on)
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
   tickRole = 'orchestrator'
   tickBoard = [{ name: 'toy', key: 'toy', pm: null, jobs: [
-    { job: 'calc-sub', phase: 'planning', merge: 'none', pending: null, peer_wait: ['api'], agents: [] },
-    { job: 'calc-mul', phase: 'merging', merge: 'none', pending: null, after_wait: ['api-ret'], agents: [] }] }]
+    { job: 'calc-sub', phase: 'planning', deliver: 'none', pending: null, peer_wait: ['api'], agents: [] }] }]
   engine(on, [], [])
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /plan\s*\(wait PM api\)\s*›\s*approve/ })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: /merge\s*\(wait api-ret\)\s*›\s*verify/ })).toBeTruthy()
   await ui.unmount()
   tickBoard = BOARD
   tickRole = 'worker'
@@ -279,7 +277,7 @@ test('a held job shows its closed agents as off, like an idle PM, not as dead', 
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
   tickRole = 'orchestrator'
   tickBoard = [{ name: 'toy', key: 'toy', pm: { agent: 'pm-toy', role: 'pm', status: 'off', board: '', todos: [] },
-    jobs: [{ job: 'calc-sub', phase: 'working', merge: 'none', pending: null, held: true, agents: [{
+    jobs: [{ job: 'calc-sub', phase: 'working', deliver: 'none', pending: null, held: true, agents: [{
       agent: 'calc-sub-w1', role: 'worker', status: 'off', pane: null, report: null, board: '', revives: 0, todos: [] }] }] }]
   engine(on, [], [])
 
@@ -405,7 +403,7 @@ test('more than three open jobs fold under one row that opens them', async ($, o
   mock.clock(on)
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
   tickRole = 'orchestrator'
-  const job = (name: string) => ({ job: name, phase: 'working', merge: 'none', pending: null, agents: [{
+  const job = (name: string) => ({ job: name, phase: 'working', deliver: 'none', pending: null, agents: [{
     agent: `${name}-w1`, role: 'worker', status: 'working', pane: null, report: null, board: '', revives: 0, todos: [] }] })
   // e: a PM's background subagent works on it, with no pane of its own; f: nobody works on it
   const quiet = (name: string, subagent: boolean) => ({ ...job(name), agents: [], subagent })
@@ -664,6 +662,13 @@ test('a PM, worker or reviewer cannot run git commands that lose or publish work
   expect(ran.length).toBe(12)
 })
 
+test('the orchestrator opens a pull request through oke, never with git push', () => {
+  expect(gitDenied('"$OKE" job pr fix-a', 'orchestrator')).toBeNull()
+  expect(gitDenied('python C:/oke/bin/oke.py job pr fix-a', 'orchestrator')).toBeNull()
+  expect(gitDenied('git push origin oke/fix-a', 'orchestrator')).toMatch(/^OKe blocks `git push`/)
+  expect(gitDenied('git push origin oke/fix-a', 'pm')).toContain('oke job deliver')
+})
+
 test('a reviewer writes only its own folder and runs only read-only git', async ($, on) => {
   mock.clock(on)
   mock.env(on, { HERDR_PANE_ID: 'w1:p2' })
@@ -749,11 +754,11 @@ test('the orchestrator notifies once when a new item waits on the person', async
     return { value: { isSent: true as const, channel: 'terminal_bell' as const } }
   })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  const merge = (b: any) => [{ ...b[0], jobs: [b[0].jobs[0], { ...b[0].jobs[1], phase: 'awaiting_merge', pending: 'merge' }] }]
-  tickBoard = merge(BOARD)
+  const plan = (b: any) => [{ ...b[0], jobs: [b[0].jobs[0], { ...b[0].jobs[1], phase: 'awaiting_approval', pending: 'plan' }] }]
+  tickBoard = plan(BOARD)
   await clock.advance(10_000)
   await clock.advance(10_000)  // still waiting: no second notification
-  const add = notes.filter(n => n.includes('calc-add: approve the merge'))
+  const add = notes.filter(n => n.includes('calc-add: approve the plan'))
   expect(add.length).toBe(1)
   expect(add[0]).toContain('"title":"OKe"')
   tickBoard = BOARD
@@ -1036,7 +1041,7 @@ test('the board names each PM and each job its path', async ($, on) => {
   mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
   tickRole = 'orchestrator'
   tickBoard = [{ name: 'backend', key: 'backend', pm: null, jobs: [
-    { job: 'fix-a', phase: 'planning', merge: 'none', pending: null, path: 'c:/work/api', agents: [] }] }]
+    { job: 'fix-a', phase: 'planning', deliver: 'none', pending: null, path: 'c:/work/api', agents: [] }] }]
   engine(on, [], [])
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })

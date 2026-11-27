@@ -368,10 +368,13 @@ class HerdrRuntime(object):
         return herdr("workspace", "create", "--cwd", repo, "--label", label,
                      "--no-focus")["root_pane"]["pane_id"]
 
-    def worktree_create(self, repo, branch, label):
-        """Check out `branch` in a new worktree. Returns id (to remove it), path, place."""
+    def worktree_create(self, repo, branch, label, start=None):
+        """Check out `branch` in a new worktree (a new branch starts at `start`, else HEAD).
+        Returns id (to remove it), path, place."""
+        exists = start and subprocess.call(["git", "-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
         ws = herdr("worktree", "create", "--cwd", repo, "--branch", branch, "--label", label,
-                   "--no-focus")["workspace"]
+                   *(["--base", start] if start and not exists else []), "--no-focus")["workspace"]
         panes = herdr("pane", "list", "--workspace", ws["workspace_id"]).get("panes", [])
         return {"id": ws["workspace_id"], "path": ws["worktree"]["checkout_path"],
                 "place": panes[0]["pane_id"] if panes else None}

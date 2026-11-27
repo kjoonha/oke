@@ -118,7 +118,7 @@ class TestSignatures(unittest.TestCase):
         self.assertEqual(oke.signature_lines("Error in C:\\w\\wt2\\a.py", "C:\\w\\wt"), ["Error in C:\\w\\wt2\\a.py"])
 
     def test_run_directory_is_normalized(self):
-        # the baseline may run in a temporary checkout, the check in the worktree, verify in main
+        # the baseline may run in a temporary checkout, the check in the worktree
         a = 'File "C:\\work\\wt-a\\test_calc.py", line 3, in x\nFAIL: x (t.x)\n'
         b = 'File "c:\\work\\wt-b\\test_calc.py", line 3, in x\nFAIL: x (t.x)\n'
         self.assertEqual(oke.signature_lines(a, "C:\\work\\wt-a"), oke.signature_lines(b, "C:/work/wt-b"))
@@ -243,7 +243,7 @@ class TestBaselineCheck(SpawnBase):
         self.assertNotEqual(target[5:], self.git_out(self.wt, "rev-parse", "HEAD^{tree}"))
 
     def test_untracked_work_file_refuses_the_check(self):
-        # a forgotten `git add`: the check would pass on a file the merge never carries
+        # a forgotten `git add`: the check would pass on a file the branch never carries
         self.plan("true")
         self.assertEqual(self.cli("baseline", "q"), 0, self.err)
         self.write(os.path.join(self.wt, "new_module.py"), "x = 1\n")

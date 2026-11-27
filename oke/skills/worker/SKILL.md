@@ -14,7 +14,7 @@ If your first prompt says you were restarted after a crash, your earlier turns a
 1. Read your assignment file (path in your first prompt). Header: `job`, `cwd`, `wiki`, `shared_wiki`, `parent`, `seq`. Your folder is the folder of that file. New instructions arrive as a prompt starting with `OKe inbox:` that says "Assignment updated": read the assignment again, `Instruction` and `seq` changed.
 2. Read `<wiki>/index.md` and `<shared_wiki>/index.md` where they exist, and the pages that matter for this job.
 3. Do the work in `cwd`. Stay inside the assignment's Scope. Do not write outside `cwd`, except your own folder: OKe refuses such an Edit or Write, and a Bash write is up to you. When `cwd` is not a git repository, a git repository below it, or a link that leads out of it, is not yours: never write there, also not with Bash.
-4. If your assignment header says `commit: yes`, commit your work in `cwd` on the current branch. Otherwise leave it uncommitted and say so in the report; the PM commits it (with a worktree, before the review; without one, after the user approves the merge).
+4. If your assignment header says `commit: yes`, commit your work in `cwd` on the current branch. Otherwise leave it uncommitted and say so in the report; the PM commits it (with a worktree, before the review; without one, after the review passes).
 5. Check the work (an experiment, `output: result` in Instruction: never `oke check`, see the last bullet of this step): `python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py" check <job>`. It runs the plan's Check command in `cwd`, compares the failures with what failed before the work started, and records the result in the job's ledger. Do not run the Check command yourself to decide pass or fail. Paste its output into the report.
    - Exit 0: no new failure.
    - Exit 1: `new` lists the new failure lines (the full output is at `log`). Fix them and check again.
@@ -24,7 +24,7 @@ If your first prompt says you were restarted after a crash, your earlier turns a
 6. Delete the untracked files your builds and checks left behind that are not part of the work: caches (`__pycache__`, `.pytest_cache`), compiled files, test logs (`git -C <cwd> status --short` shows them; outside git, look at the files you touched). Otherwise the worktree cannot be removed. In your report, list the new files that are part of the work: the PM commits only those. Keep anything that is work; when unsure, keep it and list it in the report. An experiment's outputs are its work: never delete them.
 7. Write your report and end your turn.
 
-Never push, `reset --hard`, `clean -f`, delete branches or drop stashes: OKe blocks them, and the PM merges through OKe. If you think one is needed, report `question`.
+Never push, `reset --hard`, `clean -f`, delete branches or drop stashes: OKe blocks them, and the PM delivers the branch through OKe; the user merges it. If you think one is needed, report `question`.
 
 ## Urgent findings
 

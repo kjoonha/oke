@@ -89,7 +89,7 @@ class TestRuntimeCommands(SpawnBase):
 
     def test_worktree_remove_after_its_workspace_closed(self):
         # a hold closed the worker's pane, the worktree's last: herdr forgot the workspace
-        self.job("fix-a", "merging")
+        self.job("fix-a", "reviewing")
         wt = self.path("wt-fix-a")
         self.git(self.repo, "worktree", "add", "-q", wt, "-b", "oke/fix-a")
         ws = {"workspace_id": "w7", "worktree": {"checkout_path": wt}}
@@ -116,7 +116,7 @@ class TestRuntimeCommands(SpawnBase):
 
     def test_worktree_remove_of_a_folder_already_deleted(self):
         # the user deleted it, or a Windows delete stopped half way: git's list is pruned
-        self.job("fix-a", "merging")
+        self.job("fix-a", "reviewing")
         wt = self.path("wt-fix-a")
         self.git(self.repo, "worktree", "add", "-q", wt, "-b", "oke/fix-a")
         state = oke.load_state()
@@ -138,8 +138,8 @@ class TestRuntimeCommands(SpawnBase):
         self.assertIn("fix-b", self.err)
         self.assertEqual(self.argv(), [])  # herdr was never asked
 
-    def test_with_job_a_workspace_id_of_another_merging_job_is_never_removed(self):
-        self.job("fix-b", "merging")  # approved while the PM still finishes fix-a
+    def test_with_job_a_workspace_id_of_another_open_job_is_never_removed(self):
+        self.job("fix-b", "reviewing")  # approved while the PM still finishes fix-a
         state = oke.load_state()
         state["jobs"]["fix-b"]["worktree"] = {"id": "w3", "path": self.path("wt-fix-b")}
         oke.save_state(state)
@@ -164,7 +164,7 @@ class TestRuntimeCommands(SpawnBase):
                    "pane list": [J({"panes": [{"pane_id": "w7:p1"}]})],
                    "worktree remove": [E("workspace_not_found", "workspace w7 not found")]})
         self.assertEqual(self.cli("worktree", "fix-b"), 0, self.err)
-        self.assertNotIn("worktree", oke.load_state()["jobs"]["fix-a"])  # the stale one is dropped
+        self.assertIsNone(oke.load_state()["jobs"]["fix-a"]["worktree"]["id"])  # the stale id is dropped, not the folder
         # two jobs naming one id (an older state): refused, nothing removed
         state = oke.load_state()
         state["jobs"]["fix-a"]["worktree"] = {"id": "w7", "path": self.path("wt-old")}

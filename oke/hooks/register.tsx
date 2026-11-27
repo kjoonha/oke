@@ -372,7 +372,6 @@ const STATUS: Record<string, [string, string, string | undefined]> = {
 /** `oke pending` kinds, as the person reads them. */
 const PENDING: Record<string, string> = {
   plan: 'approve the plan',
-  merge: 'approve the merge',
   question: 'PM asks',
   peer: 'a PM did not answer',
   blocked: 'PM is blocked',
@@ -382,15 +381,13 @@ const PENDING: Record<string, string> = {
   unsent: 'assignment not sent',
   unassigned: 'assignment not written',
   split: 'a PM split a job',
-  after_ready: 'may start now',
-  after_broken: 'its after-job will not finish',
 }
 
 /** Pending kinds that wait on the person (the rest the orchestrator handles itself). */
-const ASKS_USER = ['plan', 'merge', 'question', 'blocked', 'failed', 'after_broken']
+const ASKS_USER = ['plan', 'question', 'blocked', 'failed']
 
-/** Git commands no OKe agent runs, the orchestrator included: OKe merges through `oke job
- * merge`, and these lose work or reach other people. `git -C <dir>`, `-c k=v` and
+/** Git commands no OKe agent runs, the orchestrator included: OKe hands work over through `oke
+ * job deliver` and `oke job pr`, and these lose work or reach other people. `git -C <dir>`, `-c k=v` and
  * `--git-dir <dir>` may come first, and a wrapper word (`time`, `command`, ...) or a path. */
 const GIT_DENIED = new RegExp(
   // only where git starts a command: not inside a commit message or a grep pattern
@@ -416,7 +413,8 @@ export function gitDenied(command: string, role?: string): string | null {
   const m = GIT_DENIED.exec(unquoted(command))
   return m ? `OKe blocks \`git ${m[1]!.split(/\s/)[0]}\` here: it can lose work or publish it. `
     + (role === 'orchestrator' ? 'Tell the user to run it themselves if they want it.'
-      : 'Merges go through `oke job merge`; if you really need it, report a question instead.') : null
+      : 'OKe delivers the branch through `oke job deliver` and the user merges it; if you really need it, '
+        + 'report a question instead.') : null
 }
 
 // no `-c`: `-c core.pager=<cmd>` and the like run commands
@@ -456,7 +454,7 @@ export function reviewerDenied(tool: string, input: any, own: string | null): st
 }
 
 /** The refusal for any tool call that names the ledger key, else null: with the key an agent
- * could sign ledger rows the merge gate trusts. Only oke.py reads it, in its own process. */
+ * could sign ledger rows the delivery gate trusts. Only oke.py reads it, in its own process. */
 export function keyDenied(input: any): string | null {
   // what a call reads, runs or writes to; edit text (content, old_string) may name it freely
   const where = ['command', 'file_path', 'path', 'notebook_path'].map(k => String(input?.[k] ?? ''))
@@ -465,9 +463,9 @@ export function keyDenied(input: any): string | null {
 }
 
 /** The refusal for a worker's file write into the OKe jobs folder outside its own folder,
- * else null: the plan, the ledger and the reviewer's report there are what the merge gate
+ * else null: the plan, the ledger and the reviewer's report there are what the delivery gate
  * trusts. The launch's deny rules say the same where flags reach the agent.
- * shortcut: a Bash command can still write there; the user's merge approval is the last layer. */
+ * shortcut: a Bash command can still write there; the user's own merge is the last layer. */
 export function workerDenied(tool: string, input: any, own: string | null): string | null {
   if (!own || (tool !== 'Edit' && tool !== 'Write' && tool !== 'NotebookEdit')) return null
   // drive letter, case, backslashes and `.`/`..` segments resolved: `..` could leave the own folder
@@ -489,7 +487,7 @@ export function workerDenied(tool: string, input: any, own: string | null): stri
 }
 
 /** The refusal for an orchestrator tool call that does a job's work itself, else null.
- * Every request becomes a job, so plan approval, review and the merge gate are never
+ * Every request becomes a job, so plan approval, review and the delivery gate are never
  * skipped. It writes only OKe's home outside the wikis (those change through `oke wiki`)
  * and its own memory (<claude config>/projects/<project>/memory/). */
 export type Brief = { job: string, path: string, brief: string }
@@ -551,24 +549,21 @@ export function orchestratorDenied(tool: string, input: any,
     + 'never a wiki: use `oke wiki`) and in your own memory folder.'
 }
 
-/** The ledger's merge state beside the job name. */
+/** The ledger's delivery state beside the job name. */
 const LEDGER: Record<string, [string, string]> = {
-  unverified: ['unverified', 'yellow'],
-  verified: ['verified ✓', 'green'],
-  rolled_back: ['rollback ✗', 'red'],
+  delivered: ['delivered ✓', 'green'],
   unreadable: ['ledger key? ✗', 'red'],
 }
 
-const STEPS = ['plan', 'approve', 'work', 'review', 'merge', 'verify']
+const STEPS = ['plan', 'approve', 'work', 'review', 'deliver']
 const PHASE_STEP: Record<string, number> = {
-  intake: 0, planning: 0, awaiting_approval: 1, working: 2, reviewing: 3, awaiting_merge: 4, merging: 4,
+  intake: 0, planning: 0, awaiting_approval: 1, working: 2, reviewing: 3,
 }
 
-/** The step a job is on: past the merge the ledger says, verified is past the last. */
+/** The step a job is on: once the ledger says delivered, the delivery step is on (done is past the last). */
 function step(job: BoardJob): number {
   const at = PHASE_STEP[job.phase] ?? 0
-  if (at < 4) return at
-  return job.merge === 'verified' ? STEPS.length : job.merge === 'unverified' ? 5 : 4
+  return at >= 2 && job.deliver === 'delivered' ? 4 : at
 }
 
 function nodes(tree: BoardPm[]): BoardNode[] {
@@ -1526,11 +1521,10 @@ export const register: Register = on => {
       )
       for (const job of repo.jobs) {
         if (finished.includes(job)) continue
-        const [label, labelColor] = LEDGER[job.merge] ?? ['', undefined]
+        const [label, labelColor] = LEDGER[job.deliver] ?? ['', undefined]
         const at = step(job)
         const peers = job.peer_wait ?? []
-        const wait = [peers.length ? `PM ${peers.join(', ')}` : '', (job.after_wait ?? []).join(', ')]
-          .filter(Boolean).join('; ')
+        const wait = peers.length ? `PM ${peers.join(', ')}` : ''
         const hurt = !job.held && job.agents.some(n => n.status === 'dead')
         cards.push(
           <Box flexDirection="column" borderStyle="round" borderColor={job.pending ? INK.yellow : hurt ? INK.red : INK.lavender} paddingX={1} marginTop={1}>
