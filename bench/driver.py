@@ -468,10 +468,13 @@ def start_orchestrator(b, args):
     started = time.time()
     if not args.no_start:
         plugin = OKE_DIR.replace("\\", "/")
-        log("starting claude in pane %s (plugin %s, model free-coder)" % (b.pane, plugin))
+        model = read_json(os.path.join(b.home, "config.json"))["models"]["pm"]
+        if not re.match(r"^free-[a-z0-9-]+$", model):
+            raise SystemExit("config.json names a model that is not free-*: aborting")
+        log("starting claude in pane %s (plugin %s, model %s)" % (b.pane, plugin, model))
         # typed into the probed shell only: claude gets that pane's env (the bench server's), never this process's
-        code, out, err = herdr("pane", "run", b.pane, "claude --plugin-dir '%s' --model free-coder "
-                               "--permission-mode bypassPermissions" % plugin)
+        code, out, err = herdr("pane", "run", b.pane, "claude --plugin-dir '%s' --model %s "
+                               "--permission-mode bypassPermissions" % (plugin, model))
         log("pane run -> %s %s" % (code, (out + err).strip()[:300]))
     deadline, popups, ready_since = time.time() + 240, Popups(b, {}), None
     dummy = {"id": "startup"}

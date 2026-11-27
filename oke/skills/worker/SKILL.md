@@ -37,7 +37,7 @@ If you find something your PM must know now, while you keep working (the plan mi
 python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py" send <parent> "URGENT <job>: <one line>. See <your folder>/board.md."
 ```
 
-Use `python` if `python3` does not exist. Put the details in `board.md` first. The message must not start with `/`. Then continue; the PM answers with a new instruction when your turn ends. Do not wait for it.
+Use `python` here and in step 5 if `python3 -c 1` fails (missing, or the Windows Store stub). Put the details in `board.md` first. The message must not start with `/`. Then continue; the PM answers with a new instruction when your turn ends. Do not wait for it.
 
 ## Board
 

@@ -56,7 +56,8 @@ def main():
         ("base_url", env.get("ANTHROPIC_BASE_URL", "").rstrip("/") == "http://127.0.0.1:4000"),
         ("auth_token", bool(env.get("ANTHROPIC_AUTH_TOKEN", "").strip())),
         ("api_key_unset", "ANTHROPIC_API_KEY" not in env),
-        ("models", all(env.get(v) == "free-coder" for v in model_vars)
+        ("models", env.get("ANTHROPIC_MODEL", "").startswith("free-")
+         and all(env.get(v) == env.get("ANTHROPIC_MODEL") for v in model_vars)
          and env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL") == "free-fast"),
         ("no_traffic", env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC") == "1"),
         ("oke_home", same(env.get("OKE_HOME", ""), args.home)),

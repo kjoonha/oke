@@ -51,8 +51,10 @@ function Stop-BenchSession([string]$why) {
 
 if (-not (Test-Path (Join-Path $Home2 "config.json"))) { throw "no $Home2\config.json: run bench/setup.sh first" }
 $cfg = Get-Content (Join-Path $Home2 "config.json") -Raw | ConvertFrom-Json
+$Model = [string]$cfg.models.pm
+if ($Model -notmatch '^free-[a-z0-9-]+$') { throw "config.json models.pm is not a free-* model" }
 foreach ($role in "pm", "worker", "reviewer") {
-    if ($cfg.models.$role -ne "free-coder") { throw "config.json models.$role is not free-coder" }
+    if ($cfg.models.$role -ne $Model) { throw "config.json models.$role is not $Model" }
 }
 $allowed = @($cfg.allowed_models)
 if ($allowed.Count -eq 0 -or @($allowed | Where-Object { $_ -notlike "free-*" }).Count -gt 0) {
@@ -91,12 +93,12 @@ $env:CLAUDE_CONFIG_DIR = Join-Path $env:USERPROFILE ".claude-free"
 $env:ANTHROPIC_AUTH_TOKEN = $token
 $token = $null
 $env:ANTHROPIC_BASE_URL = "http://127.0.0.1:4000"
-$env:ANTHROPIC_MODEL = "free-coder"
-$env:ANTHROPIC_DEFAULT_OPUS_MODEL = "free-coder"
-$env:ANTHROPIC_DEFAULT_SONNET_MODEL = "free-coder"
-$env:ANTHROPIC_DEFAULT_FABLE_MODEL = "free-coder"
+$env:ANTHROPIC_MODEL = $Model
+$env:ANTHROPIC_DEFAULT_OPUS_MODEL = $Model
+$env:ANTHROPIC_DEFAULT_SONNET_MODEL = $Model
+$env:ANTHROPIC_DEFAULT_FABLE_MODEL = $Model
 $env:ANTHROPIC_DEFAULT_HAIKU_MODEL = "free-fast"
-$env:CLAUDE_CODE_SUBAGENT_MODEL = "free-coder"
+$env:CLAUDE_CODE_SUBAGENT_MODEL = $Model
 $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
 $env:OKE_HERDR = '["herdr","--session","oke-bench"]'
 $env:OKE_HOME = $Home2

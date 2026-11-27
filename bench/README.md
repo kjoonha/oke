@@ -28,6 +28,7 @@ From Git Bash:
 sh bench/run.sh                       # everything; the run dir goes to %LOCALAPPDATA%/oke-bench/run-<stamp>
 sh bench/run.sh --keep                # leave the session and the run dir for inspection
 sh bench/run.sh --only T02-anchored-typo,T04-continue-mul --budget-scale 1.5
+BENCH_MODEL=free-nvidia sh bench/run.sh   # every agent on another free proxy model (default free-coder)
 ```
 
 `run.sh` runs these steps:
@@ -48,11 +49,11 @@ Popups are answered by policy. The default is the first option (approve, or the 
 
 - `launch.ps1` loads `~/litellm-proxy/.env` through `ensure-proxy.ps1`, which also starts the proxy, and checks `/health/liveliness`. It never prints the key.
 - It removes every `CLAUDE*`, `ANTHROPIC_*`, `HERDR_*`, `OKE_*` and `AI_AGENT*` variable and the provider keys from its own process. `CLAUDE_CODE_GIT_BASH_PATH` stays.
-- It then sets `CLAUDE_CONFIG_DIR=~/.claude-free`, `ANTHROPIC_AUTH_TOKEN` (the proxy key), `ANTHROPIC_BASE_URL=http://127.0.0.1:4000`, every model variable to `free-coder` (haiku to `free-fast`), `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `OKE_HERDR=["herdr","--session","oke-bench"]` and `OKE_HOME=<run_dir>/home`.
+- It then sets `CLAUDE_CONFIG_DIR=~/.claude-free`, `ANTHROPIC_AUTH_TOKEN` (the proxy key), `ANTHROPIC_BASE_URL=http://127.0.0.1:4000`, every model variable to the bench model (`BENCH_MODEL`, default `free-coder`; haiku to `free-fast`), `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`, `OKE_HERDR=["herdr","--session","oke-bench"]` and `OKE_HOME=<run_dir>/home`.
 - With that env it starts `herdr --session oke-bench server`. Every pane inherits the server's env, and so does every claude in a pane (orchestrator, PMs, workers, reviewers). herdr inside a pane targets `oke-bench` through `HERDR_SOCKET_PATH`. `herdr agent start`, which OKe uses for PMs, workers and reviewers, types claude into the pane's shell, so those get the pane's env too.
 - `run.sh`, `launch.ps1`, `driver.py` and `teardown.py` drop every `HERDR_*` variable from each herdr call they make, so an inherited socket cannot point `--session oke-bench` at another session.
 - Before claude starts, `probe.py` runs in the orchestrator pane and prints yes or no per check: the config dir, the base URL, the token, no `ANTHROPIC_API_KEY`, the models, `OKE_HOME`, `OKE_HERDR`, the bench socket, no leftover session vars, the cwd, the proxy, and the proxy's model list (`/v1/models`): no `claude`/`anthropic` name and no wildcard route. If any check says no, the launcher stops its own session and exits.
 - The driver starts claude only by typing its command into that probed pane. Within 60 s of its first prompt a session file must appear under `~/.claude-free/projects/`, and none of this run under `~/.claude/projects/`; else the driver stops `oke-bench` and the run ends.
 - Every minute the driver looks under `~/.claude/projects/` for session files written since the run began in folders of the run dir or of the bench repos' herdr worktrees. One found: it records `LEAK` (`logs/LEAK.json`, `results.json`) and stops `oke-bench` at once.
-- `config.json` gives every role the model `free-coder` and sets `allowed_models` to `free-coder` and `free-fast`: a `model:` line in an assignment that names anything else falls back to `free-coder`.
+- `config.json` gives every role the bench model and sets `allowed_models` to it and `free-fast`: a `model:` line in an assignment that names anything else falls back to the bench model. `BENCH_MODEL` must be a `free-*` name; setup, the launcher, the probe and the driver each refuse any other.
 - The harness never touches the default herdr session, `~/.oke` or other processes, and never pushes. Teardown stops and deletes only the `oke-bench` session. It removes the run dir and only those `~/.herdr/worktrees/<repo>-*` folders whose worktrees all point into the run dir; a worktree whose `.git` it cannot read keeps its folder.

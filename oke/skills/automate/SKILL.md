@@ -8,7 +8,7 @@ description: Use when the user runs /oke:automate or wants Claude Code to run a 
 ## Tool
 
 ```
-OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if python3 does not exist
+OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if `python3 -c 1` fails (missing, or the Windows Store stub)
 ```
 
 `$OKE_HOME` is OKe's home folder (`~/.oke` when the variable is not set). Each automation has its own folder, `$OKE_HOME/automations/<name>/` (`automation.json`, `prompt.md`, and `run.log` with one line per run, manual ones included); `add` and `list` print it as `folder`. Below, the *work folder* is where the session runs; the *automation folder* is this one. Never edit its files by hand: run `$OKE automate add` again to change one.

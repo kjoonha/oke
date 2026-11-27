@@ -16,7 +16,7 @@ Talk to the user in the language the Language rule above names. Every question t
 ## Tool
 
 ```
-OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if python3 does not exist
+OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if `python3 -c 1` fails (missing, or the Windows Store stub)
 ```
 
 Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`.

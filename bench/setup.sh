@@ -223,11 +223,14 @@ commit "$RUN/notes" "notes: readme, guide, faq"
 # ---------------------------------------------------------------- OKe home
 # every role on the free proxy's model name: a request that leaks past the proxy
 # names a model no real endpoint bills for
-cat > "$RUN/home/config.json" <<'EOF'
+# BENCH_MODEL picks another free proxy model for every agent (default free-coder)
+MODEL="${BENCH_MODEL:-free-coder}"
+case "$MODEL" in free-[a-z0-9-]*) ;; *) echo "setup: BENCH_MODEL must be a free-* proxy model" >&2; exit 1 ;; esac
+cat > "$RUN/home/config.json" <<EOF
 {
   "autonomy": "balanced",
-  "models": {"pm": "free-coder", "worker": "free-coder", "reviewer": "free-coder"},
-  "allowed_models": ["free-coder", "free-fast"],
+  "models": {"pm": "$MODEL", "worker": "$MODEL", "reviewer": "$MODEL"},
+  "allowed_models": ["$MODEL", "free-fast"],
   "theme": "disco"
 }
 EOF

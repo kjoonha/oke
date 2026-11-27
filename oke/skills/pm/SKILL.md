@@ -14,7 +14,7 @@ You were started by another agent, not by a person. Do not ask questions in this
 ## Tool
 
 ```
-OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if python3 does not exist
+OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if `python3 -c 1` fails (missing, or the Windows Store stub)
 ```
 
 ## Files
