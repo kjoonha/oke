@@ -109,8 +109,11 @@ class TestWiki(SpawnBase):
         folder = self.path("plain")
         os.makedirs(folder)
         self.assertEqual(self.cli("job", "new", "calc", "--repo", folder), 0, self.err)
-        self.assertEqual(self.cli("job", "new", "calc2", "--repo", folder), 1)  # one direct job at a time
+        self.assertEqual(self.cli("job", "new", "calc2", "--repo", folder), 0, self.err)  # it only reads so far
         self.advance("calc", "working")
+        self.advance("calc2", "planning")
+        self.assertEqual(self.cli("job", "phase", "calc2", "awaiting_approval"), 1)  # one direct job at a time
+        self.assertIn("calc", self.err)
         self.logged("calc")
         self.assertEqual(self.cli("job", "phase", "calc", "done"), 0, self.err)
         self.assertEqual(self.archive("calc"), 0, self.err)
@@ -168,7 +171,7 @@ class TestWiki(SpawnBase):
 
     def test_status_names_the_shared_wiki_curation_the_orchestrators(self):
         self.assertEqual(self.cli("job", "new", "tidy", "--pm", self.pm, "--shared-wiki"), 0, self.err)
-        self.assertEqual(self.cli("job", "new", "fix-a", "--pm", self.pm), 0, self.err)
+        self.assertEqual(self.cli("job", "new", "fix-q", "--pm", self.pm), 0, self.err)
         os.environ["HERDR_ENV"] = "1"
         os.environ["HERDR_PANE_ID"] = "w7:p1"
         fake = help_ok()
@@ -177,7 +180,7 @@ class TestWiki(SpawnBase):
         self.assertEqual(self.cli("status"), 0, self.err)
         jobs = json.loads(self.out)["jobs"]
         self.assertEqual(jobs["tidy"]["class"], "orchestrator")  # never resumed, restarted or asked about
-        self.assertNotEqual(jobs["fix-a"]["class"], "orchestrator")
+        self.assertNotEqual(jobs["fix-q"]["class"], "orchestrator")
 
     def test_the_shared_wiki_catches_git_bash_paths_and_ignores_a_root(self):
         if not oke.os.name == "nt":

@@ -515,9 +515,8 @@ class TestOlderInstructions(S3Base):
         self.assertEqual(self.cli("job", "phase", "look", "working"), 1)  # the older flow's next step
         self.assertIn("`$OKE job answer look`", self.err)
         self.assertIn("awaiting_approval", self.err)
-        with self.assertRaises(SystemExit):
-            with redirect_stdout(io.StringIO()) as shown:
-                oke.main(["job", "new", "--help"])
+        with redirect_stdout(io.StringIO()) as shown:
+            self.assertEqual(oke.main(["job", "new", "--help"]), 0)
         self.assertNotIn("--research", shown.getvalue())  # hidden from help
 
 

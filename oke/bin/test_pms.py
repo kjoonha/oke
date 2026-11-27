@@ -334,10 +334,14 @@ class TestJobPath(PmBase):
     def test_one_open_direct_job_per_folder(self):
         notes = self.folder("notes")
         self.assertEqual(self.new("calc", "a", "--path", notes), 0, self.err)
+        self.advance("calc", "awaiting_approval")  # calc's plan is with the user: it holds notes
         self.assertEqual(self.new("calc2", "a"), 0, self.err)
-        self.assertEqual(self.cli("job", "path", "calc2", notes), 1)
+        self.assertEqual(self.cli("job", "path", "calc2", notes), 0, self.err)  # calc2 only reads so far
+        self.advance("calc2", "planning")
+        self.assertEqual(self.cli("job", "phase", "calc2", "awaiting_approval"), 1)
         self.assertIn("calc", self.err)
         self.assertEqual(self.cli("job", "path", "calc2", self.folder("other")), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "calc2", "awaiting_approval"), 0, self.err)
 
     def test_an_older_research_job_sets_its_path_while_it_works(self):
         self.old_research("look", "a")

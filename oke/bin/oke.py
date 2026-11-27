@@ -993,13 +993,19 @@ def changes_now(job):
     return not (job.get("phase") in GATE_PHASES and not (job.get("approved") or job.get("worked")))
 
 
+def holds_path(job):
+    """A job whose folder another job may not change too: it may change it now, or its plan is with
+    the user (an approval would let it)."""
+    return changes_now(job) or job.get("phase") == "awaiting_approval" and not is_answer(job)
+
+
 def path_clash(state, name, folder, direct, branch_taken=None):
     """Why job `name` cannot change `folder`: another open job changes the same files in place
     (no git, no undo), or branch oke/<name> exists already. None when it can."""
     if direct:
         # a folder inside another's, or holding it, is the same files
         busy = sorted(n for n, j in state["jobs"].items()
-                      if n != name and j.get("direct") and j.get("path") and changes_now(j)
+                      if n != name and j.get("direct") and j.get("path") and holds_path(j)
                       and j.get("phase") not in DONE_PHASES
                       and (under(folder, j["path"]) or under(j["path"], folder)))
         if busy:
@@ -1893,6 +1899,21 @@ def is_silent(name, job, seq):
     return not rewritten_valid(name, warned, seq, header, mtime)
 
 
+def spend_warnings(name, job, seq, header, mtime):
+    """The wait saw the PM recover (a valid report rewritten since its warnings): the count ends
+    here, so a wait that gets stuck later is counted from one."""
+    warned = job.get("warned") or [None, 0]
+    if warned[0] != seq or not warned[1] or not rewritten_valid(name, warned, seq, header, mtime):
+        return
+    with locked():
+        state = load_state()
+        current = state["jobs"].get(name)
+        if current is not None and current.get("warned") == warned:
+            current["warned"] = [seq, 0, mtime]
+            save_state(state)
+    job["warned"] = [seq, 0, mtime]
+
+
 def rewritten_valid(name, warned, seq, header, mtime):
     """The PM rewrote its report since its last warning, and the report is now valid for this seq
     (a `waiting` with a right `on:` on something that can still come, or a final report in the
@@ -1954,11 +1975,12 @@ def check_pm_once(agent, key):
         return "report %s %s" % (header["type"], name)
     if look != "idle":
         return look
-    for name, seq, header, _ in jobs:
+    for name, seq, header, mtime in jobs:
         if state["jobs"][name].get("sent_seq") != seq:
             continue  # the orchestrator is still handing it over: the message is not sent yet
         if is_silent(name, state["jobs"][name], seq):
             continue  # the user was told twice; `pending` keeps it in view
+        spend_warnings(name, state["jobs"][name], seq, header, mtime)
         if header.get("seq") == seq and header.get("type") == "question":
             # a question out of form goes back to the PM even while peers still owe answers:
             # it never reaches the user as it is
@@ -3077,8 +3099,12 @@ def forget_gone_tabs(rt):
     """Drop the recorded worktree tabs herdr no longer has (it restarted, or the tab closed): herdr
     reuses ids, so a later tab with one of them, maybe the user's, is never taken for OKe's. Run
     at `oke status` (the orchestrator's start) and when a PM is revived."""
+    try:
+        jobs = load_state()["jobs"]
+    except StateError:
+        return  # unreadable: `oke status` recovers it, and tabs are checked at the next start
     if not any((j.get("worktree") or {}).get("tabs") or ":t" in ((j.get("worktree") or {}).get("id") or "")
-               for j in load_state()["jobs"].values() if j.get("phase") not in DONE_PHASES):
+               for j in jobs.values() if j.get("phase") not in DONE_PHASES):
         return  # no tab recorded: nothing to ask herdr
     try:
         present = rt.tab_ids()

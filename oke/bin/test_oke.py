@@ -341,13 +341,16 @@ class TestState(Base):
         self.assertIn("bare", self.err)
         self.assertNotIn("fix-b", oke.load_state()["jobs"])
 
-    def test_job_new_refuses_a_name_whose_branch_exists(self):
-        # an archived job keeps its branch; reusing the name would review and deliver the old branch
+    def test_a_name_whose_branch_exists_is_refused_when_its_plan_goes_to_the_user(self):
+        # an archived job keeps its branch; reusing the name would review and deliver the old branch.
+        # A job that only reads never makes one: the check waits until it may change the repository
         repo = self.git_repo("r")
         self.git(repo, "branch", "oke/fix-a")
-        self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 1)
+        self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 0, self.err)
+        self.advance("fix-a", "planning")
+        self.assertEqual(self.cli("job", "phase", "fix-a", "awaiting_approval"), 1)
         self.assertIn("oke/fix-a", self.err)
-        self.assertNotIn("fix-a", oke.load_state()["jobs"])
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["phase"], "planning")
 
     def symlink_or_skip(self, target, link):
         try:
