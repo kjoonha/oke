@@ -526,10 +526,11 @@ class TestJobPath(PmBase):
         self.advance("fix-a", "awaiting_approval")
         self.assertEqual(self.cli("job", "phase", "fix-a", "working"), 1)
         self.assertIn("no path", self.err)
-        for args in (("worktree", "fix-a"), ("check", "fix-a"), ("baseline", "fix-a"), ("job", "deliver", "fix-a"),
+        for args in (("worktree", "fix-a"), ("check", "fix-a"), ("job", "deliver", "fix-a"),
                      ("job", "tree", "fix-a")):
             self.assertEqual(self.cli(*args), 1, args)
             self.assertIn("no path", self.err, args)
+        self.assertEqual(self.cli("baseline", "fix-a"), 0)  # a no-op now: `check` runs the base itself
 
 
 class TestJobSplit(PmBase):
@@ -664,7 +665,9 @@ class TestPathCheck(PmBase):
                oke.pm_dir("other") + "/board.md", self.home + "/automations/a.json", self.home + "/ledger.key",
                self.home + "/inbox/docs/1.txt", oke.pm_dir("docs") + "/children.json",
                self.home + "/jobs/notes/ledger.tsv", self.home + "/jobs/notes/intake.md",
-               self.home + "/jobs/notes/check-1.log", self.home + "/jobs/code/code-w1/lean-settings.json"]
+               self.home + "/jobs/notes/check-1.log", self.home + "/jobs/code/code-w1/lean-settings.json",
+               self.home + "/jobs/notes/marks.json", self.home + "/jobs/notes/dirty-before/src/a.py",
+               self.home + "/jobs/notes/dirty-before.new-12/a.py"]
         for p in ok:
             self.assertTrue(self.check(p)["allow"], p)
         for p in bad:
@@ -1070,19 +1073,16 @@ class TestOutputs(PmBase):
         self.assertIn("has worked on its plan", self.err)
         self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)  # the same again: fine
 
-    def test_an_experiment_needs_a_worktree_is_never_delivered_and_ends_on_a_passing_review(self):
+    def test_an_experiment_is_never_committed_and_ends_on_a_passing_review(self):
         self.assertEqual(self.new("sim", "a", "--path", self.repo), 0, self.err)
         self.advance("sim", "planning")
         self.assertEqual(self.cli("job", "output", "sim", "result"), 0, self.err)
-        self.plan("sim", worktree=False)
-        self.advance("sim", "awaiting_approval")
-        self.assertEqual(self.cli("job", "phase", "sim", "working"), 1)  # its edits would land in main
-        self.assertIn("must name branch oke/sim", self.err)
         self.plan("sim")
+        self.advance("sim", "awaiting_approval")
         self.assertEqual(self.cli("job", "phase", "sim", "working"), 0, self.err)
         self.worktree("sim")
         self.assertEqual(self.cli("job", "deliver", "sim"), 1)
-        self.assertIn("not code", self.err)
+        self.assertIn("no review report", self.err)
         self.assertEqual(self.cli("wiki", "log", "--job", "sim", "--note", "none"), 0, self.err)
         self.report("sim", "sim-w1")
         self.assertEqual(self.cli("job", "phase", "sim", "done"), 1)  # no review yet
@@ -1116,7 +1116,7 @@ class TestOutputs(PmBase):
         self.assertNotIn("branch_left", json.loads(self.out))
         self.assertEqual(subprocess.check_output(["git", "-C", self.repo, "branch", "--list", "oke/sim"]), b"")
         self.assertEqual(self.cli("status"), 0, self.err)
-        self.assertNotIn("kept_worktrees", json.loads(self.out))
+        self.assertEqual(json.loads(self.out)["kept_worktrees"], [])  # always there, empty when nothing is kept
         self.assertEqual(self.cli("job", "clean", "sim"), 0, self.err)  # gone already: nothing to do
         self.assertEqual(json.loads(self.out)["result"], "already clean")
         self.assertEqual(self.cli("job", "clean", "nothing"), 1)
@@ -1128,7 +1128,7 @@ class TestOutputs(PmBase):
         wt = self.worktree("fix")
         self.write("wt-fix/new.py", "x = 1\n")
         self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 1)
-        self.assertIn("new files: new.py", self.err)
+        self.assertIn("changed files: new.py", self.err)
         os.remove(os.path.join(wt, "new.py"))
         self.write("wt-fix/a.txt", "a\n")
         self.git(wt, "add", "a.txt")
@@ -1147,42 +1147,59 @@ class TestOutputs(PmBase):
         self.assertEqual(self.cli("job", "archive", "fix"), 0, self.err)
         self.assertNotIn("kept_worktree", self.out)  # nothing kept: no change
 
-    def test_a_start_in_the_main_checkout_takes_in_only_what_the_plan_names(self):
+    def test_a_start_in_the_checkout_leaves_the_users_uncommitted_files_out(self):
         self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
         self.plan("small", worktree=False)
         self.advance("small", "awaiting_approval")
         self.write("toy/x.txt", "x\n")
         self.git(self.repo, "add", "x.txt")  # the user's uncommitted change
-        self.assertEqual(self.cli("job", "phase", "small", "working"), 1)
-        self.assertIn("x.txt", self.err)
-        self.assertIn(u"Takes over", self.err)
-        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nmain checkout\nTakes over: x.txt\n")
-        self.assertEqual(oke.plan_uncommitted("small"), ["x.txt"])
+        self.write("toy/notes.txt", "mine\n")  # and an untracked file of theirs
         self.assertEqual(self.cli("job", "phase", "small", "working"), 0, self.err)
-        self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 1)  # x.txt is the job's now
-        self.assertIn("x.txt", self.err)
+        snap = oke.read_json(oke.snapshot_path("small"), None)
+        self.assertEqual(sorted(snap["files"]), ["notes.txt", "x.txt"])
+        self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 0, self.err)  # theirs, not the job's
+        st = oke.load_state()
+        st["jobs"]["small"].pop("no_change")
+        st["jobs"]["small"]["output"] = "code"
+        oke.save_state(st)
+        self.write("toy/y.txt", "y\n")  # the job's own new file
+        self.assertEqual(self.cli("job", "output", "small", "result", "--no-change"), 1)
+        self.assertIn("changed files: y.txt", self.err)
+        self.assertNotIn("x.txt", self.err)
 
-    def test_the_plan_names_korean_files_and_renames_as_git_stores_them(self):
+    def test_the_snapshot_is_taken_once_at_the_start(self):
         self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
+        self.plan("small", worktree=False)
+        self.advance("small", "awaiting_approval")
+        self.write("toy/x.txt", "x\n")
+        self.assertEqual(self.cli("job", "phase", "small", "working"), 0, self.err)
+        self.write("toy/x.txt", "x and the job\n")  # the job changes the user's file too
+        info = oke.load_state()["jobs"]["small"]
+        files = oke.job_files("small", info, self.repo)
+        self.assertEqual((files["paths"], files["shared"]), (["x.txt"], ["x.txt"]))
+        oke.snapshot_dirty("small", info)  # again (a re-plan): the first snapshot stays
+        self.assertEqual(oke.job_files("small", info, self.repo)["shared"], ["x.txt"])
+        self.assertEqual(self.cli("job", "files", "small", "leave", "x.txt"), 0, self.err)
+        files = oke.job_files("small", oke.load_state()["jobs"]["small"], self.repo)
+        self.assertEqual((files["paths"], files["shared"]), ([], []))
+
+    def test_the_plan_names_files_it_continues_korean_names_too(self):
+        self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
+        self.write("home/jobs/small/plan.md",
+                   u"job: small\n---\n## Workspace\nmain checkout\nContinues: `문서.md`, \"READ ME.md\", src/\n")
+        self.assertEqual(oke.plan_files("small", "Continues"), [u"문서.md", "READ ME.md", "src"])
+        self.assertFalse(oke.plan_worktree("small"))
         self.advance("small", "awaiting_approval")
         self.write(u"toy/문서.md", "x\n")
-        self.git(self.repo, "add", u"문서.md")
-        self.write("toy/README.md", "r\n")
-        self.git(self.repo, "add", "README.md")
-        self.git(self.repo, "commit", "-qm", "r", "README.md")  # 문서.md stays staged, uncommitted
-        self.git(self.repo, "mv", "README.md", "READ ME.md")
-        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nmain checkout\nTakes over: 문서.md\n")
-        self.assertEqual(self.cli("job", "phase", "small", "working"), 1)
-        self.assertIn("READ ME.md", self.err)
-        self.assertNotIn(u"문서", self.err)
-        self.write("home/jobs/small/plan.md",
-                   u"job: small\n---\n## Workspace\nmain checkout\nTakes over: `문서.md`, \"READ ME.md\"\n")
         self.assertEqual(self.cli("job", "phase", "small", "working"), 0, self.err)
+        self.write(u"toy/문서.md", "x and more\n")
+        files = oke.job_files("small", oke.load_state()["jobs"]["small"], self.repo)
+        self.assertEqual((files["paths"], files["shared"]), ([u"문서.md"], []))  # named: the job's, no question
 
     def test_the_brief_shows_the_path_first_and_the_main_sections(self):
         self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
         self.write("home/jobs/small/plan.md", u"job: small\n---\n## Approach\nsize: small\n## Workspace\nmain checkout\n"
-                   u"Takes over: none\n## Steps\n1. 고친다\n## Acceptance criteria\n1. 통과\n## Check command\n`true`\n"
+                   u"## Steps\n1. 고친다\n## Acceptance criteria\n1. 통과\n## Check command\n`true`\n"
                    u"## Impact elsewhere\nnone (nothing)\n## Questions for the user\nnone\n")
         self.assertEqual(self.cli("job", "brief", "small"), 0, self.err)
         lines = self.out.splitlines()
@@ -1203,19 +1220,63 @@ class TestOutputs(PmBase):
         self.assertEqual([b["job"] for b in briefs], ["small"])
         self.assertIn(u"1. 고친다", briefs[0]["brief"])
 
+    def test_a_second_job_in_the_same_checkout_waits_for_the_first(self):
+        for name in ("one", "two"):
+            self.assertEqual(self.new(name, "a", "--path", self.repo), 0, self.err)
+            self.plan(name, worktree=False)
+        self.advance("one", "working")
+        self.advance("two", "awaiting_approval")
+        self.assertEqual(self.cli("job", "phase", "two", "working"), 3)
+        out = json.loads(self.out)
+        self.assertEqual((out["result"], out["waits_for"]), ("waiting", "one"))
+        info = oke.load_state()["jobs"]["two"]
+        self.assertEqual((info["phase"], info["queued"]["for"]), ("awaiting_approval", "one"))
+        self.assertIsNone(oke.pending_item("two", info))  # nothing to ask while one works
+        self.assertEqual(oke.job_step("two", info, None, None)[0], "waiting for one to finish")
+        self.assertEqual(self.cli("status"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["jobs"]["two"]["waiting_for"], "one")
+        # a job that only answers changes nothing: it never holds the checkout
+        st = oke.load_state()
+        st["jobs"]["one"]["answer"] = True
+        self.assertIsNone(oke.checkout_busy(st, "two"))
+        # one goes back to planning after a change request: its edits stay in the checkout, two still waits
+        st = oke.load_state()
+        st["jobs"]["one"]["phase"] = "planning"
+        oke.save_state(st)
+        self.assertEqual(oke.checkout_busy(oke.load_state(), "two"), "one")
+        # one is stopped (`job cancel`): two is released
+        st = oke.load_state()
+        st["jobs"]["one"].update(phase="failed", cancelled=True)
+        oke.save_state(st)
+        item = oke.pending_item("two", oke.load_state()["jobs"]["two"])
+        self.assertEqual(item["kind"], "released")
+        self.assertIn("job phase two working", item["text"])
+        self.assertEqual(self.cli("job", "phase", "two", "working"), 0, self.err)
+        self.assertNotIn("queued", oke.load_state()["jobs"]["two"])
+
+    def test_a_job_in_its_own_worktree_never_waits(self):
+        for name in ("one", "two"):
+            self.assertEqual(self.new(name, "a", "--path", self.repo), 0, self.err)
+        self.plan("one", worktree=False)
+        self.plan("two")
+        self.advance("one", "working")
+        self.advance("two", "working")
+        self.assertEqual(oke.load_state()["jobs"]["two"]["phase"], "working")
+
     def test_the_workspace_section(self):
         self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
-        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nmain checkout\nTakes over: a.py, b.py\n")
-        self.assertEqual(oke.plan_uncommitted("small"), ["a.py", "b.py"])
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nmain checkout\nResults: out/report.md\n")
+        self.assertEqual(oke.plan_files("small", "Results"), ["out/report.md"])
+        self.assertEqual(oke.plan_files("small", "Continues"), [])
         self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nnew worktree (branch oke/small)\n")
         self.assertTrue(oke.plan_worktree("small"))
-        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nmain checkout\nTakes over: none\n")
-        self.assertEqual(oke.plan_uncommitted("small"), [])
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Workspace\nmain checkout\nContinues: none\n")
+        self.assertEqual(oke.plan_files("small", "Continues"), [])
         self.assertFalse(oke.plan_worktree("small"))
 
     def test_a_file_under_oke_slash_job_is_not_a_worktree(self):
         self.assertEqual(self.new("bin", "a", "--path", self.repo), 0, self.err)
-        self.write("home/jobs/bin/plan.md", u"job: bin\n---\n## Workspace\nmain checkout\nTakes over: oke/bin/x.py\n")
+        self.write("home/jobs/bin/plan.md", u"job: bin\n---\n## Workspace\nmain checkout\nContinues: oke/bin/x.py\n")
         self.assertFalse(oke.plan_worktree("bin"))
 
     def test_a_start_in_a_worktree_ignores_the_main_checkout(self):
@@ -1301,7 +1362,7 @@ class TestOutputs(PmBase):
     def test_a_job_without_a_path_yet_ends_with_no_change(self):
         self.assertEqual(self.new("idea", "a"), 0, self.err)
         self.advance("idea", "planning")
-        self.assertEqual(self.cli("job", "output", "idea", "result"), 1)  # an output needs the path
+        self.assertEqual(self.cli("job", "output", "idea", "result"), 0, self.err)  # no path needed yet
         self.assertEqual(self.cli("job", "output", "idea", "result", "--no-change"), 0, self.err)
         self.assertEqual(self.cli("wiki", "log", "--job", "idea", "--note", "none"), 0, self.err)
         self.assertEqual(self.cli("job", "phase", "idea", "done"), 0, self.err)
@@ -1361,7 +1422,7 @@ class TestOutputs(PmBase):
         self.assertIn("a.txt", self.err)
         self.worktree("fix")  # its new worktree is clean: the main checkout still counts
         self.assertEqual(self.cli("job", "output", "fix", "result", "--no-change"), 1)
-        self.assertIn("main checkout: a.txt", self.err)
+        self.assertIn("in the checkout: a.txt", self.err)
         st = oke.load_state()
         st["jobs"]["fix"].pop("worktree")
         st["jobs"]["fix"].pop("worked_in_main")  # a job from before the flag, its plan without a worktree

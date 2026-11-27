@@ -27,7 +27,7 @@ export type BoardJob = {
   size?: string
   /** The `## User's words` of the job's intake.md, on one line. */
   words?: string
-  /** Where the job is, in plain words: investigating, planning, awaiting approval, working, ... */
+  /** Where the job is, in plain words: planning, awaiting approval, working, ... */
   step?: string
   /** The steps still to come, in plain words. */
   left?: string[]
@@ -40,6 +40,14 @@ export type BoardJob = {
   path?: string
   /** PMs that still owe this job an answer (`oke peer ask`). */
   peer_wait?: string[]
+  /** When its current step began (epoch seconds): the board shows how long it runs. */
+  since?: number | null
+  /** The user said not to ask again for this job (`oke job auto`). */
+  auto?: boolean
+  /** Its pending item is taken without asking (`oke job auto`): not the person's to do. */
+  auto_pending?: boolean
+  /** Its PM is blocked by an OKe rule (`rule:` in its report), not by a dialog. */
+  oke_rule?: boolean
 }
 
 /** A finished job for the board's Done section (`oke tick` `recent`, newest first). */

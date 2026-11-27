@@ -45,6 +45,7 @@ let seq: number | null = null
 let agentName: string | null = null
 // where this agent's Edit and Write may land without asking oke path-check (tick)
 let writeAreas: { path: string; direct: boolean }[] = []
+let inPlace = false  // a worker whose job works in the user's checkout (tick): it never commits
 let memoryDirs: string[] = []  // the cwd's memory folder and, in git, the repository's shared one
 // for a PM, false once no tick has renewed them for AREAS_TTL: then every write asks oke path-check
 let areasFresh = false
@@ -70,7 +71,9 @@ export function underDir(file: string, dir: string | null | undefined, win = fal
 }
 
 // files only OKe writes, also in a folder the agent may write (oke.py's GATE_FILE)
-const GATE_FILE = /^(ledger\.(tsv|head)|baseline\.(json|log)|interview\.json|peers\.(json|md)|intake\.md|children\.json|(lean-|bg-)?settings\.json|mcp\.json|(check|verify)-\d+\.log)$/i
+const GATE_FILE = /^(ledger\.(tsv|head)|baseline\.(json|log)|dirty-before\.json|marks\.json|interview\.json|peers\.(json|md)|intake\.md|children\.json|(lean-|bg-)?settings\.json|mcp\.json|(check|verify)-\d+\.log)$/i
+// the copies of the user's files from a job's start (oke.py's GATE_DIR)
+const GATE_DIR = /\/jobs\/[^/]+\/dirty-before(\.new-\d+)?(\/|$)/i
 
 /** A PM's, worker's or reviewer's Edit or Write of `file`: `allow` when it is plainly in
  * its own folder or OKe's tmp/ (not a file only OKe writes), its memory folder, or a git
@@ -85,7 +88,7 @@ export function writeVerdict(file: string, dirs: { home: string | null, wiki: st
   if (!plain || underDir(file, dirs.wiki, win)) return 'ask'
   if (underDir(file, dirs.home, win)) {
     const mine = underDir(file, dirs.folder, win) || underDir(file, dirs.home && `${dirs.home}/tmp`, win)
-    return mine && !GATE_FILE.test(target.split('/').pop() ?? '') ? 'allow' : 'ask'
+    return mine && !GATE_FILE.test(target.split('/').pop() ?? '') && !GATE_DIR.test(target) ? 'allow' : 'ask'
   }
   if (dirs.memories.some(m => underDir(file, m, win))) return 'allow'
   // any git area that holds it allows it (a folder job on ~ does not hide a checkout under ~);
@@ -167,6 +170,7 @@ async function tick($: any) {
     agentName = out.agent ?? null
     writeAreas = out.write_areas ?? []
     memoryDirs = out.memories ?? []
+    inPlace = Boolean(out.in_place)
     areasFresh = true
     areasTimer?.cancel()
     // a worker's or reviewer's areas change only when its job is held, cancelled or closed,
@@ -250,16 +254,20 @@ let asked: Set<string> | null = null
 async function notifyAsks($: any, tree: BoardPm[]) {
   if (!tree.length) return  // a failed read, not "nothing waits": keep what was asked
   const jobs = tree.flatMap(r => r.jobs)
+  const words = new Map<string, string>()
   const now = new Set(jobs
-    .filter(j => j.pending && ASKS_USER.includes(j.pending))
-    .map(j => `${j.job}:${j.pending}`))
+    .filter(j => j.pending && !j.auto_pending && ASKS_USER.includes(j.pending))
+    .map(j => {
+      words.set(`${j.job}:${j.pending}`, pendingWords(j))
+      return `${j.job}:${j.pending}`
+    }))
   // a wait past 1.5x its expected time: told once, nothing is stopped
   for (const j of jobs) for (const n of j.agents) if (n.overdue) now.add(`${n.agent}:overdue:${n.overdue}`)
   const fresh = asked ? [...now].filter(k => !asked!.has(k)) : []
   asked = now
   for (const k of fresh) {
     const [jobName, kind, expect] = k.split(':') as [string, string, string?]
-    const text = kind === 'overdue' ? `waiting longer than expected (${expect})` : PENDING[kind] ?? kind
+    const text = kind === 'overdue' ? `waiting longer than expected (${expect})` : words.get(k) ?? PENDING[kind] ?? kind
     try {
       await $.ui.notify(`${jobName}: ${text}`, { title: 'OKe', key: `oke-${jobName}` })
     } catch {
@@ -385,6 +393,13 @@ const PENDING: Record<string, string> = {
   unsent: 'assignment not sent',
   unassigned: 'assignment not written',
   split: 'a PM split a job',
+  released: 'starts now: the job it waited for is out of the way',
+}
+
+/** What a job waits on the person for, as they read it: a block by an OKe rule is no dialog. */
+export function pendingWords(job: { pending: string | null, oke_rule?: boolean }): string {
+  if (job.pending === 'blocked' && job.oke_rule) return 'blocked by an OKe rule'
+  return PENDING[job.pending as string] ?? (job.pending as string)
 }
 
 /** Pending kinds that wait on the person (the rest the orchestrator handles itself). */
@@ -409,9 +424,10 @@ export function saidWords(job: { job: string, words?: string }, full = false): s
   return `${job.words ? SAID : ''}${jobWords(job, full)}`
 }
 
-/** "To do for you: N approvals · N questions" from the board's jobs. */
-export function todoLine(jobs: { pending: string | null, phase: string }[]): string {
-  const open = jobs.filter(j => j.phase !== 'done' && j.phase !== 'failed')
+/** "To do for you: N approvals · N questions" from the board's jobs. What the orchestrator takes
+ * without asking (`oke job auto`) is not the person's to do. */
+export function todoLine(jobs: { pending: string | null, phase: string, auto_pending?: boolean }[]): string {
+  const open = jobs.filter(j => j.phase !== 'done' && j.phase !== 'failed' && !j.auto_pending)
   const n = (kinds: string[]) => open.filter(j => j.pending && kinds.includes(j.pending)).length
   const plural = (k: number, word: string) => `${k} ${word}${k === 1 ? '' : 's'}`
   return `To do for you: ${plural(n(APPROVALS), 'approval')} · ${plural(n(QUESTIONS), 'question')}`
@@ -420,32 +436,70 @@ export function todoLine(jobs: { pending: string | null, phase: string }[]): str
 /** Git commands no OKe agent runs, the orchestrator included: OKe hands work over through `oke
  * job deliver` and `oke job pr`, and these lose work or reach other people. `git -C <dir>`, `-c k=v` and
  * `--git-dir <dir>` may come first, and a wrapper word (`time`, `command`, ...) or a path. */
-const GIT_DENIED = new RegExp(
-  // only where git starts a command: not inside a commit message or a grep pattern
-  // a wrapper word or VAR=x counts only right where a command starts
-  String.raw`(?:^|[;&|(\n\x60]|\$\()\s*(?:(?:then|do|else|time|command|env|exec|nohup|xargs)\s+|\w+=\S*\s+)*`
+// only where git starts a command: not inside a commit message or a grep pattern
+// a wrapper word or VAR=x counts only right where a command starts
+const GIT_START = String.raw`(?:^|[;&|(\n\x60]|\$\()\s*(?:(?:then|do|else|time|command|env|exec|nohup|xargs)\s+|\w+=\S*\s+)*`
   + String.raw`(?:\S*[\\/])?git(?:\.exe)?`
   + String.raw`(?:\s+(?:-C\s+\S+|-c\s+\S+|--(?:git-dir|work-tree|namespace)\s+\S+|--[\w-]+(?:=\S+)?))*\s+`
+const GIT_DENIED = new RegExp(
+  GIT_START
   + String.raw`(push\b|reset\s[^;&|\n]*--(?:hard|merge)\b|clean\s[^;&|\n]*(?:-\w*f|--force)`
   + String.raw`|branch\s[^;&|\n]*(?:-D\b|--delete\s+--force|--force\s+--delete|-d\s+-f\b)`
-  + String.raw`|checkout\s[^;&|\n]*(?:-f\b|--force)|stash\s+(?:drop|clear)\b|update-ref\s[^;&|\n]*-d\b`
+  + String.raw`|checkout\s[^;&|\n]*(?:-f\b|--force)|switch\s[^;&|\n]*(?:-f\b|--force|--discard-changes)`
+  + String.raw`|stash\s+(?:drop|clear)\b|update-ref\s[^;&|\n]*-d\b`
   + String.raw`|filter-(?:branch|repo)\b|worktree\s+remove\s[^;&|\n]*--force)`,
 )
 
-/** The command with quoted text and heredoc bodies blanked: what git would see as words. */
+/** The command with quoted text and heredoc bodies blanked: what git would see as words. A
+ * quoted pathspec that names the whole tree (`'*'`, `":/"`) stays, unquoted. */
 function unquoted(command: string): string {
   return command
     .replace(/<<-?\s*['"]?(\w+)['"]?[^\n]*\n[\s\S]*?\n\s*\1\b/g, '<<_')
+    .replace(/(['"])(\*|\.[\\/]?|:\/[*.]?|:\(top\)[*.]?)\1/g, '$2')
     .replace(/"(?:\\.|[^"\\])*"|'[^']*'/g, '""')
 }
 
-/** The refusal for a Bash command a child must not run, else null. */
-export function gitDenied(command: string, role?: string): string | null {
-  const m = GIT_DENIED.exec(unquoted(command))
+// Workers, reviewers and every subagent also leave uncommitted work alone as a whole: the user's
+// own files share the checkout. One path of its own (`git checkout -- calc.py`) stays allowed.
+// The whole tree: `.`, `./`, `*`, `:/` (the top), `:(top)`, also after a revision or options
+// (`git checkout HEAD -- .`, `git restore -s HEAD .`, `git rm -r .`).
+const WHOLE_TREE = String.raw`(?:--\s+)?(?:\.[\\/]?|\*|:\/[*.]?|:\(top\)[*.]?)(?=\s|$|[;&|)\x60])`
+const WORDS = String.raw`(?:[^\s;&|\x60]+\s+)*?`
+const AGENT_GIT_DENIED = new RegExp(
+  GIT_START
+  + String.raw`(stash\b|checkout\s+${WORDS}${WHOLE_TREE}|restore\s+${WORDS}${WHOLE_TREE}|rm\s+${WORDS}${WHOLE_TREE})`,
+)
+// git commands that make commits: in a job's checkout in place only `oke job deliver` commits
+const COMMIT_DENIED = new RegExp(GIT_START + String.raw`(commit|revert|cherry-pick|merge|am|rebase)(?![\w-])`)
+
+/** The refusal for a Bash command a child must not run, else null. `noCommit`: a worker of a
+ * job in place, or a PM's subagent: they leave the work uncommitted for `oke job deliver`. */
+export function gitDenied(command: string, role?: string, subagent?: boolean, noCommit?: boolean): string | null {
+  const text = unquoted(command)
+  const m = GIT_DENIED.exec(text)
+    ?? (role === 'worker' || role === 'reviewer' || subagent ? AGENT_GIT_DENIED.exec(text) : null)
+  const c = !m && noCommit ? COMMIT_DENIED.exec(text) : null
+  if (c) {
+    return `OKe blocks \`git ${c[1]}\` here: only \`oke job deliver\` commits the job's changes, after the review. `
+      + 'Leave the work uncommitted and report.'
+  }
   return m ? `OKe blocks \`git ${m[1]!.split(/\s/)[0]}\` here: it can lose work or publish it. `
     + (role === 'orchestrator' ? 'Tell the user to run it themselves if they want it.'
       : 'OKe delivers the branch through `oke job deliver` and the user merges it; if you really need it, '
         + 'report a question instead.') : null
+}
+
+// `oke job` actions only the orchestrator runs (oke.py's ORCHESTRATOR_ACTIONS), by oke.py or $OKE
+const ORCH_JOB = new RegExp(String.raw`(?:oke\.py|\$\{?OKE\}?)["']?\s+job\s+(?:(phase|auto|files|accept-check|accept-head)\b`
+  + String.raw`|(output)\b[^;&|\n]*--no-change)`)
+
+/** The refusal for an `oke job` action only the orchestrator runs, from another role, else null.
+ * oke.py refuses it as well, by who calls. */
+export function jobActionDenied(command: string, role: string | null): string | null {
+  if (role === 'orchestrator') return null
+  const m = ORCH_JOB.exec(command)
+  return m ? `Only the OKe orchestrator runs \`oke job ${m[1] ?? m[2]}\`: report to it instead (a question for `
+    + "the user's answer, or your done report)." : null
 }
 
 // no `-c`: `-c core.pager=<cmd>` and the like run commands
@@ -1240,7 +1294,10 @@ export const register: Register = on => {
         if (denied) return { deny: denied }
       }
       if (e.tool === 'Bash' && (role === 'orchestrator' || role === 'pm' || role === 'worker' || role === 'reviewer')) {
-        const denied = gitDenied(String(e.command ?? ''), role)
+        // a worker of a job in place, and a PM's subagents, never commit: `oke job deliver` does
+        const noCommit = (role === 'worker' && inPlace) || (role === 'pm' && Boolean(e.agent_id))
+        const denied = gitDenied(String(e.command ?? ''), role, Boolean(e.agent_id), noCommit)
+          ?? jobActionDenied(String(e.command ?? ''), role)
         if (denied) return { deny: denied }
       }
       if (role === 'reviewer') {
@@ -1527,12 +1584,12 @@ export const register: Register = on => {
     const cards = []
     const openJobs = tree.flatMap(repo => repo.jobs.filter(isOpen))
     // only what the person decides: the orchestrator handles the other queue items itself
-    const waiting = openJobs.filter(j => j.pending && [...APPROVALS, ...QUESTIONS].includes(j.pending))
+    const waiting = openJobs.filter(j => j.pending && !j.auto_pending && [...APPROVALS, ...QUESTIONS].includes(j.pending))
     if (openJobs.length || waiting.length) {
       cards.push(
         <Box flexDirection="column" borderStyle="round" borderColor={waiting.length ? INK.yellow : INK.dim} paddingX={1}>
           <Text bold color={waiting.length ? INK.yellow : undefined} dimColor={!waiting.length}>{`✦ ${todoLine(openJobs)}`}</Text>
-          {waiting.map(j => <Text wrap="truncate-end">{`▸ ${jobWords(j)}: ${PENDING[j.pending as string] ?? j.pending}`}</Text>)}
+          {waiting.map(j => <Text wrap="truncate-end">{`▸ ${jobWords(j)}: ${pendingWords(j)}`}</Text>)}
         </Box>,
       )
     }
@@ -1604,7 +1661,9 @@ export const register: Register = on => {
             <Text>
               <Text dimColor>{'now '}</Text>
               <Text color={INK.ink} backgroundColor={job.pending ? INK.yellow : INK.cyan} bold>{` ${where} `}</Text>
-              {job.pending && PENDING[job.pending] ? <Text color={INK.yellow}>{` ${PENDING[job.pending]}`}</Text> : ''}
+              {job.since ? <Text dimColor>{` · ${elapsed(Date.now() - job.since * 1000)}`}</Text> : ''}
+              {job.auto ? <Text color={INK.green}>{'  ⏵ auto'}</Text> : ''}
+              {job.pending && PENDING[job.pending] ? <Text color={INK.yellow}>{` ${pendingWords(job)}`}</Text> : ''}
               {peers.length ? <Text color={INK.yellow} dimColor>{` (wait PM ${peers.join(', ')})`}</Text> : ''}
               {job.held ? <Text color={INK.dim}>{'  ⏸ on hold'}</Text> : ''}
               {hurt ? <Text color={INK.red}>{'  ✗ stuck'}</Text> : ''}

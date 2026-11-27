@@ -345,6 +345,18 @@ class TestWaitDelivers(InboxBase):
         finally:
             oke.check_once = original
 
+    def test_a_superseded_wait_exits_quietly_in_one_line(self):
+        real = oke.wait_loop
+        oke.wait_loop = lambda *a, **kw: "superseded"
+        try:
+            self.assertEqual(self.cli("wait", "fix-a-w1", "--report", self.report_path(), "--seq", "2"),
+                             oke.WAIT_SUPERSEDED)
+        finally:
+            oke.wait_loop = real
+        self.assertEqual(oke.WAIT_SUPERSEDED, 0)  # not an error: the newer wait reports
+        self.assertEqual(self.out.strip(), "superseded: a newer wait on fix-a-w1 replaced this one; nothing to do")
+        self.assertEqual(len(self.out.strip().splitlines()), 1)
+
 
 NL = chr(10)
 
@@ -672,7 +684,10 @@ class TestPending(S3Base):
         self.pm_job("q", 2, REPORT("question", 2))
         self.job("d", "planning")
         self.pm_job("d", 1, REPORT("done", 1))
-        self.job("w", "working")
+        self.assertEqual(self.cli("job", "new", "w", "--repo", self.repo), 0)
+        with open(os.path.join(oke.oke_home(), "jobs", "w", "plan.md"), "w") as f:
+            f.write("job: w\n---\n## Workspace\nnew worktree (branch oke/w)\n")  # q works in the checkout itself
+        self.advance("w", "working")
         self.pm_job("w", 1, REPORT("waiting", 1))
         items = self.pending()
         self.assertEqual([(i["job"], i["kind"]) for i in items],

@@ -13,6 +13,9 @@ sys.path.insert(0, HERE)
 
 import oke  # noqa: E402
 import runtime_herdr  # noqa: E402
+import testutil  # noqa: E402
+
+oke.build_parser = testutil.built_once(oke.build_parser)
 
 
 def put_pm(s, key, record):
@@ -49,6 +52,10 @@ class Base(unittest.TestCase):
         runtime_herdr.WORKTREES_ROOT = os.path.join(self.tmp, "herdr-worktrees")  # never the real ~/.herdr
         self._waits = runtime_herdr.CLOSE_WAIT, runtime_herdr.REMOVE_POLL
         runtime_herdr.CLOSE_WAIT, runtime_herdr.REMOVE_POLL = 0, 0  # a fake pane list never changes
+        self.addCleanup(setattr, os, "fsync", os.fsync)
+        os.fsync = lambda fd: None  # durability across a power cut is not what these tests see; ~4 ms a write
+        self.addCleanup(setattr, runtime_herdr, "run_herdr", runtime_herdr.run_herdr)
+        runtime_herdr.run_herdr = testutil.in_process_herdr(runtime_herdr.run_herdr, runtime_herdr.herdr_argv)
         os.environ["OKE_HOME"] = self.home
         for k in ("HERDR_ENV", "HERDR_PANE_ID", "OKE_HERDR", "FAKE_HERDR_DIR", "OKE_RUNTIME",
                   "OKE_CLAUDE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CONFIG_DIR"):
@@ -83,11 +90,8 @@ class Base(unittest.TestCase):
             cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def git_repo(self, name):
-        p = self.path(name)
-        os.makedirs(p)
-        self.git(p, "init", "-q")
-        self.git(p, "commit", "-q", "--allow-empty", "-m", "init")
-        return p
+        """A repository with one empty commit (built once per process, copied per test)."""
+        return testutil.plain_repo(self.path(name))
 
     def git_worktree(self, repo, name):
         p = self.path(name)
@@ -124,7 +128,11 @@ class Base(unittest.TestCase):
         """Tests that only need some PM get `pm-<folder name>` for a path (the user picks
         the PM in real use), made if missing."""
         st = oke.load_state()
-        _, folder, _ = oke.path_facts(str(path))
+        path = str(path)
+        if os.path.isfile(os.path.join(path, ".git", "HEAD")):
+            folder = path  # a repository's own folder: what path_facts would say, without its git calls
+        else:
+            _, folder, _ = oke.path_facts(path)
         name = "pm-" + oke.slug(os.path.basename(folder.rstrip("/")), 20)
         if name not in st["pms"]:
             st["pms"][name] = {"pm": {}, "places": []}
@@ -144,11 +152,70 @@ class Base(unittest.TestCase):
         elif args[:1] == ["wiki"] and "--repo" in args:
             i = args.index("--repo")
             args[i:i + 2] = ["--pm", self.pm_for(args[i + 1])]
+        gated = args[:1] == ["job"] and len(args) > 1 and (
+            args[1] in oke.ORCHESTRATOR_ACTIONS or (args[1] == "output" and "--no-change" in args))
+        if gated and not self.speaks_as_another():
+            return self.as_orchestrator(args)  # the test speaks as the orchestrator, as the skills do
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             code = oke.main(args)
         self.out, self.err = out.getvalue(), err.getvalue()
         return code
+
+    TEST_ORCHESTRATOR = "oke-test-orchestrator"
+
+    def speaks_as_another(self):
+        """Does the test speak from the pane or session OKe records for an agent other than the
+        orchestrator (or as the orchestrator already)?"""
+        pane, sid = os.environ.get("HERDR_PANE_ID"), os.environ.get("CLAUDE_CODE_SESSION_ID")
+        if not pane and not sid:
+            return False
+        try:
+            state = oke.load_state()
+        except Exception:  # noqa: BLE001 - a test of a broken state file
+            return False
+        if sid and state["orchestrator"].get("session") == sid:
+            return True  # it is the orchestrator: nothing to set up
+        for role, _, _, rec in oke.records(state):
+            if role != "orchestrator" and ((pane and rec.get("pane") == pane) or (sid and (
+                    rec.get("session") == sid or rec.get("pane") == "session:" + sid))):
+                return True
+        return False
+
+    def as_orchestrator(self, args):
+        """Run `args` from a recorded orchestrator's session (only it may run them)."""
+        sid, added = self.TEST_ORCHESTRATOR, False
+        try:
+            readable = os.path.exists(oke.state_path()) and bool(oke.load_state() is not None)
+        except Exception:  # noqa: BLE001 - a test of a broken state file
+            readable = False
+        if readable:
+            with oke.locked():
+                s = oke.load_state()
+                sid = s["orchestrator"].get("session") or sid
+                added = not s["orchestrator"].get("session")
+                if added:
+                    s["orchestrator"]["session"] = sid
+                    oke.save_state(s)
+        was = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        os.environ["CLAUDE_CODE_SESSION_ID"] = sid
+        try:
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = oke.main(args)
+            self.out, self.err = out.getvalue(), err.getvalue()
+            return code
+        finally:
+            if was is None:
+                del os.environ["CLAUDE_CODE_SESSION_ID"]
+            else:
+                os.environ["CLAUDE_CODE_SESSION_ID"] = was
+            if added:
+                with oke.locked():
+                    s = oke.load_state()
+                    if s["orchestrator"].get("session") == self.TEST_ORCHESTRATOR:
+                        del s["orchestrator"]["session"]
+                        oke.save_state(s)
 
 
     def fake(self, scenario):
@@ -238,9 +305,8 @@ class TestState(Base):
         self.assertTrue(os.path.isdir(path))
         self.assertEqual(oke.wiki_dir("backend"), path)
     def test_size_is_set_while_planning_and_only_grows_once_work_started(self):
-        repo = self.git_repo("r")
-        for job in ("tiny", "big"):
-            self.assertEqual(self.cli("job", "new", job, "--repo", repo), 0)
+        for job in ("tiny", "big"):  # each in its own checkout: two jobs in one checkout take turns
+            self.assertEqual(self.cli("job", "new", job, "--repo", self.git_repo("r-" + job)), 0)
             self.advance(job, "planning")
         self.assertEqual(self.cli("job", "size", "tiny", "small"), 0, self.err)
         self.assertNotEqual(self.cli("job", "size", "tiny", "huge"), 0)  # not a size
@@ -271,8 +337,8 @@ class TestState(Base):
             f.write("agent: j-rv\nrole: reviewer\nseq: 11\n---\n")
         self.assertEqual(oke.review_round("j"), 11)
         info = oke.load_state()["jobs"]["j"]
-        self.assertIsNone(oke.over_rounds("j", info, oke.load_config(), 10))
-        self.assertIn("review round 11 is past its limit of 10", oke.over_rounds("j", info, oke.load_config(), 11))
+        self.assertIsNone(oke.over_rounds("j", info, oke.load_config(), 3))
+        self.assertIn("review round 4 is past its limit of 3", oke.over_rounds("j", info, oke.load_config(), 4))
         self.assertEqual(self.cli("job", "rounds", "j", "15"), 0, self.err)
         self.assertEqual(json.loads(self.out.strip().splitlines()[-1]), {"job": "j", "round": 11, "limit": 15})
         self.assertIsNone(oke.over_rounds("j", oke.load_state()["jobs"]["j"], oke.load_config(), 11))
@@ -334,7 +400,7 @@ class TestState(Base):
         self.assertEqual(oke.normalize_path(info["path"]), oke.normalize_path(os.path.join(sup, "s")))
         self.assertTrue(oke.load_state()["jobs"]["fix-s"]["base"])
         main = oke.load_state()["jobs"]["fix-s"]
-        self.assertEqual(oke.normalize_path(oke.check_dir(main)[0]), oke.normalize_path(os.path.join(sup, "s")))
+        self.assertEqual(oke.normalize_path(oke.check_dir("fix-s", main)[0]), oke.normalize_path(os.path.join(sup, "s")))
         bare = self.path("b.git")
         self.git(self.home, "init", "-q", "--bare", bare)
         self.assertEqual(self.cli("job", "new", "fix-b", "--repo", bare), 1)

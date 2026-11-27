@@ -310,9 +310,10 @@ class TestBoardWords(S3Base):
         self.job("fix-a", "planning")
         info = oke.load_state()["jobs"]["fix-a"]
         step, left = oke.job_step("fix-a", info, {}, "none")
-        self.assertEqual((step, left), ("investigating", ["an answer, or a plan for your approval"]))
+        self.assertEqual((step, left), ("planning", ["an answer, or a plan for your approval"]))
         self.put(os.path.join(self.home, "jobs", "fix-a", "plan.md"), "job: fix-a\n---\n")
-        self.assertEqual(oke.job_step("fix-a", info, {}, "none")[0], "planning")
+        self.assertEqual(oke.job_step("fix-a", info, {}, "none"),
+                         ("planning", ["your approval", "work", "review", "delivery"]))
         info = dict(info, phase="working")
         self.assertEqual(oke.job_step("fix-a", info, {"type": "waiting", "on": "fix-a-rv"}, "none")[0], "reviewing")
         self.assertEqual(oke.job_step("fix-a", info, {"type": "waiting", "on": "fix-a-w1"}, "none")[0], "working")

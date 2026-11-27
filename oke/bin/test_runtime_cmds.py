@@ -86,6 +86,11 @@ class TestRuntimeCommands(SpawnBase):
         state["pms"][self.pm]["pm"]["pane"] = pane
         oke.save_state(state)
 
+    def in_worktree(self, job):
+        state = oke.load_state()
+        state["jobs"][job]["worktree"] = {"path": self.wt_path(job)}
+        oke.save_state(state)
+
     def wt_path(self, job):
         return runtime_herdr.worktree_folder(self.repo, "oke/" + job)
 
@@ -353,6 +358,7 @@ class TestRuntimeCommands(SpawnBase):
         # after a herdr restart fix-b ran `worktree fix-b` twice: its first tab got w1:t4, fix-a's
         # old id (so fix-a's record lost it), and fix-b names its second tab, w1:t5
         self.job("fix-a", "working")
+        self.in_worktree("fix-a")  # so fix-b may start too: two jobs in one checkout take turns
         self.job("fix-b", "working")
         wt_b = self.wt_path("fix-b")
         state = oke.load_state()
@@ -444,6 +450,7 @@ class TestRuntimeCommands(SpawnBase):
     def test_a_reused_id_never_closes_what_is_not_the_jobs_now(self):
         # herdr reuses ids after a restart
         self.job("fix-a", "working")
+        self.in_worktree("fix-a")  # so fix-b may start too: two jobs in one checkout take turns
         self.job("fix-b", "working")
         self.pm_pane("w1:p3")
         state = oke.load_state()

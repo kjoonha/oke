@@ -196,9 +196,21 @@ class TestClaudeDevFixes(unittest.TestCase):
         for role in ("pm", "worker", "reviewer"):
             self.assertIn("Bash(git push:*)", self.denied(role))
             self.assertIn("Bash(git reset --hard:*)", self.denied(role))
+            self.assertIn("Bash(git branch --delete --force:*)", self.denied(role))
         for mode in ("conservative", "balanced"):
             args = oke.launch_args("worker", dict(self.config, autonomy=mode), "/h", "/p")
             self.assertIn("Bash(git push:*)", args[args.index("--disallowedTools") + 1:])
+
+    def test_workers_and_reviewers_may_not_throw_away_uncommitted_work(self):
+        wanted = ["Bash(git reset --hard:*)", "Bash(git clean -f:*)", "Bash(git checkout -- .)",
+                  "Bash(git checkout .)", "Bash(git restore .)", "Bash(git branch -D:*)", "Bash(git push:*)",
+                  "Bash(git stash:*)"]
+        for role in ("worker", "reviewer"):
+            for rule in wanted:
+                self.assertIn(rule, self.denied(role), (role, rule))
+        # the PM cleans its own worktrees: whole-tree checkout and stash stay its own call
+        self.assertNotIn("Bash(git stash:*)", self.denied("pm"))
+        self.assertNotIn("Bash(git checkout -- .)", self.denied("pm"))
 
     def test_a_worker_may_not_edit_the_files_the_delivery_gate_trusts(self):
         denied = self.denied("worker", "/h/jobs/j/j-w1")

@@ -22,7 +22,7 @@ class PeerBase(S3Base):
         s = oke.load_state()
         put_pm(s, self.key, {"agent": "pm-a", "pane": "w1:p3", "session": "s-a"})
         put_pm(s, self.key_b, {"agent": "pm-b", "pane": "w2:p3", "session": "s-b"})
-        s["orchestrator"] = {"pane": "w7:p1"}
+        s["orchestrator"] = {"pane": "w7:p1", "session": "s-orch"}
         oke.save_state(s)
         self.alive = ["pm-a", "pm-b"]
 
@@ -41,6 +41,7 @@ class PeerBase(S3Base):
     def as_agent(self, agent, extra=None):
         os.environ["HERDR_PANE_ID"] = PANES[agent][0] if agent in PANES else agent
         agents = [AG(a, pane=PANES[a][0], session=PANES[a][1]) for a in self.alive]
+        agents.append(AG(None, pane="w7:p1", session="s-orch"))  # the orchestrator
         scenario = {"agent list": [J({"agents": agents})]}
         scenario.update(extra or {})
         self.fake(scenario)
@@ -366,6 +367,19 @@ class TestPhaseByAgent(PeerBase):
         self.as_agent("w7:p1")  # the orchestrator's pane
         self.cli("job", "phase", "fix-a", "awaiting_approval")
         self.assertNotIn("only the orchestrator", self.err)
+
+    def test_only_the_orchestrator_records_the_users_answers(self):
+        self.as_agent("pm-a")
+        self.assertEqual(self.cli("job", "auto", "fix-a"), 1)
+        self.assertIn("only the orchestrator turns `job auto` on", self.err)
+        self.assertNotIn("auto", oke.load_state()["jobs"]["fix-a"])
+        self.assertEqual(self.cli("job", "files", "fix-a", "include", "a.txt"), 1)
+        self.assertIn("only the orchestrator records", self.err)
+        self.assertEqual(self.cli("job", "accept-check", "fix-a", "tree:abc"), 1)
+        self.assertIn("only the orchestrator accepts", self.err)
+        self.as_agent("w7:p1")
+        self.assertEqual(self.cli("job", "auto", "fix-a"), 0, self.err)
+        self.assertTrue(oke.load_state()["jobs"]["fix-a"]["auto"])
 
 
 if __name__ == "__main__":

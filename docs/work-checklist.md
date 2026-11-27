@@ -52,9 +52,9 @@ orchestrator 에게 지시: `~/oke-toy 저장소에 sub(a, b) 함수와 unittest
 
 | 시점 | 확인 |
 |---|---|
-| 접수 뒤 | - [ ] 사이드바에 `toy` agent 가 뜬다 (자기 이름의 workspace). 신뢰 창에서 멈추지 않는다 |
-| 계획 뒤 | - [ ] 계획 승인 팝업에 job 의 경로 (`~/oke-toy`) 와 "checked by: `python3 -m unittest`" 가 나오고 미리보기에 검증 명령이 있다. 보드 맨 위가 `To do for you: 1 approval · 0 questions` 이다 |
-| 승인 뒤 | - [ ] worker (`<job>-w1`) 가 뜨고, 끝나면 reviewer (`<job>-rv`) 가 뜬다 |
+| 접수 뒤 | - [ ] 인터뷰 질문이 없다 (지시에 경로와 명령이 있다). 사이드바에 `toy` agent 가 뜬다 (자기 이름의 workspace). 신뢰 창에서 멈추지 않는다. 보드에 `now: planning · <분>` 이 나온다 |
+| 계획 뒤 | - [ ] 계획 승인 팝업에 job 의 경로 (`~/oke-toy`) 와 "checked by: `python3 -m unittest`" 가 나오고 미리보기에 검증 명령이 있다. 보드 맨 위가 `To do for you: 1 approval · 0 questions` 이다. 선택지에 "승인하고 이 job 은 더 묻지 않기" 가 있다 |
+| 승인 뒤 | - [ ] PM 이 small 로 정했으면 pane 이 뜨지 않는다: PM 의 work subagent 가 일하고 review subagent 가 리뷰한다 (normal 이나 large 면 worker `<job>-w1` 가 뜬다) |
 | 리뷰 뒤 | - [ ] orchestrator 가 브랜치 `oke/<job>` 와 merge 명령을 알려 준다. `~/.oke/jobs/<job>/<job>-rv/report.md` 에 `verdict:` 가 있고, 수용 기준마다 `VERIFIED` 와 근거가 있다 |
 | 끝난 뒤 | - [ ] `git -C ~/oke-toy log --oneline oke/<job>` 에 새 commit (main 은 그대로), `~/.oke/wiki/toy/log.md` 에 한 줄, `~/.oke/archive/` 에 job 폴더 |
 

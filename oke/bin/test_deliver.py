@@ -10,6 +10,7 @@ import time
 import unittest
 
 import oke
+import testutil
 from test_oke import SpawnBase
 
 
@@ -18,12 +19,8 @@ class DeliverBase(SpawnBase):
         SpawnBase.setUp(self)
         self.job("fix-a", "reviewing")
         self.base = oke.load_state()["jobs"]["fix-a"]["base"]
-        # the job's branch with one commit
-        self.git(self.repo, "checkout", "-q", "-b", "oke/fix-a")
-        self.write("toy/a.txt", "a\n")
-        self.git(self.repo, "add", "-A")
-        self.git(self.repo, "commit", "-q", "-m", "a")
-        self.git(self.repo, "checkout", "-q", "-")
+        # the job's branch with one commit: a.txt on the repository's first commit
+        testutil.add_branch_commit(self, self.repo, "oke/fix-a", {"a.txt": "a\n"}, "a")
         self.jobs = os.path.join(self.home, "jobs", "fix-a")
         self.set_plan("test -f a.txt")
 
@@ -47,18 +44,23 @@ class DeliverBase(SpawnBase):
     def review(self, seq, verdict="pass", commit=None, report_seq=None, checked=True, job="fix-a"):
         """The reviewer's assignment (naming the commit to review) and its report, and
         a passing `oke check` on that commit unless `checked` is False."""
-        commit = commit or self.tip()
+        sha = None
+        if not commit:
+            commit = sha = self.tip()  # a branch tip: a full commit sha already
         path = os.path.join(self.home, "jobs", job, job + "-rv", "assignment.md")
         if not os.path.isdir(os.path.dirname(path)):
             os.makedirs(os.path.dirname(path))
         with open(path, "w") as f:
             f.write("agent: %s-rv\nrole: reviewer\njob: %s\nseq: %d\ncommit: %s\ncriteria_rev: %s\n---\n"
                     % (job, job, seq, commit, oke.criteria_rev(job)))
-        if checked:
-            code = subprocess.call(["git", "-C", self.repo, "rev-parse", "-q", "--verify", commit + "^{commit}"],
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if code == 0:
-                self.checked(self.git_out(self.repo, "rev-parse", commit + "^{commit}").strip(), job=job)
+        if checked and sha:
+            self.checked(sha, job=job)
+        elif checked:
+            p = subprocess.Popen(["git", "-C", self.repo, "rev-parse", "-q", "--verify", commit + "^{commit}"],
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            sha = p.communicate()[0].decode().strip()
+            if p.returncode == 0:
+                self.checked(sha, job=job)
         return self.report(job + "-rv", seq if report_seq is None else report_seq, "verdict: " + verdict, job=job)
 
     def reviewed(self, seq=1, job="fix-a"):
@@ -166,13 +168,15 @@ class TestDeliverGate(DeliverBase):
         self.assertEqual(self.deliver(), 1)
         self.assertIn("on hold", self.err)
 
-    def test_a_job_whose_output_is_not_code_is_refused(self):
+    def test_a_result_is_never_committed_and_needs_a_check_of_it(self):
         st = oke.load_state()
         st["jobs"]["fix-a"]["output"] = "result"
         oke.save_state(st)
         self.reviewed()
+        tip = self.tip()
         self.assertEqual(self.deliver(), 1)
-        self.assertIn("not code", self.err)
+        self.assertIn("no recorded run of its result", self.err)
+        self.assertEqual(self.tip(), tip)
 
     def test_a_job_without_a_base_branch_is_refused(self):
         st = oke.load_state()
@@ -488,15 +492,31 @@ class TestPullRequest(DeliverBase):
         self.reviewed()
         self.assertEqual(self.deliver(), 0, self.err)
         self.gh_log = self.path("gh.log")
+        # a fake `gh` first on PATH: it logs the host it was pointed at and its arguments
         script = self.write("gh.py", "import sys, json, os\n"
-                                     "open(%r, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                                     "open(%r, 'a').write(json.dumps([os.environ.get('GH_HOST')] + sys.argv[1:]) + '\\n')\n"
+                                     "if sys.argv[1] == 'auth':\n"
+                                     "    sys.exit(1 if os.environ.get('OKE_TEST_NOAUTH') or '.' not in "
+                                     "os.environ.get('GH_HOST', '.') else 0)\n"
                                      "if sys.argv[2] == 'list':\n"
                                      "    print(os.environ.get('OKE_TEST_PR', ''))\n"
                                      "else:\n"
                                      "    print('https://github.com/o/r/pull/7')\n" % self.gh_log)
-        os.environ["OKE_GH"] = json.dumps([sys.executable, script])
-        os.environ.pop("OKE_TEST_PR", None)
-        self.addCleanup(os.environ.pop, "OKE_TEST_PR", None)
+        bin_dir = self.path("fakebin")
+        os.makedirs(bin_dir)
+        with open(os.path.join(bin_dir, "gh"), "w") as f:
+            f.write('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable.replace("\\", "/"), script.replace("\\", "/")))
+        os.chmod(os.path.join(bin_dir, "gh"), 0o755)
+        with open(os.path.join(bin_dir, "gh.cmd"), "w") as f:
+            f.write('@"%s" "%s" %%*\n' % (sys.executable, script))
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = bin_dir + os.pathsep + old_path
+        self.addCleanup(os.environ.__setitem__, "PATH", old_path)
+        if "OKE_GH" in os.environ:
+            self.addCleanup(os.environ.__setitem__, "OKE_GH", os.environ.pop("OKE_GH"))
+        for name in ("OKE_TEST_PR", "OKE_TEST_NOAUTH"):
+            os.environ.pop(name, None)
+            self.addCleanup(os.environ.pop, name, None)
 
     def origin(self, url="https://github.com/o/r.git"):
         """origin as GitHub names it; pushes go to a local bare repository."""
@@ -506,11 +526,15 @@ class TestPullRequest(DeliverBase):
         self.git(self.repo, "config", "remote.origin.pushurl", bare)
         return bare
 
-    def calls(self):
+    def logged(self):
         if not os.path.exists(self.gh_log):
             return []
         with open(self.gh_log) as f:
             return [json.loads(l) for l in f if l.strip()]
+
+    def calls(self):
+        """gh's pull request calls (not its login check)."""
+        return [c[1:] for c in self.logged() if c[1] != "auth"]
 
     def pushed(self, bare):
         return subprocess.call(["git", "-C", bare, "rev-parse", "-q", "--verify", "refs/heads/oke/fix-a"],
@@ -523,7 +547,32 @@ class TestPullRequest(DeliverBase):
                                                 "url": "https://github.com/o/r/pull/7"})
         self.assertEqual(self.git_out(bare, "rev-parse", "oke/fix-a").strip(), self.tip())
         self.assertEqual([c[:2] for c in self.calls()], [["pr", "list"], ["pr", "create"]])
-        self.assertEqual(self.calls()[-1], ["pr", "create", "--base", self.base, "--head", "oke/fix-a", "--fill"])
+        self.assertEqual(self.calls()[-1], ["pr", "create", "--repo", "o/r", "--base", self.base, "--head",
+                                            "oke/fix-a", "--fill"])
+        self.assertEqual(self.logged()[0], ["github.com", "auth", "status", "--hostname", "github.com"])
+
+    def test_a_host_that_is_not_github_is_named_so(self):
+        bare = self.origin("https://gitlab.com/o/r.git")
+        os.environ["OKE_TEST_NOAUTH"] = "1"
+        self.assertEqual(self.cli("job", "pr", "fix-a"), 1)
+        self.assertIn("gitlab.com is not a GitHub host", self.err)
+        self.assertFalse(self.pushed(bare))
+
+    def test_a_github_enterprise_origin_uses_its_host(self):
+        bare = self.origin(url="git@ghe.example.com:team/proj.git")
+        self.assertEqual(self.cli("job", "pr", "fix-a"), 0, self.err)
+        self.assertTrue(self.pushed(bare))
+        self.assertEqual(self.logged()[0], ["ghe.example.com", "auth", "status", "--hostname", "ghe.example.com"])
+        self.assertEqual(set(c[0] for c in self.logged()), {"ghe.example.com"})
+        self.assertEqual(self.calls()[-1][:4], ["pr", "create", "--repo", "team/proj"])
+
+    def test_gh_not_logged_in_to_the_host_pushes_nothing(self):
+        bare = self.origin(url="https://ghe.example.com/team/proj")
+        os.environ["OKE_TEST_NOAUTH"] = "1"
+        self.assertEqual(self.cli("job", "pr", "fix-a"), 1)
+        self.assertIn("gh auth login --hostname ghe.example.com", self.err)
+        self.assertFalse(self.pushed(bare))
+        self.assertEqual(self.calls(), [])
 
     def test_an_existing_pull_request_is_updated_not_opened_again(self):
         bare = self.origin()
@@ -537,18 +586,37 @@ class TestPullRequest(DeliverBase):
         self.assertEqual(self.git_out(bare, "rev-parse", "oke/fix-a").strip(), self.head())
         self.assertEqual([c[1] for c in self.calls()], ["list", "create", "list"])
 
-    def test_an_origin_not_on_github_pushes_nothing(self):
+    def test_an_origin_without_a_host_pushes_nothing(self):
         bare = self.origin(url=None)
         self.assertEqual(self.cli("job", "pr", "fix-a"), 1)
-        self.assertIn("not on GitHub", self.err)
+        self.assertIn("cannot read host, owner and repository", self.err)
         self.assertFalse(self.pushed(bare))
         self.assertEqual(self.calls(), [])
 
-    def test_github_urls_are_known(self):
-        for url in ("https://github.com/o/r.git", "git@github.com:o/r.git", "ssh://git@github.com/o/r"):
-            self.assertTrue(oke.GITHUB.search(url), url)
-        for url in ("https://gitlab.com/o/r.git", "C:/repos/github.com-copy", "https://notgithub.com/o/r"):
-            self.assertFalse(oke.GITHUB.search(url), url)
+    def test_remote_urls_name_host_owner_and_repo(self):
+        for url, want in (("https://github.com/o/r.git", ("github.com", "o", "r")),
+                          ("git@github.com:o/r.git", ("github.com", "o", "r")),
+                          ("ssh://git@ghe.corp:2222/team/proj", ("ghe.corp", "team", "proj")),
+                          ("https://GHE.example.com/team/proj/", ("ghe.example.com", "team", "proj"))):
+            self.assertEqual(oke.remote_repo(url), want, url)
+        for url in ("C:/repos/copy", "/srv/git/r.git", "https://example.com/only-one"):
+            self.assertIsNone(oke.remote_repo(url), url)
+
+    def test_an_ssh_host_alias_is_resolved_or_named(self):
+        bare = self.origin(url="git@work:o/r.git")  # `Host work` in the user's ssh config
+        real = oke.ssh_hostname
+        try:
+            oke.ssh_hostname = lambda alias: None
+            self.assertEqual(self.cli("job", "pr", "fix-a"), 1)
+            self.assertIn("can't tell the GitHub host for remote git@work:o/r.git", self.err)
+            self.assertFalse(self.pushed(bare))
+            oke.ssh_hostname = lambda alias: "github.com" if alias == "work" else None
+            self.assertEqual(self.cli("job", "pr", "fix-a"), 0, self.err)
+        finally:
+            oke.ssh_hostname = real
+        self.assertTrue(self.pushed(bare))
+        self.assertEqual(self.calls()[-1][:4], ["pr", "create", "--repo", "o/r"])
+        self.assertEqual(self.logged()[-1][0], "github.com")
 
     def test_no_origin_is_a_clear_error(self):
         self.assertEqual(self.cli("job", "pr", "fix-a"), 1)
@@ -602,7 +670,7 @@ class TestContinue(DeliverBase):
         self.assertTrue(oke.plan_worktree("fix-b"))
         self.assertTrue(oke.plan_own_worktree("fix-b"))
         self.assertEqual(oke.plan_continues("fix-b"), "fix-a")
-        self.job("fix", "working")
+        self.job("fix", "planning")  # only its plan is read here
         self.set_plan("true", job="fix", workspace="## Workspace\nmain checkout, like oke/fix-a did\n")
         self.assertFalse(oke.plan_own_worktree("fix"))  # oke/fix is not in oke/fix-a
 
@@ -946,12 +1014,14 @@ class TestLedger(DeliverBase):
         self.assertIn("Bash(*ledger.key*)", denied)
         self.assertTrue(any(r.startswith("Read(") and r.endswith("/ledger.key)") for r in denied), denied)
 
-    def test_no_baseline_needs_a_merge_guard(self):
-        self.delivered()
+    def test_a_base_run_an_older_oke_kept_is_not_used(self):
         with open(os.path.join(self.jobs, "baseline.json"), "w") as f:
-            json.dump({"version": 1, "exit": 0, "signatures": []}, f)  # one an older OKe recorded
-        self.cli("check", "fix-a")
-        self.assertIn("run `$OKE baseline fix-a` again", self.err)
+            json.dump({"version": 1, "exit": 1, "signatures": ["x"]}, f)  # one an older OKe recorded
+        self.assertEqual(oke.read_json(os.path.join(self.jobs, "baseline.json"), None)["version"], 1)
+        info = oke.load_state()["jobs"]["fix-a"]
+        cwd = oke.work_dir(info)
+        base = oke.base_run("fix-a", info, cwd, "echo FAILED y; exit 1")
+        self.assertEqual((base["version"], base["signatures"]), (oke.BASELINE_VERSION, ["FAILED y"]))
 
 
 class TestDirectCommit(DeliverBase):
@@ -959,6 +1029,7 @@ class TestDirectCommit(DeliverBase):
     def setUp(self):
         DeliverBase.setUp(self)
         self.git(self.repo, "branch", "-q", "-D", "oke/fix-a")
+        self.assertTrue(oke.snapshot_dirty("fix-a", oke.load_state()["jobs"]["fix-a"]))  # the job starts
         self.write("toy/d.txt", "d\n")
         self.git(self.repo, "add", "d.txt")  # the PM stages the job's new files
         self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
@@ -992,12 +1063,79 @@ class TestDirectCommit(DeliverBase):
         self.assertEqual(self.deliver(), 0, self.err)
         self.assertEqual(self.git_out(self.repo, "status", "--porcelain").strip(), "?? __pycache__/")
         self.assertNotIn("__pycache__", self.git_out(self.repo, "show", "--name-only", "HEAD"))
-        self.assertEqual(json.loads(self.out)["left_untracked"], ["__pycache__/d.cpython-311.pyc"])
 
-    def test_an_unstaged_new_file_is_left_out_of_the_review_tree(self):
-        self.write("toy/notes.txt", "the user's own\n")  # not staged: not the job's
+    def test_the_users_files_from_before_the_start_are_left_out(self):
+        # the job starts with the user's notes.txt and staged x.txt in the checkout
+        os.remove(oke.snapshot_path("fix-a"))  # taken again below, with the user's files in it
+        self.git(self.repo, "rm", "-q", "--cached", "d.txt")
+        os.remove(os.path.join(self.repo, "d.txt"))
+        self.write("toy/notes.txt", "the user's own\n")
+        self.write("toy/x.txt", "x\n")
+        self.git(self.repo, "add", "x.txt")
+        self.assertTrue(oke.snapshot_dirty("fix-a", oke.load_state()["jobs"]["fix-a"]))
+        self.write("toy/d.txt", "d\n")  # the job's new file, not staged
         self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
         self.assertEqual(json.loads(self.out)["tree"], self.tree)
+        self.assertEqual(self.deliver(), 0, self.err)
+        out = json.loads(self.out)
+        self.assertEqual(self.git_out(self.repo, "show", "--name-only", "--format=", "HEAD").split(), ["d.txt"])
+        self.assertEqual(out["user_files_kept"], 2)  # notes.txt and x.txt
+        status = self.git_out(self.repo, "status", "--porcelain")
+        self.assertIn("A  x.txt", status)  # still staged, as the user left it
+        self.assertIn("?? notes.txt", status)
+
+    def test_a_user_file_the_job_changed_too_is_asked_about(self):
+        os.remove(oke.snapshot_path("fix-a"))  # taken again below, with the user's files in it
+        self.write("toy/shared.txt", "the user's line\n")
+        self.assertTrue(oke.snapshot_dirty("fix-a", oke.load_state()["jobs"]["fix-a"]))
+        self.write("toy/shared.txt", "the user's line\nthe job's line\n")
+        self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
+        self.tree_review(json.loads(self.out)["tree"])
+        self.assertEqual(self.deliver(), 5)
+        out = json.loads(self.out)
+        self.assertEqual((out["result"], out["files"]), ("user_files", ["shared.txt"]))
+        self.assertEqual(self.head(), self.pre)
+        self.assertEqual(self.cli("job", "files", "fix-a", "include", "shared.txt"), 0, self.err)
+        self.assertEqual(self.deliver(), 0, self.err)
+        self.assertIn("shared.txt", self.git_out(self.repo, "show", "--name-only", "--format=", "HEAD").split())
+
+    def test_a_user_file_left_out_stays_uncommitted(self):
+        os.remove(oke.snapshot_path("fix-a"))  # taken again below, with the user's files in it
+        self.git(self.repo, "rm", "-q", "--cached", "d.txt")
+        os.remove(os.path.join(self.repo, "d.txt"))
+        self.write("toy/shared.txt", "the user's line\n")
+        self.assertTrue(oke.snapshot_dirty("fix-a", oke.load_state()["jobs"]["fix-a"]))
+        self.write("toy/d.txt", "d\n")  # the job's
+        self.write("toy/shared.txt", "both\n")
+        self.assertEqual(self.cli("job", "files", "fix-a", "leave", "shared.txt"), 0, self.err)
+        self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["tree"], self.tree)  # d.txt only
+        self.assertEqual(self.deliver(), 0, self.err)
+        self.assertEqual(self.git_out(self.repo, "show", "--name-only", "--format=", "HEAD").split(), ["d.txt"])
+        self.assertIn("?? shared.txt", self.git_out(self.repo, "status", "--porcelain"))
+
+    def test_commit_groups_make_one_commit_each(self):
+        self.write("toy/e.txt", "e\n")
+        self.write("toy/docs/f.md", "f\n")
+        with open(os.path.join(self.jobs, "plan.md"), "a") as f:
+            f.write("\n## Commits\n- add d: d.txt\n- docs: docs\n- the rest: rest\n")
+        self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
+        self.tree_review(json.loads(self.out)["tree"])
+        self.assertEqual(self.deliver(), 0, self.err)
+        log = self.git_out(self.repo, "log", "--format=%s", "-3").splitlines()
+        self.assertEqual(log, ["the rest", "docs", "add d"])
+        self.assertEqual(self.git_out(self.repo, "show", "--name-only", "--format=", "HEAD~1").split(), ["docs/f.md"])
+
+    def test_commit_groups_without_rest_block_unnamed_files(self):
+        self.write("toy/e.txt", "e\n")
+        with open(os.path.join(self.jobs, "plan.md"), "a") as f:
+            f.write("\n## Commits\n- add d: d.txt\n")
+        self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
+        self.tree_review(json.loads(self.out)["tree"])
+        self.assertEqual(self.deliver(), 1)
+        self.assertIn("e.txt", self.err)
+        self.assertIn("rest", self.err)
+        self.assertEqual(self.head(), self.pre)
 
     def test_needs_a_check_on_the_reviewed_tree(self):
         self.checked("tree:" + self.tree, "fail")
@@ -1007,7 +1145,7 @@ class TestDirectCommit(DeliverBase):
         self.assertEqual(self.deliver(), 0, self.err)
 
     def test_a_tree_git_cannot_read_is_an_error_not_a_traceback(self):
-        self.assertIsNone(oke.pending_tree(os.path.join(self.home, "no-such-repo")))
+        self.assertIsNone(oke.tree_of(os.path.join(self.home, "no-such-repo"), ["a.txt"]))
 
     def test_a_change_after_the_review_is_refused(self):
         self.write("toy/d.txt", "changed after the review\n")
@@ -1042,23 +1180,152 @@ class TestDirectCommit(DeliverBase):
         self.logged("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "done"), 0, self.err)
 
-    def test_an_unstaged_new_file_is_not_taken_for_already_in(self):
-        self.git(self.repo, "reset", "-q")  # d.txt stays, untracked: the review tree is HEAD's
+    def test_an_unstaged_new_file_is_the_jobs_and_not_already_in(self):
+        self.git(self.repo, "reset", "-q")  # d.txt stays, untracked: still the job's new file
         self.tree_review(self.git_out(self.repo, "rev-parse", "HEAD^{tree}").strip())
         self.assertEqual(self.deliver(), 1)
-        self.assertIn("untracked files d.txt", self.err)
+        self.assertIn("not the ones the review covered", self.err)
         self.assertEqual(self.ledger()["deliver"], "none")
 
     def test_nothing_to_commit_is_refused(self):
         self.git(self.repo, "reset", "-q")
         os.remove(os.path.join(self.repo, "d.txt"))
         self.assertEqual(self.deliver(), 1)
-        self.assertIn("no changes", self.err)
+        self.assertIn("not the ones the review covered", self.err)
+        self.assertEqual(self.head(), self.pre)
 
     def test_a_reviewed_commit_without_its_branch_is_still_refused(self):
         self.review(1, commit=self.pre)
         self.assertEqual(self.deliver(), 1)
         self.assertIn("does not exist", self.err)
+
+    def test_a_job_without_a_record_of_the_users_files_commits_only_what_the_user_names(self):
+        os.remove(oke.snapshot_path("fix-a"))  # an older job: no record of the user's files
+        self.write("toy/notes.txt", "the user's\n")
+        self.assertEqual(self.deliver(), 1)
+        self.assertIn("no record of the user's uncommitted files", self.err)
+        self.assertEqual(self.cli("job", "files", "fix-a", "include", "./d.txt"), 0, self.err)
+        self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
+        self.tree_review(json.loads(self.out)["tree"])
+        self.assertEqual(self.deliver(), 0, self.err)
+        self.assertEqual(self.git_out(self.repo, "show", "--name-only", "--format=", "HEAD").split(), ["d.txt"])
+        self.assertIn("?? notes.txt", self.git_out(self.repo, "status", "--porcelain"))
+
+    def test_commits_made_in_the_checkout_during_the_job_are_asked_about(self):
+        self.write("toy/other.txt", "someone committed\n")
+        self.git(self.repo, "add", "other.txt")
+        self.git(self.repo, "commit", "-q", "-m", "main other.txt", "--", "other.txt")
+        self.assertEqual(self.deliver(), 1)
+        self.assertIn("commit(s) since job fix-a began", self.err)
+        self.assertIn("job accept-head fix-a", self.err)
+        self.assertEqual(self.cli("job", "accept-head", "fix-a"), 0, self.err)
+        self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
+        self.tree_review(json.loads(self.out)["tree"])
+        self.assertEqual(self.deliver(), 0, self.err)
+
+    def test_a_second_round_after_a_delivery_starts_from_its_commit(self):
+        self.assertEqual(self.deliver(), 0, self.err)
+        first = self.head()
+        self.write("toy/e.txt", "e\n")  # a change request after the delivery
+        self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
+        out = json.loads(self.out)
+        self.assertTrue(out["diff"].startswith("git diff %s " % first))
+        self.tree_review(out["tree"])
+        self.assertEqual(self.deliver(), 0, self.err)  # OKe's own commit is no stranger's
+        self.assertEqual(self.git_out(self.repo, "show", "--name-only", "--format=", "HEAD").split(), ["e.txt"])
+
+    def test_a_users_file_is_restored_from_its_copy(self):
+        os.remove(oke.snapshot_path("fix-a"))
+        self.write("toy/notes.txt", "the user's notes\n")
+        self.assertTrue(oke.snapshot_dirty("fix-a", oke.load_state()["jobs"]["fix-a"]))
+        self.write("toy/notes.txt", "a worker wrote over it\n")
+        self.assertEqual(self.cli("job", "restore-user", "fix-a", "notes.txt"), 0, self.err)
+        self.assertTrue(json.loads(self.out)["same"])
+        with io.open(os.path.join(self.repo, "notes.txt"), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "the user's notes\n")
+        self.write("toy/e.txt", "the job's\n")
+        self.assertEqual(self.cli("job", "restore-user", "fix-a", "e.txt"), 1)  # the job's, not the user's
+        self.assertIn("was not one of the user's", self.err)
+
+    def test_a_commit_hook_that_changes_the_commit_is_undone(self):
+        hook = os.path.join(self.repo, ".git", "hooks", "pre-commit")
+        with io.open(hook, "w", encoding="utf-8", newline="\n") as f:
+            f.write(u"#!/bin/sh\necho hooked >> d.txt\ngit add d.txt\n")
+        os.chmod(hook, 0o755)
+        self.assertEqual(self.deliver(), 1)
+        self.assertIn("commit hook", self.err)
+        self.assertEqual(self.head(), self.pre)  # nothing stays committed
+        self.assertEqual(self.ledger()["deliver"], "none")
+
+    def test_many_long_paths_go_through_a_pathspec_file(self):
+        names = ["f%03d-%s.txt" % (i, "x" * 140) for i in range(150)]
+        for n in names:
+            self.write("toy/" + n, "x\n")
+        ok, text = oke.commit_paths(self.repo, "many", names)
+        self.assertTrue(ok, text)
+        shown = self.git_out(self.repo, "show", "--name-only", "--format=", "HEAD").split()
+        self.assertEqual(sorted(shown), sorted(names))
+        self.assertEqual(os.listdir(os.path.join(self.home, "tmp")) if os.path.isdir(
+            os.path.join(self.home, "tmp")) else [], [])  # the pathspec file is gone
+
+
+
+class TreeReviewMixin(object):
+    def tree_reviewed(self, job="fix-a"):
+        """The job's review covered `job tree`'s tree, with a passing check on it."""
+        self.assertEqual(self.cli("job", "tree", job), 0, self.err)
+        tree = json.loads(self.out)["tree"]
+        path = os.path.join(self.home, "jobs", job, job + "-rv", "assignment.md")
+        if not os.path.isdir(os.path.dirname(path)):
+            os.makedirs(os.path.dirname(path))
+        with open(path, "w") as f:
+            f.write("agent: %s-rv\nrole: reviewer\njob: %s\nseq: 1\ncommit: no\ntree: %s\ncriteria_rev: %s\n---\n"
+                    % (job, job, tree, oke.criteria_rev(job)))
+        self.checked("tree:" + tree, job=job)
+        self.order(self.report(job + "-w1", 1, job=job), self.report(job + "-rv", 1, "verdict: pass", job=job))
+        return tree
+
+
+class TestWorktreeLeftover(TreeReviewMixin, DeliverBase):
+    """A job in its own worktree: the worker's commits stay, what it left uncommitted is committed."""
+    def test_the_workers_commit_stays_and_the_rest_is_committed(self):
+        wt = self.worktree()
+        worker_commit = self.tip()
+        self.write("wt-fix-a/b.txt", "b\n")  # left uncommitted
+        tree = self.tree_reviewed()
+        self.assertEqual(self.deliver(), 0, self.err)
+        self.assertEqual(self.git_out(wt, "rev-parse", "HEAD^{tree}").strip(), tree)
+        self.assertEqual(self.git_out(wt, "rev-parse", "HEAD~1").strip(), worker_commit)  # no squash
+        self.assertEqual(self.git_out(wt, "status", "--porcelain").strip(), "")
+        self.assertEqual(self.ledger()["deliver"], "delivered")
+
+    def test_a_clean_worktree_is_reviewed_as_its_commit(self):
+        self.worktree()
+        self.assertEqual(self.cli("job", "tree", "fix-a"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["commit"], self.tip())
+
+
+class TestLinkedWorktree(TreeReviewMixin, DeliverBase):
+    """The user names a linked worktree: it is the job's path, and delivery commits on its branch."""
+    def test_delivery_commits_on_the_linked_worktrees_branch(self):
+        linked = self.path("linked")
+        self.git(self.repo, "worktree", "add", "-q", "-b", "feature", linked)
+        self.assertEqual(self.cli("job", "new", "lw", "--repo", linked), 0, self.err)
+        info = oke.load_state()["jobs"]["lw"]
+        self.assertEqual(oke.normalize_path(info["path"]), oke.normalize_path(linked))
+        self.assertEqual(info["base"], "feature")
+        self.set_plan("test -f c.txt", "1. c.txt exists", job="lw", workspace="## Workspace\nmain checkout\n")
+        self.advance("lw", "reviewing")
+        self.write("linked/mine.txt", "the user's\n")  # in the checkout when the job starts
+        main_head = self.head()
+        self.assertTrue(oke.snapshot_dirty("lw", oke.load_state()["jobs"]["lw"]))
+        self.write("linked/c.txt", "c\n")
+        self.tree_reviewed("lw")
+        self.assertEqual(self.deliver("lw"), 0, self.err)
+        self.assertEqual(self.git_out(linked, "show", "--name-only", "--format=", "HEAD").split(), ["c.txt"])
+        self.assertEqual(self.git_out(linked, "rev-parse", "--abbrev-ref", "HEAD").strip(), "feature")
+        self.assertEqual(self.head(), main_head)  # the main checkout is untouched
+        self.assertIn("?? mine.txt", self.git_out(linked, "status", "--porcelain"))
 
 
 if __name__ == "__main__":

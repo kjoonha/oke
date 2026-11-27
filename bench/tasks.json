@@ -1,0 +1,204 @@
+{
+  "_doc": "OKe e2e benchmark tasks. {run} in a prompt becomes the run dir (c:/... with forward slashes). Tasks run in `order`; tasks with the same `group` are sent one after another and waited for together. `popups`: rules tried in order before `global_popups`; the first rule whose `when` regex matches the popup screen (and whose `kind`, `after` and `times` fit) decides. Actions: `first` (option 1, which OKe marks Recommended / approve), {\"pick\": regex on the option labels}, {\"type\": text} (the free-text option, then Enter). No rule matches: `first`. `expect`: checks score.py runs (see score.py CHECKS).",
+  "budgets": {"small": 12, "big": 25, "queue": 35},
+  "stuck_minutes": 8,
+  "avoid_options": "(?i)(cancel|취소|삭제|지우|버리|discard|remove|delete|--force|force|give up|포기|pane|패널|창으로|attach|직접 (보|답|처리)|go to)",
+  "_avoid_doc": "`first` means the first option whose label does not match avoid_options (never cancel, delete or go to a pane); when every option matches, option 1",
+  "global_popups": [
+    {"kind": "dialog", "when": "(?i)(rm\\s+-[a-z]*[rf]|reset\\s+--hard|clean\\s+-[a-z]*f|branch\\s+-D|git\\s+push|Remove-Item|rmdir|del\\s+/|--force|stash\\s+(drop|clear)|format\\s+[a-z]:)",
+     "do": {"pick": "(?i)(deny|거부|거절|허용하지|아니)"}, "note": "a child's permission dialog for a destructive command: deny"},
+    {"kind": "interview", "after": 2, "do": {"pick": "(?i)(enough|start planning|계획(을)? ?(바로 )?(시작|세우)|그만|바로 계획|충분)"}, "note": "two interview answers, then plan"}
+  ],
+  "tasks": [
+    {
+      "id": "T01-answer",
+      "order": 1,
+      "budget": "small",
+      "prompt": "calc PM한테 물어봐줘. {run}/calc 의 div 함수는 0으로 나누면 어떻게 동작해? 고치지 말고 설명만 해줘.",
+      "covers": ["answer-only"],
+      "expect": [
+        {"check": "jobs_finished"},
+        {"check": "job_answered"},
+        {"check": "popup_count", "kind": "approval", "max": 0},
+        {"check": "no_new_commits", "repos": ["calc", "conv", "shop", "notes"]},
+        {"check": "no_new_branches", "repos": ["calc", "conv", "shop", "notes"]},
+        {"check": "status_unchanged", "repo": "calc"}
+      ]
+    },
+    {
+      "id": "T02-anchored-typo",
+      "order": 2,
+      "budget": "small",
+      "prompt": "conv PM으로 {run}/conv 의 README.md 오타 고쳐줘.",
+      "covers": ["A1", "A1b", "A2"],
+      "expect": [
+        {"check": "jobs_finished"},
+        {"check": "popup_count", "kind": "interview", "max": 0},
+        {"check": "popup_count", "kind": "pm_pick", "max": 0},
+        {"check": "popup_count", "kind": "any", "max": 2},
+        {"check": "popup_count", "kind": "approval", "max": 1},
+        {"check": "file_fixed_in_new_commit", "repo": "conv", "file": "README.md", "absent": "Celsuis", "present": "Celsius"},
+        {"check": "worktree_contains", "repo": "conv", "file": "README.md", "text": "NOTE(user): rename this repo later."},
+        {"check": "job_size", "size": "small"}
+      ]
+    },
+    {
+      "id": "T03-docs-only",
+      "order": 3,
+      "budget": "big",
+      "prompt": "notes PM으로 {run}/notes 의 guide.md 에 '휴가' 섹션을 추가해줘. 휴가는 일주일 전에 팀 채널에 알린다는 내용이면 돼.",
+      "covers": ["check-none"],
+      "expect": [
+        {"check": "jobs_finished"},
+        {"check": "plan_check_none"},
+        {"check": "review_grades", "all": "VERIFIED"},
+        {"check": "file_in_new_commit", "repo": "notes", "file": "guide.md", "text": "휴가"}
+      ]
+    },
+    {
+      "id": "T04-continue-mul",
+      "order": 4,
+      "budget": "big",
+      "prompt": "calc PM으로, {run}/calc main checkout에서 내가 하다 만 mul 함수를 마저 끝내고 테스트도 통과시켜줘. worktree 만들지 말고 main에 바로 커밋해줘.",
+      "covers": ["B5", "A4", "U1", "U2"],
+      "expect": [
+        {"check": "jobs_finished"},
+        {"check": "new_commits_on", "repo": "calc", "ref": "refs/heads/main", "min": 1},
+        {"check": "new_commits_only_touch", "repo": "calc", "ref": "refs/heads/main", "allow": ["calc.py", "test_calc.py"]},
+        {"check": "uncommitted", "repo": "calc", "files": ["notes.txt", "CHANGELOG.md"]},
+        {"check": "head_file_contains", "repo": "calc", "ref": "main", "file": "calc.py", "regex": "def mul\\(a, b\\):\\s*\\n(?:\\s*#.*\\n)*\\s*return"},
+        {"check": "pre_existing_reported"},
+        {"check": "no_new_branches", "repos": ["calc"], "prefix": "refs/heads/oke/"},
+        {"check": "plan_size_ok", "max_bytes": 20000}
+      ]
+    },
+    {
+      "id": "T05-linked-worktree",
+      "order": 5,
+      "budget": "big",
+      "prompt": "shop PM으로 {run}/shop-add-tax 워크트리(test/add-tax 브랜치)에서 add_tax 를 구현해서 실패하는 테스트를 통과시켜줘. 커밋은 그 브랜치에.",
+      "covers": ["B6"],
+      "expect": [
+        {"check": "jobs_finished"},
+        {"check": "new_commits_on", "repo": "shop", "ref": "refs/heads/test/add-tax", "min": 1},
+        {"check": "ref_unchanged", "repo": "shop", "ref": "refs/heads/main"},
+        {"check": "no_new_branches", "repos": ["shop"], "prefix": "refs/heads/oke/"},
+        {"check": "head_file_contains", "repo": "shop", "ref": "test/add-tax", "file": "shop.py", "regex": "def add_tax[\\s\\S]*return"},
+        {"check": "no_new_worktrees", "repo": "shop"}
+      ]
+    },
+    {
+      "id": "T06-two-commits",
+      "order": 6,
+      "budget": "big",
+      "prompt": "calc PM으로 {run}/calc 에 sub 함수를 추가하고 README.md 의 함수 목록도 고쳐줘. 커밋은 코드랑 문서 따로 해줘.",
+      "covers": ["B7"],
+      "expect": [
+        {"check": "jobs_finished"},
+        {"check": "two_commits_split", "repo": "calc", "doc": ["README.md"], "code": ["calc.py", "test_calc.py"]},
+        {"check": "uncommitted", "repo": "calc", "files": ["notes.txt", "CHANGELOG.md"]}
+      ]
+    },
+    {
+      "id": "T07-result-in-place",
+      "order": 7,
+      "budget": "big",
+      "prompt": "shop PM으로 {run}/shop-add-tax 에 shop.py 의 함수 목록을 HTML 보고서(functions.html)로 만들어줘. 커밋하지 말고 그 자리에 그냥 둬.",
+      "covers": ["C10", "C11"],
+      "expect": [
+        {"check": "jobs_finished"},
+        {"check": "file_exists", "path": "shop-add-tax/functions.html"},
+        {"check": "untracked_or_uncommitted", "repo": "shop-add-tax", "file": "functions.html"},
+        {"check": "no_new_commits", "repos": ["shop"]},
+        {"check": "no_new_worktrees", "repo": "shop"}
+      ]
+    },
+    {
+      "id": "T08-vague",
+      "order": 8,
+      "budget": "big",
+      "prompt": "conv PM으로 conv 좀 더 좋게 해줘.",
+      "covers": ["A1b-interview"],
+      "expect": [
+        {"check": "popup_count", "kind": "interview", "min": 1},
+        {"check": "jobs_finished"}
+      ]
+    },
+    {
+      "id": "T09-auto",
+      "order": 9,
+      "budget": "big",
+      "prompt": "{run}/calc 에 pow(a, b) 함수 추가해줘. 테스트도 넣고. 묻지 말고 진행해.",
+      "covers": ["A3", "A2-only-fit"],
+      "expect": [
+        {"check": "jobs_finished"},
+        {"check": "popup_count", "kind": "auto_confirm", "min": 1, "max": 1},
+        {"check": "popup_count", "kind": "approval", "max": 0},
+        {"check": "popup_count", "kind": "pm_pick", "max": 0},
+        {"check": "job_auto"},
+        {"check": "any_new_commit_contains", "repo": "calc", "file": "calc.py", "regex": "def pow"}
+      ]
+    },
+    {
+      "id": "T10a-queue-first",
+      "order": 10,
+      "group": "queue",
+      "budget": "queue",
+      "prompt": "calc PM으로 {run}/calc main checkout에서 바로 calc.py 에 mod(a, b) 함수 추가해줘. worktree 말고 main에서 작업해줘.",
+      "covers": ["B9"],
+      "expect": [
+        {"check": "jobs_finished"},
+        {"check": "any_new_commit_contains", "repo": "calc", "file": "calc.py", "regex": "def mod"}
+      ]
+    },
+    {
+      "id": "T10b-queue-second",
+      "order": 11,
+      "group": "queue",
+      "budget": "queue",
+      "send_after": "job_created",
+      "prompt": "calc PM으로 {run}/calc main checkout에서 바로 calc.py 에 neg(a) 함수도 추가해줘. 이것도 worktree 말고 main에서.",
+      "covers": ["B9"],
+      "expect": [
+        {"check": "jobs_finished"},
+        {"check": "any_new_commit_contains", "repo": "calc", "file": "calc.py", "regex": "def neg"},
+        {"check": "queued_after", "other": "T10a-queue-first"}
+      ]
+    },
+    {
+      "id": "T11-change-request",
+      "order": 12,
+      "budget": "big",
+      "prompt": "notes PM으로 {run}/notes 의 README.md 에 문서 목차를 정리해줘.",
+      "popups": [
+        {"kind": "approval", "times": 1, "do": {"type": "목차 항목마다 그 문서가 무엇인지 한 줄 설명을 붙여줘."}}
+      ],
+      "covers": ["D13"],
+      "expect": [
+        {"check": "jobs_finished"},
+        {"check": "change_request_one_step"},
+        {"check": "popup_count", "kind": "approval", "min": 2}
+      ]
+    }
+  ],
+  "checklist": {
+    "A1": "small request: PM writes the plan, one approval popup, at most 1-2 popups",
+    "A1b": "interview only when the words name nothing concrete",
+    "A2": "a named PM (or the only PM of that path) gets the job without a PM-pick popup",
+    "A3": "per-job auto approval ('묻지 말고'): one confirm popup, then no approval popup",
+    "A4": "no baseline step; a failing check is compared with the base automatically",
+    "B5": "in place: only the job's files are committed; the user's other uncommitted files stay",
+    "B6": "an existing linked worktree is the job's place; commits go on its branch",
+    "B7": "a plan's commit groups become separate commits",
+    "B9": "a second in-place job on the same checkout waits and starts by itself",
+    "C10": "a result (HTML) stays uncommitted in the existing place, no new worktree",
+    "C11": "the plan decides the result path",
+    "D13": "text typed in the approval popup is the change request at once",
+    "U1": "git handling is not excessive (see B5-B7)",
+    "U2": "no baseline nagging (see A4)",
+    "answer-only": "a question ends with an answer: no plan approval, no branch, no commit",
+    "check-none": "a docs-only job has check none and the review grades every criterion",
+    "A1b-interview": "a vague request gets an interview",
+    "A2-only-fit": "the only PM that worked on a path takes it without a popup"
+  }
+}

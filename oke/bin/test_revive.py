@@ -657,7 +657,9 @@ class TestBoundary(ReviveBase):
         self.assertEqual(self.boundary("w1:p5")["min_percent"], 50)
 
     def test_a_pms_next_work_is_its_other_open_jobs(self):
-        self.job("fix-b", "working")
+        # in a checkout of its own: two jobs in one checkout take turns
+        self.assertEqual(self.cli("job", "new", "fix-b", "--repo", self.git_repo("other")), 0, self.err)
+        self.advance("fix-b", "working")
         state = oke.load_state()
         state["jobs"]["fix-b"]["pm"] = state["jobs"]["fix-a"]["pm"]
         oke.save_state(state)

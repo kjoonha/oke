@@ -14,8 +14,11 @@ import json
 import os
 import re
 import shutil
+import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 
 import automate
@@ -74,13 +77,17 @@ def load_config():
         "wiki_path": os.path.join(home, "wiki"),
         "models": {"pm": "opus", "worker": "opus", "reviewer": "opus"},
         "lean_launch": True,  # children skip the user's plugins, hooks and MCP servers
-        "max_review_rounds": 10,  # a job's reviews stop there and the PM asks the user; null: no limit
+        "max_review_rounds": 3,  # a job's reviews stop there and the PM asks the user; null: no limit
         "merge_ignore_untracked": [".omc/"],  # other tools' untracked folders: never the job's work
         # effortLevel per role ("low" .. "max"); a lean child of a role left out uses the default
         "effort": {},
         "theme": "disco",  # the band's characters: disco (default), slime, mushroom, cute-dog, cute-cat, ... (README lists all)
         # a PM, worker or reviewer compacts at a task boundary only from this much context used
         "compact_min_percent": 30,
+        "check_timeout": 30,  # minutes one run of a plan's Check command may take (also its run on the base)
+        # the checkout's ignored dependency folders linked into the base run's temporary worktree
+        "base_links": ["node_modules", ".venv", "venv"],
+        "allowed_models": [],  # the models an assignment's `model:` may pick; empty: any
     }
     try:
         with io.open(os.path.join(home, "config.json"), encoding="utf-8") as f:
@@ -301,7 +308,12 @@ def repo_key(path):
     try:
         p = subprocess.Popen(["git", "rev-parse", "--git-common-dir"], cwd=cwd,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = p.communicate()
+        try:
+            out, err = p.communicate(timeout=GIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.communicate()
+            raise ValueError("git did not answer about %s" % path)
     except (OSError, ValueError):
         raise ValueError("not a folder: %s" % path)  # git missing, or no such folder
     if p.returncode != 0:
@@ -417,9 +429,25 @@ REVIEWER_DENIED = ["Bash(git *--output*)"]
 # git run from a script; the mod's regex still catches the first.
 GIT_DENY_RULES = ["Bash(git push:*)", "Bash(git reset --hard:*)", "Bash(git reset --merge:*)",
                   "Bash(git clean -f:*)", "Bash(git clean --force:*)", "Bash(git branch -D:*)",
+                  "Bash(git branch --delete --force:*)", "Bash(git branch --force --delete:*)",
+                  "Bash(git branch -d -f:*)",
                   "Bash(git checkout -f:*)", "Bash(git checkout --force:*)", "Bash(git stash drop:*)",
                   "Bash(git stash clear:*)", "Bash(git update-ref -d:*)", "Bash(git filter-branch:*)",
-                  "Bash(git filter-repo:*)", "Bash(git worktree remove --force:*)"]
+                  "Bash(git filter-repo:*)", "Bash(git worktree remove --force:*)", "Bash(git switch -f:*)",
+                  "Bash(git switch --force:*)", "Bash(git switch --discard-changes:*)"]
+# Workers and reviewers also may not throw away or hide uncommitted work (the user's files sit in
+# the same checkout): no stash at all, no checkout/restore of the whole tree. The mod's
+# AGENT_GIT_DENIED catches the forms these exact rules miss (`-C <dir>`, `./`, extra spaces).
+AGENT_GIT_DENY_RULES = ["Bash(git stash:*)", "Bash(git checkout -- .)", "Bash(git checkout .)",
+                        "Bash(git restore .)", "Bash(git restore -- .)",
+                        "Bash(git checkout HEAD .)", "Bash(git checkout HEAD -- .)", "Bash(git checkout -- '*')",
+                        "Bash(git checkout -- \"*\")", "Bash(git checkout -- :/)", "Bash(git checkout :/)",
+                        "Bash(git restore -s HEAD .)", "Bash(git restore --source HEAD .)",
+                        "Bash(git restore --source=HEAD .)", "Bash(git restore :/)", "Bash(git rm -r .)",
+                        "Bash(git rm -rf .)", "Bash(git rm -r -- .)"]
+# A worker of a job in place leaves its work uncommitted: only `oke job deliver` commits there.
+COMMIT_DENY_RULES = ["Bash(git commit:*)", "Bash(git revert:*)", "Bash(git cherry-pick:*)", "Bash(git merge:*)",
+                     "Bash(git am:*)", "Bash(git rebase:*)"]
 
 
 def worker_deny_rules(folder):
@@ -674,7 +702,7 @@ def cmd_rt(args):
                 # closing its last pane closed it already), then remove the checkout
                 job, info = found[0]
                 path = native_path(info["worktree"]["path"])
-                repo = native_path(repo_dir(info["git_key"]))
+                repo = checkout_dir(info)
                 # children may run outside the tab, in the checkout: on Windows git cannot
                 # delete a folder a shell sits in (half deleted, then "Permission denied")
                 close_children(job, info.get("pm"))
@@ -774,6 +802,9 @@ def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header
     """`header` is the agent's assignment header: its `tools:`, `mcp:` and `plugins:`
     (comma separated) are what the PM switched on for this job."""
     model = (header or {}).get("model") or config["models"].get(role, "opus")
+    allowed = [m for m in config.get("allowed_models") or [] if isinstance(m, str)]
+    if allowed and model not in allowed:
+        model = config["models"].get(role, "opus")  # a header's model outside the list: the role's own
     args = ["--model", model, "--plugin-dir", plugin_dir]
     # Measured: the user's plugins, hooks and MCP servers add about 36k tokens to every
     # child's context. Without a settings file, start as before so the herdr hook stays.
@@ -824,8 +855,17 @@ def launch_args(role, config, home, plugin_dir, resume=None, folder=None, header
         args += ["--permission-mode", "bypassPermissions"]
     # deny rules beat allow rules and bypass mode; `git diff/log/show --output=<file>` writes a file
     denied = GIT_DENY_RULES + (REVIEWER_DENIED if role == "reviewer" else []) + key_deny_rules(home)
+    if role in ("worker", "reviewer"):
+        denied = denied + AGENT_GIT_DENY_RULES
     if role == "worker" and folder and folder != home:
         denied = denied + worker_deny_rules(folder)
+    if role == "worker":
+        try:
+            job = load_state()["jobs"].get((header or {}).get("job") or "") or {}
+        except (OSError, StateError):
+            job = {}
+        if in_place(job):
+            denied = denied + COMMIT_DENY_RULES
     args += ["--disallowedTools"] + denied
     return args
 
@@ -954,6 +994,11 @@ def path_facts(path):
     key = repo_key(p)
     if os.path.exists(key):
         folder = repo_dir(key)
+        # a linked worktree (`git worktree add`) the user named is the job's checkout, on its own branch
+        code, top = git_out(p, "rev-parse", "--show-toplevel")
+        git_dir = git_out(p, "rev-parse", "--absolute-git-dir")[1]
+        if code == 0 and top and git_dir and normalize_path(os.path.realpath(native_path(git_dir))) != key:
+            folder = top
         if folder is None:
             raise ValueError("%s is a bare repository (no working folder): give a checkout's folder" % path)
         return key, normalize_path(folder), False
@@ -1012,10 +1057,43 @@ def path_clash(state, name, folder, direct, branch_taken=None):
             return ("job %s already changes %s in place (no git, no undo), which overlaps %s: "
                     "finish or archive it first" % (busy[0], state["jobs"][busy[0]]["path"], folder))
         return None
-    if subprocess.call(["git", "-C", native_path(folder), "show-ref", "--verify", "--quiet",
-                        "refs/heads/oke/" + name]) == 0:
+    if call_timed(["git", "-C", native_path(folder), "show-ref", "--verify", "--quiet",
+                   "refs/heads/oke/" + name]) == 0:
         return (branch_taken % {"job": name, "checkout": folder} if branch_taken else
                 "branch oke/%s already exists in %s (an earlier job): pick another job name" % (name, folder))
+    return None
+
+
+def checkout_busy(state, name):
+    """The open job that has changed, or may change, job `name`'s checkout in place, or None.
+    It counts from its start (it worked there, or its snapshot of the user's files exists)
+    until it is done or failed, also back in planning or approval after a change request.
+    A delivered job counts again once it is put back to work after its last delivery.
+    A job in a worktree of its own never counts, nor one that waits for another itself (queued)."""
+    path = normalize_path(state["jobs"][name].get("path") or "")
+    if not path:
+        return None
+    for n, j in sorted(state["jobs"].items()):
+        if n == name or j.get("phase") in DONE_PHASES or is_answer(j) or j.get("direct") \
+                or normalize_path(j.get("path") or "") != path:
+            continue
+        if j.get("queued") and j.get("phase") in ("planning", "awaiting_approval"):
+            continue  # it waits itself: two jobs back from a delivery must not wait for each other
+        if (j.get("worktree") or {}).get("path"):
+            continue
+        started = j.get("worked_in_main") or j.get("phase") in ("working", "reviewing") \
+            or os.path.exists(snapshot_path(n))
+        if not started or (not j.get("worked_in_main") and plan_worktree(n)):
+            continue
+        try:
+            done, row = deliver_state(n)
+        except StateError:
+            return n  # its ledger cannot be read: count it busy rather than mix two jobs' files
+        if done == "delivered":
+            at = time.mktime(time.strptime(row["time"], "%Y-%m-%dT%H:%M:%S")) if row.get("time") else 0
+            if (j.get("phase_at") or 0) <= at + 1:
+                continue  # delivered, not put back to work since
+        return n
     return None
 
 
@@ -1088,8 +1166,11 @@ def agent_cwd(me):
 
 # files under $OKE_HOME only OKe writes, also inside a folder an agent may write: the delivery
 # gate, the interview, the peer talk, a PM's children and every agent's launch settings
-GATE_FILE = re.compile(r"^(ledger\.(tsv|head)|baseline\.(json|log)|interview\.json|peers\.(json|md)|intake\.md|"
-                       r"children\.json|(lean-|bg-)?settings\.json|mcp\.json|(check|verify)-\d+\.log)$")
+GATE_FILE = re.compile(r"^(ledger\.(tsv|head)|baseline\.(json|log)|dirty-before\.json|marks\.json|interview\.json|"
+                       r"peers\.(json|md)|intake\.md|children\.json|(lean-|bg-)?settings\.json|mcp\.json|"
+                       r"(check|verify)-\d+\.log)$")
+# the copies of the user's files from a job's start (`job restore-user` brings them back)
+GATE_DIR = re.compile(r"[\\/]jobs[\\/][^\\/]+[\\/]dirty-before(?:\.new-\d+)?(?:[\\/]|$)", re.I)
 
 
 def home_areas(state, me):
@@ -1135,7 +1216,7 @@ def write_problem(state, me, target):
         if not any(under(p, d) for d in home_areas(state, me)):
             return ("%s is OKe's own file, not this agent's to write. It may write in: %s. %s"
                     % (target, may_write(state, me), next_step(me)))
-        if GATE_FILE.match(os.path.basename(p)):
+        if GATE_FILE.match(os.path.basename(p)) or GATE_DIR.search(p[len(home):]):
             return ("%s is written only by OKe (`oke` commands keep it; the delivery gate trusts it): leave it. %s"
                     % (target, next_step(me)))
         return None
@@ -1297,8 +1378,11 @@ def cmd_pm(args):
                     best = (len(place), name)
             out.append(entry)
         if want:  # the PM whose places hold the path the user said, most specific first
+            fits = [e["name"] for e in out if any(under(want, p) for p in e["places"])]
             for entry in out:
                 entry["recommended"] = entry["name"] == best[1]
+                # the only PM that worked there: the orchestrator gives it the job without asking
+                entry["only_fit"] = fits == [entry["name"]]
         print(json.dumps(out, ensure_ascii=False))
         return 0
     with locked():
@@ -1707,23 +1791,25 @@ def text_section(text, name):
 
 QUESTION_FORM = ("write each question as these lines: `job: <the user's own words for the job, short>` / "
                  "`decide: <what the user decides, one sentence>` / `options:` / then 2 to 4 lines "
-                 "`- <option>: <what happens if the user picks it>`, in the user's language. The one exception: a "
+                 "`- <option>: <what happens if the user picks it>`, in the user's language (`decide:` and each "
+                 "option at most 200 characters; `(Recommended)` after the option you advise). The one exception: a "
                  "Questions section that starts with `no-change:` (the question to end a job with no change)")
 # a line's lead-in a PM may add: a list mark (`-`, `*`, `1.`, `1)`), then bold or backticks
 LEAD = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__|`)?")
-KEY_LINE = re.compile(r"^(job|decide|options)(?:\*\*|__|`)?\s*:(?:\*\*|__|`)?\s*(.*)$", re.I)
+KEY_LINE = re.compile(r"^(job|decide|options|asks)(?:\*\*|__|`)?\s*:(?:\*\*|__|`)?\s*(.*)$", re.I)
 OPTION_LINE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*(?:\*\*|`)?\s*:\s+(\S.*)$")
 
 
 def question_key(line):
-    """(key, value) of a `job:`, `decide:` or `options:` line, however it is marked up, or None."""
+    """(key, value) of a `job:`, `decide:`, `options:` or `asks:` line, however it is marked up, or None."""
     m = KEY_LINE.match(LEAD.sub("", line, count=1))
     return (m.group(1).lower(), m.group(2).strip().strip("*`").strip()) if m else None
 
 
 def parse_questions(text):
-    """The questions of a `## Questions` section as [{"job", "decide", "options": [(option, effect)]}];
-    each starts at a `job:` line. Options are the list lines after its `options:` line only: a
+    """The questions of a `## Questions` section as [{"job", "decide", "options": [(option, effect)],
+    "asks"}]; each starts at a `job:` line. `asks:` (one of QUESTION_ASKS: user_files, review_cap,
+    check_accept, head_moved) names a question only the user answers, even for a job on `job auto`. Options are the list lines after its `options:` line only: a
     bullet of context elsewhere is not one."""
     out = []
     listing = False
@@ -1732,11 +1818,13 @@ def parse_questions(text):
         if key:
             listing = key[0] == "options"
         if key and key[0] == "job":
-            out.append({"job": key[1], "decide": "", "options": []})
+            out.append({"job": key[1], "decide": "", "options": [], "asks": None})
         elif not out:
             continue
         elif key and key[0] == "decide":
             out[-1]["decide"] = key[1]
+        elif key and key[0] == "asks":
+            out[-1]["asks"] = key[1].lower()
         elif key:
             continue  # `options:`
         elif listing and OPTION_LINE.match(line):
@@ -1750,13 +1838,56 @@ def no_change_question(text):
     return LEAD.sub("", (text or "").strip(), count=1).lower().startswith("no-change")
 
 
-def question_problem(report):
+QUESTION_ASKS = ("user_files", "review_cap", "check_accept", "head_moved")  # `asks:` values: questions `job auto` never answers
+QUESTION_CHARS = 200  # a `decide:` line, and each option with what happens, fit in a popup
+RECOMMENDED = re.compile(r"\(recommended\)", re.I)
+# what is not prose when the language of a text is judged: code, paths, file names, identifiers
+NOT_PROSE = re.compile(r"`[^`]*`|\S*[\\/._:](?=[^\s.,:;!?)\]'\"])\S*|\S*\d\S*|\b[a-z]+[A-Z]\w*")
+# (a word that only ends in `.` or `:` is prose: `합니다.`, `옵션:`)
+
+
+def is_hangul(c):
+    return u"가" <= c <= u"힣" or u"ᄀ" <= c <= u"ᇿ" or u"㄰" <= c <= u"㆏"
+
+
+KOREAN_QUESTION = 0.3  # a question is in Korean when this part of its words hold Hangul
+
+
+def hangul_share(text):
+    """The part of a text's words (its prose: code and paths left out) that hold Hangul, or None when
+    it has no words. A word is counted once: `commit합니다` is a Hangul word."""
+    words = [w for w in NOT_PROSE.sub(" ", text or "").split() if any(c.isalpha() for c in w)]
+    if not words:
+        return None
+    return len([w for w in words if any(is_hangul(c) for c in w)]) / float(len(words))
+
+
+def recommended_picks(job):
+    """The option marked `(Recommended)` of each question of a job's PM report, when every question has
+    exactly one; else None. A job the user set to `job auto` takes them without asking."""
+    text = text_section(report_body(os.path.join(pm_job_dir(job), "report.md")), "Questions")
+    if no_change_question(text):
+        return None
+    picks = []
+    for q in parse_questions(text):
+        if q["asks"]:  # the user's own files, or a review past its cap: never answered for the user
+            return None
+        marked = [o for o, _ in q["options"] if RECOMMENDED.search(o)]
+        if len(marked) != 1:
+            return None
+        picks.append(marked[0])
+    return picks or None
+
+
+def question_problem(report, words=None):
     """Why a PM's `question` report does not ask the user in the required form, or None. A
     Questions section that starts with `no-change:` asks whether to end the job with no change:
-    the orchestrator words that one itself."""
+    the orchestrator words that one itself. `words`: the user's words for the job; when they are
+    mostly Hangul, each question must be too."""
     text = text_section(report_body(report), "Questions")
     if no_change_question(text):
         return None
+    korean = (hangul_share(words) or 0) > 0.5
     questions = parse_questions(text)
     if not questions:
         return "bad_report its Questions section holds no question: %s" % QUESTION_FORM
@@ -1766,14 +1897,28 @@ def question_problem(report):
                                          ("2 or more options", len(q["options"]) >= 2)) if not ok]
         if missing:
             return "bad_report question %d lacks %s: %s" % (n, " and ".join(missing), QUESTION_FORM)
+        if q["asks"] is not None and q["asks"] not in QUESTION_ASKS:
+            return "bad_report question %d: `asks:` is %s, not %r" % (n, " or ".join(QUESTION_ASKS), q["asks"])
         if len(q["options"]) > 4:
             return "bad_report question %d has more than 4 options (the user picks from at most 4): %s" % (
                 n, QUESTION_FORM)
+        if len(q["decide"]) > QUESTION_CHARS:
+            return ("bad_report question %d: its `decide:` line has %d characters; say it in at most %d"
+                    % (n, len(q["decide"]), QUESTION_CHARS))
+        long_ = [o for o, e in q["options"] if len(o) + len(e) > QUESTION_CHARS]
+        if long_:
+            return ("bad_report question %d: option %r and what happens with it are longer than %d characters: "
+                    "say it shorter" % (n, long_[0][:40], QUESTION_CHARS))
+        options = " ".join("%s %s" % (RECOMMENDED.sub("", o), e) for o, e in q["options"])  # the mark is frame
+        if korean and any((hangul_share(t) or 0) < KOREAN_QUESTION for t in (q["decide"], options)):
+            return ("bad_report question %d is not in the user's language: the user wrote in Korean, so write "
+                    "its `decide:` line and its options in Korean" % n)
     return None
 
 
 def pm_question_problem(job):
-    return question_problem(os.path.join(pm_job_dir(job), "report.md"))
+    return question_problem(os.path.join(pm_job_dir(job), "report.md"),
+                            users_words(os.path.join(oke_home(), "jobs", job)))
 
 
 # what a PM's `waiting` report may wait on (`on:`), besides one of the job's own agents (<job>-w1)
@@ -2171,13 +2316,23 @@ def cmd_wait(args):
         keys = [k for k, r in state["pms"].items() if (r.get("pm") or {}).get("agent") == args.agent]
         if not keys:
             return fail("--jobs needs a PM agent: %s is not one" % args.agent)
-        print(wait_loop(args.agent, None, None, poll=args.poll,
-                        after_blocked=args.after_blocked, jobs_key=keys[0]))
-        return 0
+        return wait_said(args.agent, wait_loop(args.agent, None, None, poll=args.poll,
+                                               after_blocked=args.after_blocked, jobs_key=keys[0]))
     if args.report is None or args.seq is None:
         return fail("wait needs --report and --seq, or --jobs for a PM")
-    print(wait_loop(args.agent, native_path(args.report), args.seq, poll=args.poll,
-                    after_blocked=args.after_blocked))
+    return wait_said(args.agent, wait_loop(args.agent, native_path(args.report), args.seq, poll=args.poll,
+                                           after_blocked=args.after_blocked))
+
+
+WAIT_SUPERSEDED = 0  # a newer wait on the same agent replaced this one: nothing to do, not an error
+
+
+def wait_said(agent, result):
+    """Print a wait's result; a superseded wait says only that, in one line."""
+    if result == "superseded":
+        print("superseded: a newer wait on %s replaced this one; nothing to do" % agent)
+        return WAIT_SUPERSEDED
+    print(result)
     return 0
 
 
@@ -2576,9 +2731,9 @@ def first_summary_line(report):
 
 # the plain steps of a job, as the board shows them, and what each leaves to come
 STEP_LEFT = {
-    "taking the request": ["investigating", "an answer, or a plan for your approval"],
-    "investigating": ["an answer, or a plan for your approval"],
-    "planning": ["your approval", "work", "review", "delivery"],
+    "taking the request": ["planning", "an answer, or a plan for your approval"],
+    "planning": ["an answer, or a plan for your approval"],
+    "replanning": ["your approval", "work", "review", "delivery"],
     "awaiting approval": ["your approval", "work", "review", "delivery"],
     "working": ["review", "delivery"],
     "reviewing": ["delivery"],
@@ -2589,7 +2744,15 @@ STEP_LEFT = {
 }
 
 
-def job_step(job, info, pm_report, delivered):
+def waits_for(state, name):
+    """The job a queued job `name` waits for now (the one first in its way may have changed), or None."""
+    queued = state["jobs"][name].get("queued")
+    if not queued or state["jobs"][name].get("phase") != "awaiting_approval":
+        return None
+    return checkout_busy(state, name) or queued.get("for")
+
+
+def job_step(job, info, pm_report, delivered, waiting_for=None):
     """(where the job is, in plain words, [what is left]) for the board."""
     phase = info.get("phase")
     if phase == "done":
@@ -2601,7 +2764,10 @@ def job_step(job, info, pm_report, delivered):
     elif phase == "intake":
         step = "taking the request"
     elif phase == "planning":
-        step = "planning" if os.path.exists(os.path.join(oke_home(), "jobs", job, "plan.md")) else "investigating"
+        step = "planning"  # the planner subagent, or the PM itself for a small job
+    elif phase == "awaiting_approval" and info.get("queued"):
+        # approved; another job changes the same checkout first
+        return "waiting for %s to finish" % (waiting_for or info["queued"].get("for")), ["work", "review", "delivery"]
     elif phase == "awaiting_approval":
         step = "awaiting approval"
     elif delivered == "delivered":
@@ -2611,7 +2777,8 @@ def job_step(job, info, pm_report, delivered):
         reviewing = phase == "reviewing" or on.startswith("review subagent") or bool(
             re.match(re.escape(job) + r"-rv", on))
         step = "reviewing" if reviewing else "working"
-    left = list(STEP_LEFT[step])
+    replan = step == "planning" and os.path.exists(os.path.join(oke_home(), "jobs", job, "plan.md"))
+    left = list(STEP_LEFT["replanning" if replan else step])  # a plan was made: an answer is past
     output = job_output(info)
     if output == "result":  # an experiment hands over its outputs, never a branch
         left = ["the result" if s in ("delivery", "your merge") else s for s in left]
@@ -2749,12 +2916,20 @@ def board_tree(state, agents, only_key=None):
                 delivered = deliver_state(job)[0]
             except StateError:  # the ledger key is missing or damaged: the board still shows the rest
                 delivered = "unreadable"
-            step, left = job_step(job, info, pm_report, delivered)
-            jobs.append({"job": job, "phase": info.get("phase"), "agents": nodes,
+            step, left = job_step(job, info, pm_report, delivered, waits_for(state, job))
+            seq, _, report_at = pm_job_report(job)
+            # when this step began: the PM's `waiting` report for it (planner, worker, review), else the phase
+            since = report_at if pm_report.get("type") == "waiting" and pm_report.get("seq") == seq \
+                and report_at else info.get("phase_at")
+            jobs.append({"since": since, "auto": bool(info.get("auto")),
+                         "job": job, "phase": info.get("phase"), "agents": nodes,
                          "words": users_words(os.path.join(oke_home(), "jobs", job)), "step": step, "left": left,
                          "size": info.get("size"), "direct": bool(info.get("direct")), "output": job_output(info),
                          "deliver": delivered, "held": bool(info.get("held")), "subagent": subagent,
                          "pending": waiting["kind"] if waiting and not waiting["deferred"] else None,
+                         # `job auto` answers it without the user: not counted as waiting for them
+                         "auto_pending": bool(waiting and waiting.get("auto")),
+                         "oke_rule": bool(waiting and waiting.get("oke_rule")),
                          # where it works: its worktree, or the path itself
                          "path": native_path((info.get("worktree") or {}).get("path") or info["path"])
                          if info.get("path") else "path?",
@@ -2781,6 +2956,12 @@ WORDS_SHORT = 100  # characters of the user's words a folded job shows
 
 SAID = "You said: "  # the frame's label for the user's own words
 FULL_HINT = "(oke board --full shows everything)"
+
+
+def step_elapsed(seconds):
+    """How long a step runs, as the board says it: `12 min`, `2 h 5 min`."""
+    m = max(0, int(seconds // 60))
+    return "%d min" % m if m < 60 else "%d h %d min" % (m // 60, m % 60)
 
 
 def short_words(words, job):
@@ -2824,8 +3005,9 @@ def board_lines(tree, recent=None, full=False):
             out.append((depth + 1, "%s %s" % (TODO_MARKS.get(t["status"], "o"), t["content"])))
 
     jobs = [j for repo in tree for j in repo["jobs"] if j["phase"] not in DONE_PHASES]
-    approvals = len([j for j in jobs if j.get("pending") in APPROVAL_KINDS])
-    questions = len([j for j in jobs if j.get("pending") in QUESTION_KINDS])
+    asks = [j for j in jobs if not j.get("auto_pending")]  # `job auto` answers the rest without the user
+    approvals = len([j for j in asks if j.get("pending") in APPROVAL_KINDS])
+    questions = len([j for j in asks if j.get("pending") in QUESTION_KINDS])
     out.append((0, u"To do for you: %d approval%s · %d question%s" % (
         approvals, "" if approvals == 1 else "s", questions, "" if questions == 1 else "s")))
     for repo in tree:
@@ -2842,9 +3024,15 @@ def board_lines(tree, recent=None, full=False):
             else:
                 out.append((1, u"%s  (%s)" % (said(job["words"], job["job"]), job["job"])))
             now = job.get("step") or job["phase"]
+            if job.get("since"):
+                now += u" · %s" % step_elapsed(time.time() - job["since"])
+            if job.get("auto"):
+                now += ", approves without asking"
             if job.get("held"):
                 now += ", on hold"
-            if job.get("pending") in WAITING_WORDS:
+            if job.get("pending") == "blocked" and job.get("oke_rule"):
+                now += ", blocked by an OKe rule"  # not a dialog: the orchestrator reports it
+            elif job.get("pending") in WAITING_WORDS and not job.get("auto_pending"):
                 now += ", waiting for %s" % WAITING_WORDS[job["pending"]]
             if job.get("peer_wait"):
                 now += ", waiting for PM %s" % ", ".join(job["peer_wait"])
@@ -2908,7 +3096,10 @@ def cmd_tick(args):
             out["memories"] = [m.replace("\\", "/") for m in memory_dirs(cwd)] if cwd else []
         if role in ("worker", "reviewer"):  # for the status line
             out["job"] = record.get("job")
-            out["seq"] = (read_header(os.path.join(out["folder"], "assignment.md")) or {}).get("seq")                 if out["folder"] else None
+            out["seq"] = (read_header(os.path.join(out["folder"], "assignment.md")) or {}).get("seq") \
+                if out["folder"] else None
+        if role == "worker":  # in the user's checkout only `oke job deliver` commits: the mod refuses git commit
+            out["in_place"] = in_place(state["jobs"].get(record.get("job")) or {})
         if role == "orchestrator":
             targets = [r for r in records(state) if r[0] == "pm"]
         elif role == "pm":
@@ -3170,7 +3361,8 @@ def status_locked(args, herdr_info):
     home = oke_home()
     result = {"herdr": {"inside": runtime().inside(), "missing": []},
               "state_recovered": bool(state.get("_recovered")),
-              "orchestrator_conflict": None, "pms": {}, "jobs": {}, "orphan_job_dirs": []}
+              "orchestrator_conflict": None, "pms": {}, "jobs": {}, "orphan_job_dirs": [], "kept_worktrees": []}
+    # every key above (and in each job below) is always there: empty, false or null when it has nothing
     jobs_dir = os.path.join(home, "jobs")
     if os.path.isdir(jobs_dir):
         result["orphan_job_dirs"] = sorted(d for d in os.listdir(jobs_dir) if d not in state["jobs"])
@@ -3224,8 +3416,12 @@ def status_locked(args, herdr_info):
                                 "size": job.get("size"), "direct": bool(job.get("direct")), "output": job_output(job),
                                 "held": job.get("held"), "base": job.get("base"),
                                 "split_from": job.get("split_from")}
-        if job.get("continues"):  # its branch starts at another job's branch: its own work is after that
-            result["jobs"][name].update(continues=job["continues"], review_base=review_base(name, job))
+        # `job triage`'s size from the user's words (the PM decides `size`), and the user's "do not ask again"
+        result["jobs"][name].update(size_hint=job.get("size_hint"), auto=bool(job.get("auto")))
+        # its branch starts at another job's branch: its own work is after that
+        result["jobs"][name].update(continues=job.get("continues"),
+                                    review_base=review_base(name, job) if job.get("continues") else None,
+                                    waiting_for=waits_for(state, name))
 
     here = runtime().whoami()
     recorded = state["orchestrator"].get("pane")
@@ -3246,14 +3442,14 @@ def status_locked(args, herdr_info):
         elif here and result["herdr"]["inside"]:
             state["orchestrator"]["pane"] = here
             state["orchestrator"].update(own_launch(here, agents))
+            if os.environ.get("CLAUDE_CODE_SESSION_ID"):  # the caller's own session, which herdr may not know yet
+                state["orchestrator"]["session"] = os.environ["CLAUDE_CODE_SESSION_ID"]
             if not any(a.get("pane_id") == here and a.get("name") == ORCH_NAME for a in agents):
                 state["orchestrator"].update(revives=0, gave_up=False, agent=None)
             changed = True
     if changed or state.get("_recovered"):
         save_state(state)
-    kept = kept_worktrees()
-    if kept:
-        result["kept_worktrees"] = kept
+    result["kept_worktrees"] = kept_worktrees() or []
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return code
 
@@ -3329,14 +3525,102 @@ def job_brief(job):
                "no test runs" % value if kind == "none" else
                "checked by: ? (the plan names no Check command)")
     lines = ["job: %s" % job, "path: %s" % (native_path(info["path"]) if info.get("path") else "path?"),
-             "plan: %s" % native_path(os.path.join(oke_home(), "jobs", job, "plan.md")), checked, ""]
+             "plan: %s" % native_path(os.path.join(oke_home(), "jobs", job, "plan.md")), checked]
+    if experiment(info) and not plan_worktree(job) and info.get("git_key"):
+        lines.append("result in your checkout: the run's edits stay uncommitted there after the job is done "
+                     "(nothing is committed)")
+    left = sorted(info.get("byproducts") or {})
+    if left:
+        lines.append("left by the check (not committed): " + ", ".join(left[:10]) +
+                     (" and %d more" % (len(left) - 10) if len(left) > 10 else ""))
+    lines.append("")
     for name in BRIEF_SECTIONS:
         text = plan_section(job, name)
         if not text or (name in ("Impact elsewhere", "Questions for the user")
                         and text.lower().startswith("none")):
             continue
-        lines += ["## " + name, text, ""]
+        lines += ["## " + name] + brief_lines(text) + [""]
     return "\n".join(lines).rstrip("\n")
+
+
+BRIEF_LINES = 40  # lines of one plan section the brief shows
+BRIEF_CHARS = 300  # characters of one line, and of one line's list of names
+
+
+def brief_lines(text):
+    """A plan section cut to what a person reads in a popup: at most BRIEF_LINES lines, each at
+    most BRIEF_CHARS characters (a long comma list says how many more it names)."""
+    out = []
+    lines = text.splitlines()
+    for line in lines[:BRIEF_LINES]:
+        if len(line) > BRIEF_CHARS:
+            names = line.split(",")
+            kept = ""
+            for n, part in enumerate(names):
+                if len(kept) + len(part) > BRIEF_CHARS:
+                    if not kept:  # one long name or sentence
+                        line = part[:BRIEF_CHARS] + " ..." + (" and %d more" % (len(names) - 1) if n + 1 < len(names) else "")
+                    else:
+                        line = kept + " ... and %d more" % (len(names) - n)
+                    break
+                kept += ("," if n else "") + part
+        out.append(line)
+    if len(lines) > BRIEF_LINES:
+        out.append("... %d more lines in plan.md" % (len(lines) - BRIEF_LINES))
+    return out
+
+
+def caller_is_orchestrator(state, save=True):
+    """Is the caller the orchestrator OKe recorded: its Claude Code session, or the runtime's place of
+    its record? A new session in the recorded pane (Claude Code restarted there, or /clear) is the
+    orchestrator again when no other OKe agent is there: its record takes the new session (saved
+    under the lock when `save`, else only in `state`, which the caller saves). Fails closed: an
+    unknown caller, or a runtime that does not answer, is not."""
+    orch = state.get("orchestrator") or {}
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if sid and (orch.get("session") == sid or orch.get("pane") == "session:" + sid):
+        return True
+    pane = runtime().whoami()
+    if not pane:
+        return False
+    try:
+        me, agents = whoami(state, pane)
+    except HerdrError:
+        return False
+    if me:
+        return me[0] == "orchestrator"
+    if pane.startswith("session:") or pane != orch.get("pane"):
+        return False
+    here = [a for a in agents if a.get("pane_id") == pane]
+    others = [r for r in records(state) if r[0] != "orchestrator"]
+    if sid and any(r[3].get("session") == sid or r[3].get("pane") == "session:" + sid for r in others):
+        return False
+    if here and (any(same_agent(r[3], here[0]) for r in others)
+                 or here[0].get("name") not in (None, ORCH_NAME, orch.get("agent"))):
+        return False  # another agent in a pane id that came back after a herdr restart
+    fresh = sid or (session_of(here[0]) if here else None)
+    if fresh and fresh != orch.get("session"):
+        state.setdefault("orchestrator", {})["session"] = fresh
+        if save:
+            with locked():
+                s = load_state()
+                if s["orchestrator"].get("pane") == pane:
+                    s["orchestrator"]["session"] = fresh
+                    save_state(s)
+    return True
+
+
+ORCHESTRATOR_ACTIONS = {
+    "phase": "only the orchestrator sets a job's phase: write your report (`type: done`) and the orchestrator "
+             "moves the job",
+    "auto": "only the orchestrator turns `job auto` on or off, when the user asks for it",
+    "files": "only the orchestrator records the user's answer about their files: report a question "
+             "(`asks: user_files`)",
+    "accept-check": "only the orchestrator accepts a failing check (the base could not run, or base_has_it), on "
+                    "the user's answer: report a question (`asks: check_accept`)",
+    "accept-head": "only the orchestrator accepts commits made in the checkout during the job, on the user's "
+                   "answer: report a question (`asks: head_moved`)",
+}
 
 
 def cmd_job(args):
@@ -3361,18 +3645,28 @@ def cmd_job(args):
         else:
             print(text)
         return 0
-    if args.action == "phase":
+    if args.action in ORCHESTRATOR_ACTIONS:
         # only the orchestrator moves a job: a PM's report does (seen live: a PM set its own job
-        # done and never reported it, so nobody archived it)
-        pane = runtime().whoami()
-        if pane:
-            try:
-                me = whoami(load_state(), pane)[0]
-            except HerdrError:
-                me = None
-            if me and me[0] != "orchestrator":
-                return fail("only the orchestrator sets a job's phase: write your report (`type: done`) "
-                            "and the orchestrator moves the job")
+        # done and never reported it, so nobody archived it). The others record the user's answer.
+        if not caller_is_orchestrator(load_state()):
+            return fail(ORCHESTRATOR_ACTIONS[args.action])
+    if args.action == "triage":
+        return cmd_triage(args.slug)
+    if args.action == "restore-user":
+        return restore_user(args.slug, args.file)
+    if args.action == "accept-check":
+        return accept_check(args.slug, args.target, args.by_user)
+    if args.action == "accept-head":
+        return accept_head(args.slug, args.by_user)
+    if args.action == "plan":  # the PM, after it wrote plan.md: is it short enough to show and check
+        path = os.path.join(oke_home(), "jobs", args.slug, "plan.md")
+        if not os.path.isfile(path):
+            return fail("job %s has no plan.md yet" % args.slug)
+        too = plan_too_big(args.slug)
+        if too:
+            return fail(too)
+        print(json.dumps({"job": args.slug, "ok": True, "bytes": os.path.getsize(path)}))
+        return 0
     if args.action == "deliver":  # git can take a while: not under the state lock
         return deliver_job(args.slug)
     if args.action == "pr":
@@ -3385,10 +3679,27 @@ def cmd_job(args):
             return fail("unknown job: %s" % args.slug)
         if no_path(args.slug, info):
             return fail(no_path(args.slug, info))
-        tree = pending_tree(native_path(repo_dir(info["git_key"])))
+        if info.get("direct"):
+            return fail("job %s changes a folder outside git: no tree" % args.slug)
+        cwd = work_dir(info)
+        tree, files = job_tree(args.slug, info, cwd)
         if not tree:
-            return fail("git could not read the main checkout of %s" % args.slug)
-        print(json.dumps({"job": args.slug, "tree": tree}))
+            return fail("git could not read the checkout of %s (%s)" % (args.slug, cwd))
+        if nested_block(files, cwd):
+            return fail(nested_block(files, cwd))
+        head = git_out(cwd, "rev-parse", "HEAD")[1]
+        # in place: from the checkout's HEAD when the job began, so a commit made meanwhile shows in the diff
+        point = base_point(info, cwd, args.slug) or head
+        out = {"job": args.slug, "tree": tree, "files": len(files["paths"]),
+               # nothing uncommitted: the review names the commit; else this tree
+               "commit": head if not files["paths"] and not in_place(info) else None,
+               "diff": "git diff %s %s" % (point, tree), "user_files": files["shared"],
+               "new_files": files["new"],  # untracked files the job made: the reviewer reads each whole
+               "check_left": files["check_left"]}  # left by the check (not committed)
+        moved = head_moved(args.slug, info)
+        if moved:
+            out.update(head_moved=moved["commits"], next=moved["next"])
+        print(json.dumps(out, ensure_ascii=False))
         return 0
     if args.action == "cancel":
         with locked():
@@ -3423,8 +3734,21 @@ def cmd_job(args):
         drop_job_mail(args.slug, key)
     if args.action == "clean":  # runtime and git, and only a finished job: no state lock
         return clean_job(args.slug, args.force)
-    with locked():
-        code = job_locked(args)
+    if args.action == "archive":
+        clean_base_leftovers(only=args.slug)  # a killed check's temporary base worktree
+    if args.action == "phase" and args.phase == "working":
+        # a job starting in place: the user's files are read (hashed, copied) before the lock
+        info = load_state()["jobs"].get(args.slug) or {}
+        if info.get("phase") == "awaiting_approval" and in_place(info) and not plan_worktree(args.slug) \
+                and not os.path.exists(snapshot_path(args.slug)):
+            args.snapshot = take_snapshot(args.slug, info)
+    try:
+        with locked():
+            code = job_locked(args)
+    finally:
+        taken = getattr(args, "snapshot", None)
+        if taken:
+            safe_rmtree(taken[1])  # not kept (the job waits, or the phase was refused): gone
     if code == 0 and getattr(args, "drop_worktree", None):
         # a job ended with no change: nothing in its worktree to keep (`job output --no-change` checked)
         dst, info_was = args.drop_worktree
@@ -3540,29 +3864,83 @@ def graded_block(job, review):
     return None
 
 
+GIT_TIMEOUT = 300  # seconds for one git command OKe runs itself (a commit with its hooks: COMMIT_TIMEOUT)
+COMMIT_TIMEOUT = 900
+GH_TIMEOUT = 120  # one `gh` call
+PUSH_TIMEOUT = 900
+TIMED_OUT = 124  # the exit code OKe gives a command it stopped at its time limit
+
+
+def run_timed(argv, timeout=GIT_TIMEOUT, input=None, **kw):
+    """subprocess.run with a time limit: a command still running then is killed with everything it
+    started and gets exit TIMED_OUT, with what it printed so far. Output goes through temporary
+    files, not pipes: a process the command left running that holds them cannot stall OKe."""
+    files = {}
+    for name in ("stdout", "stderr"):
+        if kw.get(name) == subprocess.PIPE:
+            files[name] = kw[name] = tempfile.TemporaryFile()
+    if input is not None:
+        files["stdin"] = kw["stdin"] = tempfile.TemporaryFile()
+        kw["stdin"].write(input)
+        kw["stdin"].seek(0)
+    if os.name != "nt":
+        kw.setdefault("start_new_session", True)  # its own process group: kill_tree stops it, not OKe
+    try:
+        p = subprocess.Popen(argv, **kw)
+        late = False
+        try:
+            code = p.wait(timeout)
+        except subprocess.TimeoutExpired:
+            kill_tree(p)
+            code, late = TIMED_OUT, True
+        out = {}
+        for name in ("stdout", "stderr"):
+            if name in files:
+                files[name].seek(0)
+                out[name] = files[name].read()
+        if late and "stdout" in out:
+            out["stdout"] += ("\n(OKe stopped it after %d s)" % timeout).encode("utf-8")
+        return subprocess.CompletedProcess(argv, code, out.get("stdout"), out.get("stderr"))
+    finally:
+        for f in files.values():
+            f.close()
+
+
+def call_timed(argv, timeout=GIT_TIMEOUT, **kw):
+    """subprocess.call with a time limit: TIMED_OUT when it ran over (it is killed)."""
+    try:
+        return subprocess.call(argv, timeout=timeout, **kw)
+    except subprocess.TimeoutExpired:
+        return TIMED_OUT
+
+
 def git_out(cwd, *args):
     """(exit code, stripped stdout) of one git command."""
-    p = subprocess.run(["git", "-C", cwd] + list(args), stdout=subprocess.PIPE,
-                       stderr=subprocess.DEVNULL)
+    p = run_timed(["git", "-C", cwd] + list(args), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     return p.returncode, p.stdout.decode("utf-8", "replace").strip()
 
 
 GATE_PHASES = ("intake", "planning", "awaiting_approval")  # before the job's work starts
 
 
-def quality_block(job, review_asg, target):
+def quality_block(job, review_asg, target, cwd=None):
     """Why the review or the check does not count for the current plan, or None. The review
     must name the current criteria_rev; OKe's last `oke check` row for the reviewed commit
-    (or tree:<sha>) must be a pass under it."""
+    (or tree:<sha>; a check of a commit's tree counts for the commit) must be a pass under it."""
     why = criteria_block(job, review_asg)
     if why:
         return why
     if check_spec(job)[0] == "none":
         return None  # no command to run: the review's grades are the check (graded_block)
     rev = criteria_rev(job)
-    rows = [r for r in ledger_rows(job) if r["check"] == "check" and r["commit"] == target]
+    same = set([target])
+    if cwd and not target.startswith("tree:"):
+        same.add("tree:" + git_out(cwd, "rev-parse", "-q", "--verify", target + "^{tree}")[1])
+    rows = [r for r in ledger_rows(job) if r["check"] == "check" and r["commit"] in same]
     if not rows or rows[-1]["result"] != "pass" or rows[-1]["detail"].split()[:1] != [rev]:
-        return "no passing `oke check` on %s with the current criteria: run `$OKE check %s`" % (target, job)
+        return ("no passing `oke check` on %s with the current criteria: run `$OKE check %s`. A failure it "
+                "says the user may accept is a question with `asks: check_accept` (only the user answers it)"
+                % (target, job))
     return None
 
 
@@ -3597,14 +3975,14 @@ def carried_tips(job, reviewed):
 
 def patch_id(cwd, start, tip):
     """`git patch-id --stable` of the diff start..tip ("" for no change), or None when git fails."""
-    diff = subprocess.run(["git", "-C", cwd, "-c", "core.quotepath=off", "diff", "--no-ext-diff",
-                           "--no-textconv", start, tip], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    diff = run_timed(["git", "-C", cwd, "-c", "core.quotepath=off", "diff", "--no-ext-diff",
+                      "--no-textconv", start, tip], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if diff.returncode != 0:
         return None
     if not diff.stdout.strip():
         return ""
-    p = subprocess.run(["git", "-C", cwd, "patch-id", "--stable"], input=diff.stdout,
-                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    p = run_timed(["git", "-C", cwd, "patch-id", "--stable"], input=diff.stdout,
+                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if p.returncode != 0:
         return None
     out = p.stdout.decode("utf-8", "replace").split()
@@ -3624,6 +4002,28 @@ def left_work(job):
 NOT_CODE = "the job has no branch to deliver (its output is not code): set phase done after its report"
 
 
+def deliver_result(job, info):
+    """`job deliver` of a result (output result, reviewed): it stays uncommitted where the job made
+    it. Delivery needs the run `$OKE check` recorded on the edit as it is now (under the current
+    criteria; its exit code is the reviewer's to grade); nothing is committed and the user's own
+    uncommitted files are not touched. Prints where the result is."""
+    cwd, target, files = check_dir(job, info)
+    if not target:
+        return fail("cannot read the tree of %s in %s" % (job, cwd))
+    rev = criteria_rev(job)
+    if not any(r["check"] == "check" and r["result"] in ("ran", "pass") and r["commit"] == target
+               and r["detail"].split()[:1] == [rev] for r in ledger_rows(job)):
+        return fail("job %s: no recorded run of its result as it is now: run `$OKE check %s`, then deliver"
+                    % (job, job))
+    print(json.dumps({"job": job, "result": "in_place", "path": cwd.replace("\\", "/"),
+                      "results": plan_files(job, "Results") or
+                      ((files or {}).get("paths") or []) + ((files or {}).get("check_left") or []),
+                      "committed": False,
+                      "next": "tell the user where the result is, then `$OKE job phase %s done`" % job},
+                     ensure_ascii=False))
+    return 0
+
+
 def deliver_job(job):
     """`job deliver`: hand the reviewed work over, never into the main branch. A worktree job's
     branch is brought onto the latest base branch inside its worktree and must pass the check
@@ -3635,7 +4035,7 @@ def deliver_job(job):
         return fail("unknown job: %s" % job)
     if info.get("held"):
         return fail("job %s is on hold: nothing is delivered until it is back" % job)
-    if not_code(info):
+    if not_code(info) and not experiment(info):
         return fail("job %s: %s" % (job, NOT_CODE))
     if no_path(job, info):
         return fail(no_path(job, info))
@@ -3653,7 +4053,9 @@ def deliver_job(job):
     if worker and worker[0] > review[0]:
         return fail("the worker reported after the last review (a rebase or a fix): give the reviewer "
                     "a new instruction to review it, then deliver")
-    main = native_path(repo_dir(info["git_key"]))
+    if not_code(info):
+        return deliver_result(job, info)
+    main = checkout_dir(info)
     # The review counts only for the commit its assignment named, and only once the
     # report answers that assignment: commits added after it were never reviewed.
     review_asg = read_header(os.path.join(os.path.dirname(review[1]), "assignment.md")) or {}
@@ -3662,26 +4064,39 @@ def deliver_job(job):
         return fail("the review report of %s does not answer its current assignment (seq %s): wait for "
                     "the reviewer" % (job, review_asg.get("seq")))
     branch = job_branch(job, info)
-    code, tip = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/%s^{commit}" % branch)
-    if code != 0 and review_asg.get("tree"):
-        # no worktree: the review covered the uncommitted changes in the main checkout
+    wt = (info.get("worktree") or {}).get("path")
+    if not wt and review_asg.get("tree"):
+        # in place: the review covered the job's uncommitted changes in its checkout
         why = quality_block(job, review_asg, "tree:" + review_asg["tree"])
         if why:
             return fail(why)
         with locked("deliver-" + job, timeout=120):
             return commit_direct(job, info, main, review[1], review_asg["tree"])
-    reviewed = review_asg.get("commit")
+    if wt and review_asg.get("tree") and os.path.isdir(native_path(wt)):
+        # its own worktree, reviewed as its commits plus what is left uncommitted: commit what is left
+        why = criteria_block(job, review_asg)
+        if why:
+            return fail(why)
+        with locked("deliver-" + job, timeout=120):
+            if commit_leftover(job, info, native_path(wt), review[1], review_asg["tree"]) is None:
+                return 1
+    code, tip = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/%s^{commit}" % branch)
     if code != 0:
         return fail("branch %s does not exist" % branch)
-    if not reviewed or not re.match(r"^[0-9a-f]{7,40}$", reviewed):
-        # a branch name would resolve to the moving tip and pass any check
-        return fail("the review assignment of %s names no commit sha in `commit:`: give the reviewer a new "
-                    "instruction with `commit: %s`, then deliver" % (job, tip))
-    code, reviewed_full = git_out(main, "rev-parse", "-q", "--verify", reviewed + "^{commit}")
+    if review_asg.get("tree"):
+        reviewed = reviewed_full = "tree:" + review_asg["tree"]
+    else:
+        reviewed = review_asg.get("commit")
+        if not reviewed or not re.match(r"^[0-9a-f]{7,40}$", reviewed):
+            # a branch name would resolve to the moving tip and pass any check
+            return fail("the review assignment of %s names no commit sha in `commit:`: give the reviewer a new "
+                        "instruction with `commit: %s`, then deliver" % (job, tip))
+        code, reviewed_full = git_out(main, "rev-parse", "-q", "--verify", reviewed + "^{commit}")
     if code != 0 or tip not in carried_tips(job, reviewed_full):
         return fail("%s is at %s but the review covered %s: give the reviewer a new instruction "
                     "with `commit: %s`, then deliver" % (branch, tip[:12], reviewed, tip))
-    why = quality_block(job, review_asg, tip) if tip == reviewed_full else criteria_block(job, review_asg)
+    why = quality_block(job, review_asg, tip, main) if tip == reviewed_full or reviewed.startswith("tree:") \
+        else criteria_block(job, review_asg)
     if why:
         return fail(why)
     base = info.get("base")
@@ -3707,7 +4122,7 @@ def deliver_job(job):
         already_in = git_out(main, "merge-base", "--is-ancestor", tip, base_head)[0] == 0
         if not already_in and git_out(main, "merge-base", "--is-ancestor", base_head, tip)[0] != 0:
             return rebase_onto(job, info, branch, tip, base, base_head, by)
-        why = quality_block(job, review_asg, tip)  # a rebased tip is checked again
+        why = quality_block(job, review_asg, tip, main)  # a rebased tip is checked again (its tree may be)
         if why:
             return fail(why)
         if left_work(job):
@@ -3760,12 +4175,12 @@ def rebase_onto(job, info, branch, tip, base, base_head, by):
         return fail("git cannot read the change of %s in %s" % (branch, cwd))
     if left_work(job):
         return 1
-    result = subprocess.run(["git", "-C", cwd, "rebase", "-q", base_head], stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT)
+    result = run_timed(["git", "-C", cwd, "rebase", "-q", base_head], COMMIT_TIMEOUT, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT)
     if result.returncode != 0:
         files = git_out(cwd, "diff", "--name-only", "--diff-filter=U")[1].split()
-        if subprocess.call(["git", "-C", cwd, "rebase", "--abort"], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL) != 0 and git_out(cwd, "rev-parse", "HEAD")[1] != tip:
+        if call_timed(["git", "-C", cwd, "rebase", "--abort"], stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL) != 0 and git_out(cwd, "rev-parse", "HEAD")[1] != tip:
             return fail("the rebase of %s onto %s stopped and `git rebase --abort` failed: %s is mid-rebase, "
                         "report a question" % (branch, base, cwd))
         if not files:
@@ -3811,7 +4226,7 @@ def deliver_block(job, info):
     words = row["detail"].split()
     if words and words[0].startswith("branch=") and info.get("git_key"):
         branch = words[0][len("branch="):]
-        code, tip = git_out(native_path(repo_dir(info["git_key"])), "rev-parse", "-q", "--verify",
+        code, tip = git_out(checkout_dir(info), "rev-parse", "-q", "--verify",
                             "refs/heads/%s^{commit}" % branch)
         if code == 0 and tip != row["commit"]:
             return ("job %s: %s moved to %s after its delivery at %s: `$OKE job deliver %s` again (with a new "
@@ -3834,7 +4249,7 @@ def set_base(job, branch):
         if deliver_state(job)[0] == "delivered":
             return fail("job %s is delivered onto %s already: its base branch stays" % (job, info.get("base")))
         name = branch[len("refs/heads/"):] if branch.startswith("refs/heads/") else branch
-        main = native_path(repo_dir(info["git_key"]))
+        main = checkout_dir(info)
         if name.startswith("oke/") or git_out(main, "rev-parse", "-q", "--verify", "refs/heads/" + name)[0] != 0:
             return fail("%s is no local branch of %s (and never an oke/ branch): name one `git branch` lists"
                         % (branch, main))
@@ -3863,6 +4278,11 @@ def job_record(job):
     return (kept, folder) if isinstance(kept, dict) and kept else (None, None)
 
 
+# hosts that are never GitHub: a self-hosted name may be GitHub Enterprise (gh decides, by its login)
+NOT_GITHUB = re.compile(r"(?:^|\.)(?:gitlab\.com|bitbucket\.org|codeberg\.org|dev\.azure\.com|"
+                        r"visualstudio\.com|sr\.ht)$", re.I)
+
+
 def pr_job(job):
     """`job pr`: push the delivered branch to origin and open a pull request onto its base."""
     info, folder = job_record(job)
@@ -3876,19 +4296,50 @@ def pr_job(job):
     if not row["detail"].split()[:1] or not row["detail"].split()[0].startswith("branch="):
         return fail("job %s was committed in the main checkout (no branch): nothing for a pull request" % job)
     branch, base = job_branch(job, info), info.get("base")
-    main = native_path(repo_dir(info["git_key"]))
+    main = checkout_dir(info)
     if git_out(main, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] != 0:
         return fail("branch %s is gone (merged or deleted)" % branch)
     code, origin = git_out(main, "remote", "get-url", "origin")
     if code != 0:
         return fail("%s has no remote `origin`: no pull request" % main)
-    if not GITHUB.search(origin):
-        return fail("remote `origin` of %s is not on GitHub (%s): no pull request; the user pushes %s "
-                    "themselves" % (main, origin, branch))
+    where = remote_repo(origin)
+    if not where:
+        return fail("cannot read host, owner and repository from remote `origin` of %s (%s): no pull request; "
+                    "the user pushes %s themselves" % (main, origin, branch))
+    host, owner, repo = where
     gh = gh_argv()
     if not gh:
         return fail("the GitHub CLI `gh` is not installed: install it (https://cli.github.com) and run "
-                    "`gh auth login`, or push %s and open the pull request yourself" % branch)
+                    "`gh auth login --hostname %s`, or push %s and open the pull request yourself" % (host, branch))
+    env = dict(os.environ, GH_HOST=host)  # GitHub Enterprise too: gh talks to the remote's host
+
+    def gh_run(argv):
+        try:
+            r = run_timed(gh + argv, GH_TIMEOUT, cwd=main, env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT)
+        except OSError as e:
+            return None, str(e)
+        return r.returncode, r.stdout.decode("utf-8", "replace")
+    code, text = gh_run(["auth", "status", "--hostname", host])
+    if code is None:
+        return fail("could not run gh: %s" % text)
+    if code != 0 and "." not in host:
+        # an SSH host alias (`git@work:owner/repo` with `Host work` in ~/.ssh/config): its real host name
+        real = ssh_hostname(host)
+        if not real or "." not in real:
+            return fail("can't tell the GitHub host for remote %s of %s: %s is no host gh knows. The user pushes %s "
+                        "and opens the pull request themselves" % (origin, main, host, branch))
+        host = real
+        env["GH_HOST"] = host
+        code, text = gh_run(["auth", "status", "--hostname", host])
+        if code is None:
+            return fail("could not run gh: %s" % text)
+    if code != 0 and NOT_GITHUB.search(host):
+        return fail("%s is not a GitHub host (origin of %s): `job pr` opens GitHub pull requests only; the user "
+                    "pushes %s and opens the request there" % (host, main, branch))
+    if code != 0:
+        return fail("gh is not logged in to %s: run `gh auth login --hostname %s`, then `$OKE job pr %s` again"
+                    % (host, host, job))
     # OKe owns oke/* branches: a later rebase moves them, and the open pull request follows
     ref = "refs/heads/" + branch
     target = git_out(main, "remote", "get-url", "--push", "origin")[1] or "origin"  # where the push goes
@@ -3896,24 +4347,19 @@ def pr_job(job):
     if code != 0:
         return fail("git cannot reach origin of %s: %s" % (main, remote))
     seen = remote.split()[0] if remote.split() else ""  # "" : the branch must not be there yet
-    push = subprocess.run(["git", "-C", main, "push", "-q", "--force-with-lease=%s:%s" % (ref, seen), "origin",
-                           "%s:%s" % (ref, ref)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    push = run_timed(["git", "-C", main, "push", "-q", "--force-with-lease=%s:%s" % (ref, seen), "origin",
+                      "%s:%s" % (ref, ref)], PUSH_TIMEOUT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if push.returncode != 0:
         return fail("git push of %s to origin failed: %s" % (branch, push.stdout.decode("utf-8", "replace").strip()))
-    def gh_run(argv):
-        try:
-            r = subprocess.run(gh + argv, cwd=main, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        except OSError as e:
-            return None, str(e)
-        return r.returncode, r.stdout.decode("utf-8", "replace")
-    code, text = gh_run(["pr", "list", "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url"])
+    slug = "%s/%s" % (owner, repo)
+    code, text = gh_run(["pr", "list", "--repo", slug, "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url"])
     if code is None:
         return fail("could not run gh: %s" % text)
     urls = re.findall(r"https?://\S+", text) if code == 0 else []
     if urls:  # the branch has its pull request already: the push updated it
         print(json.dumps({"job": job, "branch": branch, "base": base, "url": urls[-1], "existing": True}))
         return 0
-    code, text = gh_run(["pr", "create", "--base", base, "--head", branch, "--fill"])
+    code, text = gh_run(["pr", "create", "--repo", slug, "--base", base, "--head", branch, "--fill"])
     if code is None:
         return fail("could not run gh: %s" % text)
     urls = re.findall(r"https?://\S+", text)
@@ -3928,18 +4374,36 @@ def pr_job(job):
     return 0
 
 
-# a remote URL on GitHub: https://github.com/o/r(.git), git@github.com:o/r, ssh://git@github.com/o/r
-GITHUB = re.compile(r"(^|[@/])github\.com[:/]", re.I)
+def ssh_hostname(alias):
+    """The host name ssh connects to for `alias` (`ssh -G`, which reads ~/.ssh/config), or None."""
+    try:
+        r = run_timed(["ssh", "-G", alias], 15, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    if r.returncode != 0:
+        return None
+    for line in r.stdout.decode("utf-8", "replace").splitlines():
+        if line.lower().startswith("hostname "):
+            return line.split(None, 1)[1].strip().lower()
+    return None
+
+
+# a remote URL: https://host(:port)/owner/repo(.git), ssh://git@host(:port)/owner/repo, git@host:owner/repo
+REMOTE_URL = re.compile(r"^(?:(?:https?|ssh|git)://(?:[^@/]+@)?(?P<h1>[^/:]+)(?::\d+)?/"
+                        r"|(?:[^@/]+@)?(?P<h2>[^/:]+):)(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$")
+
+
+def remote_repo(url):
+    """(host, owner, repo) of a remote URL on any host (github.com or a GitHub Enterprise server), or None."""
+    m = REMOTE_URL.match(url.strip())
+    if not m:
+        return None
+    return (m.group("h1") or m.group("h2")).lower(), m.group("owner"), m.group("repo")
 
 
 # An untracked byproduct line of `git status --porcelain`: Python caches only.
-BYPRODUCT = re.compile(r"^\?\? (.*/)?(__pycache__/|\.pytest_cache/|[^/]*\.py[co])$")
-
-# Tracked changes always go in; a new file only when the PM staged it (`git add`): only
-# the PM can tell the job's new files from what its checks left (seen live: `add -A`
-# committed __pycache__).
-ADD = ["add", "-u"]
-
+# a cache folder, also each file in it (`git status -uall` lists files, not the folder)
+BYPRODUCT = re.compile(r"^\?\? (.*/)?(?:(?:__pycache__|\.pytest_cache)(?:/.*)?|[^/]*\.py[co])$")
 
 def byproduct(line):
     """An untracked line of `git status --porcelain` that is never the job's work: Python
@@ -3951,87 +4415,125 @@ def byproduct(line):
         path == p or path.startswith(p.rstrip("/") + "/") for p in load_config().get("merge_ignore_untracked") or [])
 
 
-def pending_tree(main):
-    """Tree sha of the main checkout as `oke job deliver` would commit it: what the PM
-    staged plus every tracked change. The real index is untouched. The review of a job without a worktree names this tree."""
-    idx = os.path.join(oke_home(), "tree-%d.index" % os.getpid())
-    env = dict(os.environ, GIT_INDEX_FILE=idx)
-    code, real = git_out(main, "rev-parse", "--git-path", "index")
-    if code != 0:
+def head_moved(job, info):
+    """In place: the commits made in the job's checkout since the job began that the user did not
+    accept yet, as {"result": "head_moved", "commits", "next"}, else None. A worker never commits in
+    place (the mod blocks it; a commit made another way, `bash -c` say, still shows here)."""
+    snap = read_json(snapshot_path(job), None) if in_place(info) else None
+    if not isinstance(snap, dict) or not snap.get("head"):
         return None
-    real = os.path.join(main, real)
-    try:
-        steps = [ADD, ["write-tree"]]
-        if os.path.exists(real):
-            shutil.copyfile(real, idx)  # what the PM staged
-        else:
-            steps.insert(0, ["read-tree", "HEAD"])
-        for argv in steps:
-            result = subprocess.run(["git", "-C", main] + argv, env=env,
-                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-            if result.returncode != 0:
-                return None
-        return result.stdout.decode().strip()
-    finally:
-        try:
-            os.remove(idx)
-        except OSError:
-            pass
+    main = checkout_dir(info)
+    head = git_out(main, "rev-parse", "HEAD")[1]
+    if not head or head == snap["head"]:
+        return None
+    commits = git_out(main, "log", "--format=%h %s", "-n", "20", "%s..HEAD" % snap["head"])[1].splitlines()
+    return {"result": "head_moved", "job": job, "head_then": snap["head"][:12], "commits": commits,
+            "next": "the checkout %s has %d commit(s) since job %s began (HEAD was %s): OKe does not know who "
+                    "made them. Report a question with `asks: head_moved` naming them: did the user make them? "
+                    "Options: yes, I made them (the orchestrator runs `$OKE job accept-head %s --by-user` and the "
+                    "job goes on) / no (the job stops and the commits stay as they are: OKe never resets "
+                    "commits). A worker never commits in place" % (main, len(commits), job, snap["head"][:12], job)}
 
 
 def commit_direct(job, info, main, review, reviewed):
-    """A job without a worktree: commit its reviewed, uncommitted changes in the main checkout
-    (the user chose to work there) and record that commit as its delivery. The check already
-    passed on that very tree; anything changed or added since the review is refused."""
+    """A job in place (the main checkout, or a linked worktree the user named): commit its reviewed
+    changes there, on the branch it is on, one commit per `## Commits` group, and record them as its
+    delivery. Only the job's own files: the user's other uncommitted files stay as they are. The
+    check already passed on that very tree; anything changed since the review is refused."""
     if git_out(main, "rev-parse", "-q", "--verify", "MERGE_HEAD")[0] == 0:
         return fail("a merge is in progress in %s: leave it to the user" % main)
     base = info.get("base")
     current = git_out(main, "symbolic-ref", "-q", "--short", "HEAD")[1]
     if not current or (base and current != base):
-        return fail("the main checkout is on %r, not on the job's base branch %r: ask the user"
-                    % (current or "a detached HEAD", base))
+        return fail("the checkout %s is on %r, not on the job's base branch %r: ask the user"
+                    % (main, current or "a detached HEAD", base))
     by = os.path.basename(os.path.dirname(review))
-    code, dirty = git_out(main, "status", "--porcelain", "-uno")  # untracked files are never committed
-    if code == 0 and not dirty and git_out(main, "rev-parse", "HEAD^{tree}")[1] == reviewed:
-        # the review passed on main as it is (the change was already there): delivered at HEAD
-        new = [l[3:] for l in git_out(main, "status", "--porcelain")[1].splitlines()
-               if l.startswith("?? ") and not byproduct(l)]
-        if new:  # the job's new files, unstaged, would never be committed
-            return fail("untracked files %s: if they are the job's, `git add` them, get a new tree "
-                        "review, then deliver" % ", ".join(new))
+    snap = read_json(snapshot_path(job), None)
+    if not isinstance(snap, dict) and not any(v == "include" for v in (info.get("user_files") or {}).values()):
+        return fail("job %s has no record of the user's uncommitted files from its start, so OKe cannot tell "
+                    "its files from the user's: report a question (`asks: user_files`) naming the changed files; "
+                    "the orchestrator records the user's answer with `$OKE job files %s include <file>...`, and "
+                    "only those are committed" % (job, job))
+    moved = head_moved(job, info)
+    if moved:
+        return fail(moved["next"])
+    tree, files = job_tree(job, info, main)
+    if not tree:
+        return fail("git could not read the changes of %s in %s" % (job, main))
+    if nested_block(files, main):
+        return fail(nested_block(files, main))
+    if files["shared"]:
+        # the job changed files that held the user's own uncommitted edits: committing them takes those too
+        print(json.dumps({"result": "user_files", "job": job, "files": files["shared"],
+                          "next": "report a question with `asks: user_files` (only the user answers it): for "
+                                  "each file, include the user's edits in the job's commit, or leave the file "
+                                  "out; the orchestrator records it (`$OKE job files %s include|leave <file>...`)"
+                                  % job}, ensure_ascii=False))
+        return 5
+    if tree != reviewed:
+        return fail("the changes in %s are not the ones the review covered (tree %s, reviewed %s): give "
+                    "the reviewer a new instruction with `tree: %s`, then deliver" % (main, tree, reviewed, tree))
+    pre = git_out(main, "rev-parse", "HEAD")[1]
+    if not files["paths"]:
+        if git_out(main, "rev-parse", "HEAD^{tree}")[1] != reviewed:
+            return fail("job %s has no branch oke/%s and no changes in %s to commit" % (job, job, main))
+        # the review passed on the checkout as it is (the change was already there): delivered at HEAD
         if left_work(job):
             return 1
-        pre = git_out(main, "rev-parse", "HEAD")[1]
         ledger_add(job, by, pre, "review", "pass", review.replace("\\", "/"))
         ledger_add(job, "oke", pre, "deliver", "ok", "main already-in")
         print(json.dumps({"result": "delivered", "job": job, "commit": pre, "direct": True, "main": main,
                           "already_in": True}, ensure_ascii=False))
         return 0
-    if code != 0 or not dirty:
-        return fail("job %s has no branch oke/%s and no changes in %s to commit" % (job, job, main))
-    tree = pending_tree(main)
-    if tree != reviewed:
-        return fail("the changes in %s are not the ones the review covered (tree %s, reviewed %s): give "
-                    "the reviewer a new instruction with `tree: %s`, then deliver" % (main, tree, reviewed, tree))
     if left_work(job):
         return 1
-    pre = git_out(main, "rev-parse", "HEAD")[1]
-    for argv in (ADD, ["commit", "-q", "-m", "oke: %s" % job]):
-        result = subprocess.run(["git", "-C", main] + argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        if result.returncode != 0:
-            subprocess.call(["git", "-C", main, "reset", "-q"])  # unstage; the files stay as they are
-            return fail("git %s failed: %s" % (argv[0], result.stdout.decode("utf-8", "replace").strip()))
-    if git_out(main, "rev-parse", "HEAD^{tree}")[1] != reviewed:  # changed between the check and the commit
-        subprocess.call(["git", "-C", main, "reset", "-q", "--soft", pre])
-        subprocess.call(["git", "-C", main, "reset", "-q"])
-        return fail("the changes in %s moved during the commit: run `$OKE job deliver %s` again" % (main, job))
-    made = git_out(main, "rev-parse", "HEAD")[1]
-    ledger_add(job, by, made, "review", "pass", review.replace("\\", "/"))
-    ledger_add(job, "oke", made, "deliver", "ok", "main pre=%s" % pre)
-    left = git_out(main, "ls-files", "--others", "--exclude-standard")[1].splitlines()
-    print(json.dumps({"result": "delivered", "job": job, "commit": made, "direct": True, "main": main,
-                      "left_untracked": [f for f in left if f]}, ensure_ascii=False))
+    made, why = commit_job(job, main, files["paths"], reviewed)
+    if why:
+        return fail(why)
+    if isinstance(snap, dict):  # OKe's own commits: a later round of the job starts from them
+        snap["head"] = made[-1]
+        write_json_atomic(snapshot_path(job), snap)
+    ledger_add(job, by, made[-1], "review", "pass", review.replace("\\", "/"))
+    ledger_add(job, "oke", made[-1], "deliver", "ok", "main pre=%s" % pre)
+    print(json.dumps({"result": "delivered", "job": job, "commit": made[-1], "commits": made, "direct": True,
+                      "main": main, "branch_in": current, "left": files["left"], "user_files_kept": files["user"]},
+                     ensure_ascii=False))
     return 0
+
+
+def commit_leftover(job, info, cwd, review, reviewed):
+    """A job in its own worktree whose review covered a tree: its commits plus what is left
+    uncommitted. Commit what is left (one commit per `## Commits` group) and return the new tip, which
+    the review counts for; the worker's commits stay as they are. None after printing why not."""
+    if git_out(cwd, "symbolic-ref", "-q", "--short", "HEAD")[1] != "oke/" + job:
+        fail("the worktree %s is not on oke/%s: report a question" % (cwd, job))
+        return None
+    tree, files = job_tree(job, info, cwd)
+    if not tree:
+        fail("git could not read the changes of %s in %s" % (job, cwd))
+        return None
+    if nested_block(files, cwd):
+        fail(nested_block(files, cwd))
+        return None
+    head = git_out(cwd, "rev-parse", "HEAD")[1]
+    if not files["paths"] and head in carried_tips(job, "tree:" + reviewed):
+        return head  # committed by an earlier delivery (and maybe rebased since)
+    if tree != reviewed:
+        fail("the work in %s is not the one the review covered (tree %s, reviewed %s): give the reviewer a "
+             "new instruction with `tree: %s`, then deliver" % (cwd, tree, reviewed, tree))
+        return None
+    if files["paths"]:
+        if left_work(job):
+            return None
+        made, why = commit_job(job, cwd, files["paths"], reviewed)
+        if why:
+            fail(why)
+            return None
+        head = made[-1]
+    if head not in carried_tips(job, "tree:" + reviewed):
+        ledger_add(job, os.path.basename(os.path.dirname(review)), head, "review", "pass",
+                   "carried from tree:%s (committed what was left)" % reviewed)
+    return head
 
 
 # ---------------------------------------------------------------- continue a finished job
@@ -4054,7 +4556,7 @@ def continue_start(job, info, other):
     if was.get("git_key") != info.get("git_key"):
         fail("job %s worked in another checkout than job %s" % (other, job))
         return None
-    main = native_path(repo_dir(info["git_key"]))
+    main = checkout_dir(info)
     mine = "refs/heads/oke/" + job
     has_mine = git_out(main, "rev-parse", "-q", "--verify", mine)[0] == 0
     if has_mine and info.get("continues") == other and info.get("start_commit"):
@@ -4078,7 +4580,7 @@ def review_base(job, info, tip=None):
     branch leaves its base branch. None for a job that continues nothing."""
     if not info.get("continues") or not info.get("git_key"):
         return None
-    main = native_path(repo_dir(info["git_key"]))
+    main = checkout_dir(info)
     tip = tip or git_out(main, "rev-parse", "-q", "--verify", "refs/heads/oke/%s^{commit}" % job)[1]
     start = info.get("start_commit")
     if not tip:
@@ -4348,6 +4850,15 @@ def ledger_rows(job, path=None):
 OKE_CHECKS = ("review", "deliver", "check")
 
 
+def check_detail(detail):
+    """A check row's detail as (its words before `log=`, the log path or None): the path is last and
+    may hold spaces."""
+    m = re.search(r"(?:^| )log=", detail or "")
+    if not m:
+        return (detail or "").split(), None
+    return detail[:m.start()].split(), detail[m.end():]
+
+
 def deliver_state(job, path=None):
     """(state, last delivery row): state is none or delivered. `path`: a ledger.tsv elsewhere
     (an archived job's)."""
@@ -4371,13 +4882,54 @@ def find_bash():
     return None
 
 
+def check_timeout():
+    """Seconds one run of the Check command may take (config `check_timeout`, minutes)."""
+    try:
+        minutes = float(load_config().get("check_timeout") or 30)
+    except (TypeError, ValueError):
+        minutes = 30.0
+    return max(1.0, minutes * 60)
+
+
+def kill_tree(p):
+    """Stop a process and everything it started."""
+    try:
+        if os.name == "nt":
+            call_timed(["taskkill", "/F", "/T", "/PID", str(p.pid)], 60, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+        else:
+            os.killpg(p.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        p.kill()
+    except OSError:
+        pass
+    try:
+        p.wait(60)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def run_check(command, cwd, log):
-    """Exit code of `command` in bash (else the platform shell), output to `log`. No time limit."""
+    """Exit code of `command` in bash (else the platform shell), output to `log`. A run longer than
+    check_timeout() is stopped, with everything it started: exit TIMED_OUT, and a last log line says so."""
     bash = find_bash()
     argv = [bash, "-c", command] if bash else command
+    limit = check_timeout()
+    extra = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
     with io.open(log, "wb") as f:
-        return subprocess.call(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=f,
-                               stderr=subprocess.STDOUT, shell=bash is None)
+        p = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=f, stderr=subprocess.STDOUT,
+                             shell=bash is None, **extra)
+        try:
+            return p.wait(limit)
+        except subprocess.TimeoutExpired:
+            kill_tree(p)
+            f.write(("\n" + CHECK_TIMED_OUT % (limit / 60) + "\n").encode("utf-8"))
+            return TIMED_OUT
+
+
+CHECK_TIMED_OUT = "OKe stopped the Check command after %g min (check_timeout)"
 
 
 # Failure signatures: a port of oh-my-claudecode's feedback baseline (signatureLines,
@@ -4486,31 +5038,30 @@ def signature_lines(output, cwd=None):
     return sorted(seen)
 
 
-def diff_baseline(before, now):
-    """(new failures, resolved signatures). No baseline counts as a passing one."""
-    before = before or {"exit": 0, "unrunnable": False, "signatures": []}
-    if now["unrunnable"] and not before.get("unrunnable"):
-        return ["<command became unrunnable>"], []
-    new = []
-    if before.get("exit") == 0 and now["exit"] != 0:
-        new.append("<exited with code %s>" % now["exit"])
-    old = set(before.get("signatures") or [])
-    new += [s for s in now["signatures"] if s not in old]
-    return new, sorted(old - set(now["signatures"]))
-
-
 def run_signatures(command, cwd, log):
     """Run the command (no time limit) and reduce its run to exit code and signatures."""
     code = run_check(command, cwd, log)
     unrunnable = code in (126, 127)
     if code == 0 or unrunnable:
         return {"exit": code, "unrunnable": unrunnable, "signatures": []}
+    if code == TIMED_OUT and log_ends_timed_out(log):
+        return {"exit": code, "unrunnable": False, "timed_out": True,
+                "signatures": ["<%s>" % CHECK_TIMED_OUT % (check_timeout() / 60)]}
     with io.open(log, encoding="utf-8", errors="replace") as f:
         return {"exit": code, "unrunnable": False, "signatures": signature_lines(f.read(), cwd)}
 
 
-BASELINE_HISTORY = 20
-BASELINE_VERSION = 2  # bump whenever signature_lines changes what a failure line reduces to
+def log_ends_timed_out(log):
+    try:
+        with io.open(log, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 200))
+            return b"(check_timeout)" in f.read()
+    except (IOError, OSError):
+        return False
+
+
+BASELINE_VERSION = 3  # bump whenever signature_lines changes what a failure line reduces to
 
 
 def plan_section(job, name):
@@ -4567,21 +5118,16 @@ def criteria_rev(job):
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def check_dir(info):
-    """(cwd, what is checked): the worktree and its HEAD, or the main checkout and
-    tree:<sha> of its pending changes (what a review of a job without a worktree names)."""
-    wt = (info.get("worktree") or {}).get("path")
-    if wt:
-        cwd = native_path(wt)
-        code, dirty = git_out(cwd, "status", "--porcelain", "-uno")
-        if code == 0 and dirty:  # uncommitted work: HEAD is not what ran
-            tree = pending_tree(cwd)
-            return cwd, "tree:" + tree if tree else None
+def check_dir(job, info):
+    """(cwd, what is checked, the job's files): its worktree and HEAD when nothing is left
+    uncommitted there, else tree:<sha> of HEAD with the job's own changes (what `job tree` prints
+    and a review of uncommitted work names)."""
+    cwd = work_dir(info)
+    tree, files = job_tree(job, info, cwd)
+    if not in_place(info) and files is not None and not files["paths"]:
         code, head = git_out(cwd, "rev-parse", "HEAD")
-        return cwd, head if code == 0 else None
-    main = native_path(repo_dir(info["git_key"]))
-    tree = pending_tree(main)
-    return main, "tree:" + tree if tree else None
+        return cwd, head if code == 0 else None, files
+    return cwd, "tree:" + tree if tree else None, files
 
 
 def no_check(job):
@@ -4603,8 +5149,8 @@ def quality_target(job):
     info = load_state()["jobs"].get(job)
     if not info:
         return fail("unknown job: %s" % job)
-    if not_code(info):
-        return fail("job %s has no code to deliver (its output is %s): no baseline or check"
+    if not_code(info) and not experiment(info):
+        return fail("job %s has no code to deliver (its output is %s): no check"
                     % (job, job_output(info)))
     if no_path(job, info):
         return fail(no_path(job, info))
@@ -4613,11 +5159,11 @@ def quality_target(job):
         fail(u"plan.md of %s names no Check command: its section's first line is the command in backticks, "
              u"or `none (<why>)`" % job)
         return 2
-    cwd, target = check_dir(info)
+    cwd, target, files = check_dir(job, info)
     if not target:
         fail("cannot read the commit or tree of %s in %s" % (job, cwd))
         return 2
-    return info, command, cwd, target
+    return info, command, cwd, target, files
 
 
 def untracked_work(cwd):
@@ -4625,13 +5171,16 @@ def untracked_work(cwd):
     return [l[3:] for l in out.splitlines() if l.startswith("?? ") and not byproduct(l)] if code == 0 else []
 
 
-def base_point(info, cwd):
+def base_point(info, cwd, job=None):
     """The commit the job's work starts from: in a worktree, where its branch leaves the
-    base branch (a job that continues another: its start_commit, where that job ended); without one,
-    the main checkout's HEAD."""
-    main = native_path(repo_dir(info["git_key"]))
+    base branch (a job that continues another: its start_commit, where that job ended); in place,
+    the checkout's HEAD when the job began (its snapshot), else its HEAD now."""
+    main = checkout_dir(info)
     code, head = git_out(main, "rev-parse", "HEAD")
     if not (info.get("worktree") or {}).get("path"):
+        began = (read_json(snapshot_path(job), None) or {}).get("head") if job else None
+        if began and git_out(main, "cat-file", "-e", began + "^{commit}")[0] == 0:
+            return began
         return head if code == 0 else None
     start = info.get("start_commit")
     if start and git_out(cwd, "merge-base", "--is-ancestor", start, "HEAD")[0] == 0:
@@ -4640,156 +5189,523 @@ def base_point(info, cwd):
     return point if code == 0 else None
 
 
-def untouched(info, cwd, point):
-    code, dirty = git_out(cwd, "status", "--porcelain", "-uno")
-    if code != 0 or dirty:
+def is_link(path):
+    """A symbolic link, or on Windows a junction: never followed when OKe removes a folder."""
+    try:
+        st = os.lstat(path)
+    except OSError:
         return False
-    if (info.get("worktree") or {}).get("path"):
-        return not untracked_work(cwd) and git_out(cwd, "rev-parse", "HEAD")[1] == point
-    return True
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & 0x400)
 
 
-def run_at(cwd, commit, where, run):
-    """run(where) in a temporary detached checkout of `commit`, removed afterwards; None
-    when git cannot make it."""
-    def drop():
-        subprocess.call(["git", "-C", cwd, "worktree", "remove", "--force", where],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        shutil.rmtree(where, ignore_errors=True)
-        subprocess.call(["git", "-C", cwd, "worktree", "prune"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    drop()  # a run that died left it behind
-    if subprocess.call(["git", "-C", cwd, "worktree", "add", "-q", "--detach", where, commit],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+def drop_link(path):
+    """Remove a link itself, never what it points to."""
+    try:
+        os.rmdir(path)  # a junction or a folder link on Windows: rmdir removes only the link
+    except OSError:
+        os.unlink(path)
+
+
+def safe_rmtree(top):
+    """shutil.rmtree that never goes through a link or junction: a link inside is removed as a link."""
+    if is_link(top):
+        try:
+            drop_link(top)
+        except OSError:
+            pass
+        return
+    if not os.path.isdir(top):
+        return
+    for name in os.listdir(top):
+        path = os.path.join(top, name)
+        try:
+            if is_link(path):
+                drop_link(path)
+            elif os.path.isdir(path):
+                safe_rmtree(path)
+            else:
+                try:
+                    os.remove(path)
+                except OSError:
+                    os.chmod(path, 0o666)  # git's objects are read-only on Windows
+                    os.remove(path)
+        except OSError:
+            pass
+    try:
+        os.rmdir(top)
+    except OSError:
+        pass
+
+
+def base_dir(job):
+    return os.path.join(oke_home(), "tmp", "base-" + job)
+
+
+def worktree_admins(repo):
+    """git's record folders of a repository's linked worktrees (<common dir>/worktrees/*)."""
+    code, common = git_out(repo, "rev-parse", "--git-common-dir")
+    if code != 0:
+        return []
+    common = native_path(common)
+    if not os.path.isabs(common):
+        common = os.path.join(repo, common)
+    return glob.glob(os.path.join(common, "worktrees", "*"))
+
+
+def forget_worktree(where, admins):
+    """Remove git's record of the worktree at `where` once its folder is gone: only that one (never
+    `git worktree prune`, which would forget the user's other worktrees on a drive not mounted now)."""
+    if os.path.isdir(where):
+        return
+    mine = normalize_path(os.path.join(where, ".git"))
+    for admin in admins:
+        admin = native_path(admin)
+        if os.path.basename(os.path.dirname(os.path.normpath(admin))) != "worktrees":
+            continue
+        try:
+            with io.open(os.path.join(admin, "gitdir"), encoding="utf-8") as f:
+                back = f.read().strip()
+        except (IOError, OSError):
+            continue
+        if normalize_path(native_path(back)) == mine:
+            safe_rmtree(admin)
+
+
+def drop_base(where, repo=None):
+    """Remove a temporary base worktree OKe made: its links first (never their targets), the folder,
+    and git's record of it (only this one)."""
+    admins = []
+    try:
+        with io.open(os.path.join(where, ".git"), encoding="utf-8") as f:
+            line = f.read().strip()
+        if line.startswith("gitdir:"):
+            admins.append(line[len("gitdir:"):].strip())
+    except (IOError, OSError):
+        pass
+    if repo:
+        admins += worktree_admins(repo)
+    safe_rmtree(where)
+    forget_worktree(where, admins)
+
+
+def clean_base_leftovers(holding=None, only=None):
+    """Remove temporary base worktrees a killed run left behind (`holding`: the job whose check lock
+    this process holds). A check running now keeps its own."""
+    for where in glob.glob(os.path.join(oke_home(), "tmp", "base-*")):
+        if not os.path.isdir(where):
+            continue
+        job = os.path.basename(where)[len("base-"):]
+        if only and job != only:
+            continue
+        if job == holding:
+            drop_base(where)
+        elif try_lock("check-" + job):
+            try:
+                drop_base(where)
+            finally:
+                unlock("check-" + job)
+
+
+BASE_COPY_FILE = 1000 * 1000  # a top-level ignored file copied into the base run's worktree: at most 1 MB
+BASE_COPY_TOTAL = 20 * 1000 * 1000  # and at most 20 MB in all
+
+
+def cmd_quoted(path):
+    """`path` as one cmd.exe argument: quoted, so `&`, `|`, `<`, `>`, `(`, `)`, `^` and spaces are text,
+    and each `%` outside the quotes as `^%`, so no variable expands."""
+    return '"' + path.replace('%', '"^%"') + '"'
+
+
+def make_junction(target, link):
+    """A Windows junction `link` to the folder `target`, without a shell where Python can (no cmd.exe
+    parses the paths). True when made."""
+    try:
+        import _winapi
+        create = getattr(_winapi, "CreateJunction", None)
+    except ImportError:
+        create = None
+    if create:
+        try:
+            create(target, link)
+            return True
+        except OSError:
+            return False
+    return call_timed("cmd /d /c mklink /J %s %s" % (cmd_quoted(link), cmd_quoted(target)), 60,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+
+
+def link_ignored(cwd, where):
+    """Prepare the temporary base worktree like the checkout: link the top-level ignored dependency
+    folders config `base_links` names (node_modules, .venv, venv), so the Check command finds what the
+    user installed, and copy small top-level ignored files (.env, local.settings.json). Never an
+    output or cache folder: a run there would write into the user's. The links made."""
+    try:
+        p = run_timed(["git", "-C", cwd, "-c", "core.quotepath=off", "ls-files", "--others", "--ignored",
+                       "--exclude-standard", "--directory", "-z"],
+                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return []
+    wanted = set(n.strip("/") for n in load_config().get("base_links") or [] if isinstance(n, str))
+    links, total = [], 0
+    for entry in p.stdout.decode("utf-8", "replace").split("\0"):
+        name = entry.rstrip("/")
+        if not name or "/" in name or name == ".git":
+            continue
+        target, link = os.path.normpath(os.path.join(cwd, name)), os.path.normpath(os.path.join(where, name))
+        if os.path.lexists(link):
+            continue
+        if not entry.endswith("/"):
+            try:
+                size = os.path.getsize(target)
+                if os.path.isfile(target) and not is_link(target) and size <= BASE_COPY_FILE and total + size <= BASE_COPY_TOTAL:
+                    shutil.copyfile(target, link)
+                    total += size
+            except (IOError, OSError):
+                pass
+            continue
+        if name not in wanted or not os.path.isdir(target):
+            continue
+        try:
+            if os.name == "nt":
+                if not make_junction(target, link):
+                    continue
+            else:
+                os.symlink(target, link, target_is_directory=True)
+            links.append(name)
+        except OSError:
+            pass
+    return links
+
+
+def overlay_user_files(job, info, where):
+    """Put the user's uncommitted files from the job's start into the temporary base worktree: the
+    base is the checkout as the job found it. Files OKe kept no copy of are taken as they are now
+    when they did not change."""
+    snap = read_json(snapshot_path(job), None)
+    if not in_place(info) or not isinstance(snap, dict):
+        return
+    cwd, copied = checkout_dir(info), set(snap.get("copied") or [])
+    for rel, mark in (snap.get("files") or {}).items():
+        dst = os.path.join(where, *rel.split("/"))
+        parts = rel.split("/")[:-1]
+        if ".." in parts or any(is_link(os.path.join(where, *parts[:n])) for n in range(1, len(parts) + 1)):
+            continue  # a committed link on the way: writing through it would reach outside the worktree
+        try:
+            if mark == "-":
+                if os.path.isfile(dst) and not is_link(dst):
+                    os.remove(dst)
+                continue
+            if rel in copied:
+                src = os.path.join(oke_home(), "jobs", job, DIRTY_COPIES, *rel.split("/"))
+            elif not mark.startswith(("dir:", "link:")) and file_mark(cwd, rel) == mark:
+                src = os.path.join(cwd, *rel.split("/"))
+            else:
+                continue
+            if is_link(dst) or os.path.isdir(dst):
+                continue
+            if not os.path.isdir(os.path.dirname(dst)):
+                os.makedirs(os.path.dirname(dst))
+            shutil.copyfile(src, dst)
+        except (IOError, OSError):
+            pass
+
+
+def run_at(cwd, commit, where, run, prepare=None):
+    """run(where) in a temporary detached checkout of `commit`, removed afterwards (links first, never
+    through them); None when git cannot make it. `prepare(where)` runs before."""
+    drop_base(where, cwd)  # a run that died left it behind
+    if call_timed(["git", "-C", cwd, "worktree", "add", "-q", "-f", "--detach", where, commit], COMMIT_TIMEOUT,
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+        drop_base(where, cwd)
         return None
     try:
+        if prepare:
+            prepare(where)
         return run(where)
     finally:
-        drop()
+        drop_base(where, cwd)
 
 
-def read_baseline(job, any_version=False):
-    """The job's baseline; None without one, or (unless any_version) recorded by another version."""
+def base_run(job, info, cwd, command):
+    """The Check command's run on the commit the job started from, in a temporary detached worktree
+    under OKe's home (removed afterwards), with the user's uncommitted files from the job's start and
+    links to the checkout's ignored folders (installed packages): {"exit", "unrunnable", "signatures",
+    ...}, or a string saying why it could not run. Run once per commit and command (baseline.json)."""
+    point = base_point(info, cwd, job)
+    if not point:
+        return "cannot find the commit job %s started from" % job
+    job_dir = os.path.join(oke_home(), "jobs", job)
+    path = os.path.join(job_dir, "baseline.json")
+    kept = read_json(path, None)
+    if isinstance(kept, dict) and kept.get("version") == BASELINE_VERSION and kept.get("commit") == point \
+            and kept.get("command") == command:
+        return kept
+    log = os.path.join(job_dir, "baseline.log")
+    where = base_dir(job)
+    if not os.path.isdir(os.path.dirname(where)):
+        os.makedirs(os.path.dirname(where))
+
+    def prepare(w):
+        overlay_user_files(job, info, w)
+        link_ignored(cwd, w)
+    now = run_at(cwd, point, where, lambda w: run_signatures(command, w, log), prepare)
+    if now is None:
+        return "git could not check out %s in a temporary worktree" % point[:12]
+    if now["unrunnable"]:
+        return "the Check command could not run there (exit %d, see %s)" % (now["exit"], log.replace("\\", "/"))
+    if now.get("timed_out"):
+        return "the Check command ran over its time limit there (%g min, `check_timeout`)" % (check_timeout() / 60)
+    base = dict(now, version=BASELINE_VERSION, commit=point, command=command,
+                recorded_at=time.strftime("%Y-%m-%dT%H:%M:%S"))
+    write_json_atomic(path, base)
+    return base
+
+
+def names_file(line, paths):
+    """Does a failure line name one of the files (relative path or file name)?"""
+    for p in paths:
+        for form in set([p, p.replace("/", "\\"), p.rsplit("/", 1)[-1]]):
+            if form and re.search(r"(?<![\w.-])%s(?![\w-])" % re.escape(form), line):
+                return True
+    return False
+
+
+def changed_files(info, cwd, files, job):
+    """The files a job changed so far: its uncommitted ones, and in its own worktree its commits'."""
+    paths = list(files["paths"]) if files else []
+    if not in_place(info):
+        point = base_point(info, cwd, job)
+        if point:
+            paths += [p for p in git_out(cwd, "-c", "core.quotepath=off", "diff", "--name-only", point,
+                                         "HEAD")[1].splitlines() if p and p not in paths]
+    return paths
+
+
+PLAN_MAX_BYTES = 20000
+PLAN_MAX_LINE = 2000
+
+
+def plan_too_big(job):
+    """Why plan.md is too big to show or check (over 20 KB, or a line over 2,000 characters), or None."""
+    path = os.path.join(oke_home(), "jobs", job, "plan.md")
     try:
-        with io.open(os.path.join(oke_home(), "jobs", job, "baseline.json"), encoding="utf-8") as f:
-            base = json.load(f)
-    except (IOError, OSError, ValueError):
+        size = os.path.getsize(path)
+        with io.open(path, encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+    except (IOError, OSError):
         return None
-    return base if any_version or base.get("version") == BASELINE_VERSION else None
-
-
-
+    hint = "Shorten it: name folders or patterns instead of listing every file"
+    if size > PLAN_MAX_BYTES:
+        return "plan.md of %s is %d KB; a plan is at most %d KB. %s" % (job, size // 1000, PLAN_MAX_BYTES // 1000, hint)
+    for n, line in enumerate(lines, 1):
+        if len(line) > PLAN_MAX_LINE:
+            return ("line %d of plan.md of %s has %d characters; a line is at most %d. %s"
+                    % (n, job, len(line), PLAN_MAX_LINE, hint))
+    return None
 
 
 def cmd_baseline(args):
-    if no_check(args.job) is not None:
+    """Kept for older skills: there is nothing to record before the work."""
+    if no_check(args.job) is not None:  # a plan with no command: `"result": "none"`, as `oke check` says
         return 0
-    found = quality_target(args.job)
-    if isinstance(found, int):
-        return found
-    info, command, cwd, target = found
-    job_dir = os.path.join(oke_home(), "jobs", args.job)
-    point = base_point(info, cwd)
-    if not point:
-        fail("cannot find the commit job %s started from in %s" % (args.job, cwd))
-        return 2
-    lock = "check-" + args.job
-    while not try_lock(lock):
-        time.sleep(5)
-    try:
-        log = os.path.join(job_dir, "baseline.log")
-        if untouched(info, cwd, point):
-            now = run_signatures(command, cwd, log)
-        else:
-            # the work has begun: run on the code it started from, so a re-run never
-            # takes the job's own failures for old ones
-            now = run_at(cwd, point, os.path.join(job_dir, "baseline-checkout"),
-                         lambda where: run_signatures(command, where, log))
-            if now is None:
-                fail("cannot check out %s for the baseline of %s" % (point[:12], args.job))
-                return 2
-        if now["unrunnable"]:  # the previous baseline stays
-            fail(u"the Check command could not run (exit %d, see %s): fix the command in plan.md, then "
-                 u"`$OKE baseline %s` again" % (now["exit"], log.replace("\\", "/"), args.job))
-            return 2
-        target = point
-        path = os.path.join(job_dir, "baseline.json")
-        old = read_baseline(args.job)
-        if read_baseline(args.job, any_version=True) is not None:
-            history = os.path.join(job_dir, "baseline.history")
-            if not os.path.isdir(history):
-                os.makedirs(history)
-            stamp = time.strftime("%Y%m%dT%H%M%S")
-            name, n = stamp + ".json", 1
-            while os.path.exists(os.path.join(history, name)):  # same second: "_" sorts after "."
-                name, n = "%s_%03d.json" % (stamp, n), n + 1
-            os.rename(path, os.path.join(history, name))
-            for stale in sorted(os.listdir(history))[:-BASELINE_HISTORY]:
-                os.remove(os.path.join(history, stale))
-        base = dict(now, version=BASELINE_VERSION, recorded_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
-                    criteria_rev=criteria_rev(args.job), commit=target)
-        write_json_atomic(path, base)
-    finally:
-        unlock(lock)
-    before = set((old or {}).get("signatures") or [])
-    print(json.dumps({"result": "recorded", "exit": now["exit"], "signatures": len(now["signatures"]),
-                      "added": len(set(now["signatures"]) - before),
-                      "removed": len(before - set(now["signatures"])),
-                      "log": log.replace("\\", "/")}))
+    print(json.dumps({"result": "not_needed", "note": "no baseline step: when `oke check` fails, OKe runs the "
+                      "Check command on the job's base itself"}))
     return 0
 
 
+def dirty_marks(cwd, marks, untracked=None):
+    """{path: mark} of every changed or untracked file in a checkout (caches and nested
+    repositories left out), or None when git fails. `untracked`: a set that gets the untracked ones."""
+    entries = dirty_paths(cwd)
+    if entries is None:
+        return None
+    out = {}
+    for xy, rel in entries:
+        full = os.path.join(cwd, *rel.split("/"))
+        if xy == "??" and (byproduct("?? " + rel) or (os.path.isdir(full) and not os.path.islink(full))):
+            continue
+        out[rel] = marks.mark(cwd, rel)
+        if xy == "??" and untracked is not None:
+            untracked.add(rel)
+    return out
+
+
+def record_byproducts(job, left):
+    """Untracked files the Check command's run made: never the job's change (they stay uncommitted)."""
+    with locked():
+        state = load_state()
+        info = state["jobs"].get(job)
+        if info is None:
+            return None
+        info.setdefault("byproducts", {}).update(left)
+        save_state(state)
+        return info
+
+
+BASE_UNRUNNABLE = "base=unrunnable"  # a check row's detail word: the base run could not run
+BASE_HAS_IT = "base_has_it"  # a check row's detail count: new failures the base has too (naming changed files)
+
+
 def cmd_check(args):
-    """Run the Check command where the job's work is and judge it against the baseline:
-    0 no new failure, 1 new failures, 2 cannot judge. Written to the ledger by OKe."""
+    """Run the Check command where the job's work is. A pass is a pass. A failure is compared with
+    a run on the job's base commit (OKe makes it itself): failure lines the base has too are
+    pre-existing, unless they name a file the job changed. Untracked files the run makes are its
+    byproducts: never the job's change (a tracked file it changes is). What is checked (a commit or tree:<sha>) is read after the run.
+    A result (output result) is only recorded: the reviewer grades it. 0 no new failure, 1 new
+    failures, 2 cannot judge. Written to the ledger by OKe."""
     if no_check(args.job) is not None:
         return 0
     found = quality_target(args.job)
     if isinstance(found, int):
         return found
-    info, command, cwd, target = found
-    loose = untracked_work(cwd) if (info.get("worktree") or {}).get("path") else []
-    if loose:
-        fail("untracked files in %s: %s. `git add` the ones that are part of the work (the branch "
-             "carries only tracked files), delete the rest, then check again" % (cwd, ", ".join(loose)))
+    info, command, cwd, target, files = found
+    too = plan_too_big(args.job)
+    if too:
+        fail(too)
+        return 2
+    if nested_block(files, cwd):
+        fail(nested_block(files, cwd))
+        return 2
+    moved = head_moved(args.job, info)
+    if moved:
+        print(json.dumps(moved, ensure_ascii=False))
         return 2
     rev = criteria_rev(args.job)
-    base = read_baseline(args.job)
-    if base is None:
-        if read_baseline(args.job, any_version=True) is not None:
-            fail("the baseline of %s was recorded by an older OKe, which read failures differently: run "
-                 "`$OKE baseline %s` again" % (args.job, args.job))
-        else:
-            fail("job %s has no baseline: run `$OKE baseline %s` before the work starts" % (args.job, args.job))
-        return 2
-    if base.get("criteria_rev") != rev:
-        fail(u"the Check command or the criteria of %s changed since the baseline: run `$OKE baseline %s` again"
-             % (args.job, args.job))
-        return 2
+    why = None
     lock = "check-" + args.job
     while not try_lock(lock):
         time.sleep(5)
     try:
+        clean_base_leftovers(holding=args.job)
         n = len([r for r in ledger_rows(args.job) if r["check"] == "check"]) + 1
         log = os.path.join(oke_home(), "jobs", args.job, "check-%d.log" % n)
+        marks = Marks(args.job)
+        before = dirty_marks(cwd, marks) or {}
+        mine = set(files["paths"]) if files else set()
         now = run_signatures(command, cwd, log)
-        new, resolved = diff_baseline(base, now)
+        untracked, kept = set(), info.get("byproducts") or {}
+        after = dirty_marks(cwd, marks, untracked) or {}
+        # only untracked files the run made (or a byproduct an earlier run made): a tracked file the run
+        # changed is the job's change like any other
+        left = dict((r, m) for r, m in after.items() if r in untracked and r not in mine and before.get(r) != m
+                    and (r not in before or r in kept))
+        marks.save()
+        if left:
+            info = record_byproducts(args.job, left) or info
+        cwd, target, files = check_dir(args.job, info)
         log = log.replace("\\", "/")
+        if not target:
+            fail("cannot read the commit or tree of %s in %s" % (args.job, cwd))
+            return 2
         if now["unrunnable"]:
             fail(u"the Check command could not run (exit %d, see %s)" % (now["exit"], log))
             return 2
-        result = "fail" if new else "pass"
-        ledger_add(args.job, "oke", target, "check", result,
-                   "%s new=%d resolved=%d log=%s" % (rev, len(new), len(resolved), log))
+        new, old, base_failed, has = [], [], False, []
+        if experiment(info):
+            # a result: the run is the experiment. Recorded once, never compared with the base (that would
+            # run the experiment again); the reviewer grades its outputs against the criteria
+            result = "ran"
+            ledger_add(args.job, "oke", target, "check", result,
+                       "%s exit=%d log=%s" % (rev, now["exit"], log))
+        else:
+            if now.get("timed_out"):
+                new = list(now["signatures"])  # never also on the base: that would wait as long again
+            elif now["exit"] != 0:
+                base = base_run(args.job, info, cwd, command)
+                if isinstance(base, str):
+                    why = "could not check the base: " + base
+                    new = ["<%s>" % why]
+                    base_failed = True
+                elif base["exit"] == 0:
+                    new = ["<exited with code %s>" % now["exit"]] + now["signatures"]
+                else:
+                    known, changed = set(base["signatures"]), changed_files(info, cwd, files, args.job)
+                    users = [r for r in ((read_json(snapshot_path(args.job), None) or {}).get("files") or {})
+                             if r not in changed] if in_place(info) else []
+                    for s in now["signatures"]:
+                        pre = (s in known or names_file(s, users)) and not names_file(s, changed)
+                        (old if pre else new).append(s)
+                    # the base fails the same way, but the line names a file the job changed
+                    has = [s for s in new if s in known]
+            result = "fail" if new else "pass"
+            ledger_add(args.job, "oke", target, "check", result,
+                       "%s new=%d pre_existing=%d%s%s log=%s" % (
+                           rev, len(new), len(old), " " + BASE_UNRUNNABLE if base_failed else "",
+                           " %s=%d" % (BASE_HAS_IT, len(has)) if has else "", log))
     finally:
         unlock(lock)
-    print(json.dumps({"result": result, "criteria_rev": rev, "commit": target, "new": new,
-                      "resolved": len(resolved), "baseline_failures": len(base.get("signatures") or []),
-                      "log": log}, ensure_ascii=False))
+    out = {"result": result, "criteria_rev": rev, "commit": target, "new": new, "pre_existing": old, "log": log}
+    if result == "ran":
+        out.update(exit=now["exit"], note="the run is recorded; the reviewer grades its outputs")
+    if now.get("timed_out"):
+        out["timed_out"] = True  # stopped at check_timeout: a hang the job may cause, or a check that needs longer
+    if files and files["shared"]:
+        out["user_files"] = files["shared"]  # the user's uncommitted files the job changed too: ask before delivery
+    if files and files["check_left"]:
+        out["check_left"] = files["check_left"]  # untracked, made by the run: left uncommitted
+    ask = ("report a question with `asks: check_accept` (only the user answers it): accept this failing "
+           "check for this job? On yes the orchestrator runs `$OKE job accept-check %s %s --by-user`"
+           % (args.job, target))
+    if base_failed:
+        out["base_unrunnable"] = True
+        out["next"] = ("the Check command fails and OKe could not run it on the job's base to compare. Fix it "
+                       "if the job caused it; else " + ask)
+    elif has:
+        out["base_has_it"] = has
+        if len(has) == len(new):
+            out["next"] = ("every new failure is on the job's base too, but names a file the job changed. Fix "
+                           "it if the job caused it; else " + ask)
+    print(json.dumps(out, ensure_ascii=False))
+    if why:
+        sys.stderr.write(why + "\n")
     return 1 if new else 0
 
 
+NOT_AUTO = ("job %s is on `job auto`, which never answers this: ask the user (`asks: %s`), and after the "
+            "user's yes run it again with --by-user")
 
+
+def accept_check(job, target, by_user=False):
+    """The user accepts a failing check for this job and this commit or tree: OKe records it as the
+    check's pass. Only after a failure whose base could not run, or whose new failures the base has
+    too (they name files the job changed), under the current criteria."""
+    info = load_state()["jobs"].get(job)
+    if not info:
+        return fail("unknown job: %s" % job)
+    if info.get("auto") and not by_user:
+        return fail(NOT_AUTO % (job, "check_accept"))
+    rev = criteria_rev(job)
+    rows = [r for r in ledger_rows(job) if r["check"] == "check" and r["commit"] == target]
+    last = rows[-1] if rows else None
+    words, log = check_detail(last["detail"]) if last else ([], None)
+    count = dict(w.split("=", 1) for w in words if "=" in w)
+    on_base = count.get(BASE_HAS_IT) is not None and count.get(BASE_HAS_IT) == count.get("new")
+    if not last or last["result"] != "fail" or not (BASE_UNRUNNABLE in words or on_base) or words[:1] != [rev]:
+        return fail("job %s has no failing `oke check` on %s whose base could not run, or whose new failures "
+                    "the base has too (under the current criteria): only such a check is accepted" % (job, target))
+    ledger_add(job, "user", target, "check", "pass", "%s accepted_by_user new=0 pre_existing=0 log=%s" % (rev, log or "-"))
+    print(json.dumps({"job": job, "commit": target, "result": "pass", "accepted_by_user": True}))
+    return 0
+
+
+def accept_head(job, by_user=False):
+    """The user made the commits in the job's checkout since the job began: the job's changes count
+    from the checkout's HEAD now."""
+    with locked():
+        state = load_state()
+        info = state["jobs"].get(job)
+        if not info:
+            return fail("unknown job: %s" % job)
+        if info.get("auto") and not by_user:
+            return fail(NOT_AUTO % (job, "head_moved"))
+        snap = read_json(snapshot_path(job), None)
+        if not in_place(info) or not isinstance(snap, dict):
+            return fail("job %s does not work in place with a record of its start: nothing to accept" % job)
+        head = git_out(checkout_dir(info), "rev-parse", "HEAD")[1]
+        snap.update(head=head, head_accepted=time.time())
+        write_json_atomic(snapshot_path(job), snap)
+    print(json.dumps({"job": job, "head": head}))
+    return 0
 
 
 def cmd_ledger(args):
@@ -4846,8 +5762,8 @@ def not_code(info):
 
 
 def experiment(info):
-    """A result job with a worker: it works in a worktree, its edits are thrown away (not a
-    job the user ended with no change: it made nothing to keep)."""
+    """A result job with a worker: its result stays uncommitted where its plan's `## Workspace`
+    puts it (not a job the user ended with no change: it made nothing to keep)."""
     return not is_answer(info) and job_output(info) == "result" and not info.get("no_change")
 
 
@@ -4861,12 +5777,12 @@ def experiment_none(job, info):
 
 
 def place_lines(job):
-    """The `## Workspace` section without its Takes over line (it names files, which may
-    contain oke/<job> too), or None."""
+    """The `## Workspace` section without its Continues and Results lines (they name files, which
+    may contain oke/<job> too), or None."""
     section = plan_place(job)
     if section is None:
         return None
-    return "\n".join(l for l in section.splitlines() if not TAKEN_LINE.match(l))
+    return "\n".join(l for l in section.splitlines() if not FILE_LINE.match(l))
 
 
 def plan_own_worktree(job):
@@ -4893,8 +5809,8 @@ CONTINUES = re.compile(r"\bfrom\s+`?oke/([a-z][a-z0-9-]{0,23})(?![a-z0-9-])`?", 
 
 # a plan's work-place section
 PLACE_SECTION = re.compile(r"^## Workspace[^\n]*\n(.*?)(?=^## |\Z)", re.M | re.S)
-# its line naming the main checkout's uncommitted changes the job takes over
-TAKEN_LINE = re.compile(r"^\s*Takes over\s*:\s*(.*)$", re.M | re.I)
+# its lines naming files: the user's uncommitted work the job goes on with, the result files
+FILE_LINE = re.compile(r"^\s*(Continues|Results)\s*:\s*(.*)$", re.M | re.I)
 
 
 def plan_place(job):
@@ -4907,13 +5823,45 @@ def plan_place(job):
     return section.group(1) if section else None
 
 
-def uncommitted_tracked(cwd):
-    """The checkout's uncommitted changes to tracked files, each as the list of its paths
-    (a rename or copy: the new path, then the old one), exactly as git stores them, or None
-    when git fails."""
+def plan_files(job, name):
+    """The files or folders the plan's `## Workspace` line `<name>: <path>, <path>` names
+    (`Continues` or `Results`), relative with forward slashes; [] for none or no such line."""
+    for m in FILE_LINE.finditer(plan_place(job) or ""):
+        if m.group(1).lower() == name.lower():
+            value = m.group(2).strip()
+            if value.lower().startswith("none") or not value:
+                return []
+            names = [rel_path(p.strip().strip("`\"'")) for p in value.split(",")]
+            return [n for n in names if n]
+    return []
+
+
+def rel_path(p):
+    """A path as OKe compares a job's files: forward slashes, no `./`, no slash at either end."""
+    p = (p or "").strip().replace("\\", "/")
+    while p.startswith("./"):
+        p = p[2:].lstrip("/")
+    return p.strip("/")
+
+
+def path_key(p):
+    """What two paths compare by: Windows file names do not differ by case."""
+    return p.lower() if os.name == "nt" else p
+
+
+def names_path(rel, names):
+    """Is `rel` one of `names`, or inside one of them (a folder)?"""
+    rel = path_key(rel)
+    return any(rel == n or rel.startswith(n + "/") for n in (path_key(rel_path(n)) for n in names) if n)
+
+
+def dirty_paths(cwd):
+    """Every path `git status` shows changed in a checkout: tracked changes (both paths of a rename),
+    each untracked file (ignored ones left out), as [(status, path)] relative with forward
+    slashes; None when git fails."""
     try:
-        p = subprocess.run(["git", "-C", cwd, "status", "--porcelain", "-z", "-uno"],
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        p = run_timed(["git", "-C", cwd, "-c", "core.quotepath=off", "status", "--porcelain", "-z", "-uall"],
+                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
         return None
     if p.returncode != 0:
@@ -4924,24 +5872,460 @@ def uncommitted_tracked(cwd):
         i += 1
         if len(entry) < 4:
             continue
-        paths = [entry[3:]]
+        out.append((entry[:2], entry[3:].rstrip("/")))
         if "R" in entry[:2] or "C" in entry[:2]:
-            paths.append(fields[i] if i < len(fields) else "")
+            if i < len(fields) and fields[i]:
+                out.append((entry[:2], fields[i].rstrip("/")))
             i += 1
-        out.append(paths)
     return out
 
 
-def plan_uncommitted(job):
-    """The main checkout's uncommitted files the plan takes over as the job's own change
-    (its `## Workspace` section's `Takes over: <file>, <file>` line), or [] (`Takes over: none`,
-    or no such line)."""
-    section = plan_place(job)
-    line = TAKEN_LINE.search(section) if section is not None else None
-    if not line or line.group(1).strip().lower() in ("none", ""):
-        return []
-    names = [p.strip().strip("`\"'").strip() for p in line.group(1).split(",")]
-    return [n.replace("\\", "/") for n in names if n]
+DIRTY_FILE = "dirty-before.json"  # the user's uncommitted files when a job began work in place
+DIRTY_COPIES = "dirty-before"  # copies of them, to restore one (`job restore-user`)
+COPY_MAX_FILE = 2 * 1000 * 1000  # a bigger file keeps only its hash
+COPY_MAX_TOTAL = 100 * 1000 * 1000  # copying stops there; hashes are always kept
+
+
+BIG_FILE = 50 * 1000 * 1000  # a bigger file is told by its size and time, not hashed
+
+
+def file_mark(cwd, rel):
+    """What a file holds now, to compare: a hash of its bytes (a file over 50 MB: its size and
+    modification time), `-` when it is gone."""
+    p = os.path.join(cwd, *rel.split("/"))
+    if os.path.islink(p):
+        return "link:" + os.readlink(p)
+    if os.path.isdir(p):  # a submodule: its commit
+        return "dir:" + git_out(p, "rev-parse", "HEAD")[1]
+    try:
+        st = os.stat(p)
+    except OSError:
+        return "-"
+    if st.st_size > BIG_FILE:
+        return "stat:%d:%d" % (st.st_size, getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))
+    h = hashlib.sha1()
+    try:
+        with io.open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except (IOError, OSError):
+        return "-"
+    return h.hexdigest()
+
+
+def in_place(info):
+    """A git job that works in its checkout (the main one, or a linked worktree the user named),
+    not in a worktree of its own."""
+    return bool(info.get("git_key")) and not info.get("direct") and not (info.get("worktree") or {}).get("path")
+
+
+def snapshot_path(job):
+    return os.path.join(oke_home(), "jobs", job, DIRTY_FILE)
+
+
+class Marks(object):
+    """file_mark with a cache by (size, mtime, inode, POSIX ctime) for one job, kept in its folder: a big
+    checkout's files are hashed again only when they change."""
+    def __init__(self, job):
+        self.path = os.path.join(oke_home(), "jobs", job, "marks.json") if job else None
+        data = read_json(self.path, None) if self.path else None
+        self.data = data if isinstance(data, dict) and len(data) < 50000 else {}
+        self.changed = False
+
+    def mark(self, cwd, rel):
+        p = os.path.join(cwd, *rel.split("/"))
+        try:
+            st = os.lstat(p)
+        except OSError:
+            return "-"
+        if not stat.S_ISREG(st.st_mode):
+            return file_mark(cwd, rel)
+        key = normalize_path(p)
+        stamp = [st.st_size, getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)), st.st_ino or 0,
+                 # Windows' st_ctime is the creation time: only POSIX's (the inode's change) counts
+                 getattr(st, "st_ctime_ns", int(st.st_ctime * 1e9)) if os.name != "nt" else 0]
+        hit = self.data.get(key)
+        # a file written within 2 s of its hashing may change again with the same mtime: hashed again
+        if isinstance(hit, list) and len(hit) == 6 and hit[:4] == stamp and abs(hit[5] - st.st_mtime) >= 2:
+            return hit[4]
+        at = time.time()
+        m = file_mark(cwd, rel)
+        self.data[key] = stamp + [m, at]
+        self.changed = True
+        return m
+
+    def save(self):
+        if self.changed and self.path and os.path.isdir(os.path.dirname(self.path)):
+            try:
+                write_json_atomic(self.path, self.data)
+            except (IOError, OSError):
+                pass  # only a cache
+            self.changed = False
+
+
+def take_snapshot(job, info):
+    """The user's uncommitted files in a job's checkout and what they hold, with a copy of each (up
+    to 2 MB a file, 100 MB in all) in a folder of its own: (record, that folder), or None when git
+    fails. Slow on a big checkout, so it runs before the state lock (`snapshot_dirty` keeps it)."""
+    cwd = checkout_dir(info)
+    entries = dirty_paths(cwd)
+    if entries is None:
+        return None
+    copies = os.path.join(oke_home(), "jobs", job, "%s.new-%d" % (DIRTY_COPIES, os.getpid()))
+    safe_rmtree(copies)
+    files, copied, total = {}, [], 0
+    for _, rel in entries:
+        src = os.path.join(cwd, *rel.split("/"))
+        size = os.path.getsize(src) if os.path.isfile(src) and not os.path.islink(src) else None
+        if size is not None and size <= COPY_MAX_FILE and total + size <= COPY_MAX_TOTAL:
+            dst = os.path.join(copies, *rel.split("/"))
+            try:
+                if not os.path.isdir(os.path.dirname(dst)):
+                    os.makedirs(os.path.dirname(dst))
+                shutil.copyfile(src, dst)
+                files[rel] = file_mark(copies, rel)  # the copy's hash: what restore-user brings back
+                copied.append(rel)
+                total += size
+                continue
+            except (IOError, OSError):
+                pass
+        files[rel] = file_mark(cwd, rel)
+    return {"head": git_out(cwd, "rev-parse", "HEAD")[1], "files": files, "copied": copied,
+            "at": time.time()}, copies
+
+
+def snapshot_dirty(job, info, taken=None):
+    """When a job starts work in place (under the state lock): keep the record of the user's
+    uncommitted files, so that only what changes after this counts as the job's. `taken`: what
+    take_snapshot gave before the lock; else it is taken now. Taken once. False when git fails."""
+    if os.path.exists(snapshot_path(job)):
+        if taken:
+            safe_rmtree(taken[1])
+        return True
+    taken = taken or take_snapshot(job, info)
+    if not taken:
+        return False
+    record, copies = taken
+    final = os.path.join(oke_home(), "jobs", job, DIRTY_COPIES)
+    safe_rmtree(final)
+    if os.path.isdir(copies):
+        try:
+            os.rename(copies, final)
+        except OSError as e:  # a virus scanner or an open file holds the folder
+            safe_rmtree(copies)
+            raise StateError("could not keep the copies of the user's files for job %s (%s): run it again"
+                             % (job, e))
+    write_json_atomic(snapshot_path(job), record)
+    return True
+
+
+def restore_user(job, name):
+    """`job restore-user`: bring one of the user's files back to what it held when the job began (a
+    worker changed it by mistake). Never `git checkout` such a file: that loses the user's edits."""
+    info = load_state()["jobs"].get(job)
+    if not info:
+        return fail("unknown job: %s" % job)
+    snap = read_json(snapshot_path(job), None)
+    if not isinstance(snap, dict) or not in_place(info):
+        return fail("job %s has no record of the user's files (it does not work in place, or began before "
+                    "OKe kept one): ask the user" % job)
+    by_key = dict((path_key(r), r) for r in snap.get("files") or {})
+    rel = by_key.get(path_key(rel_path(name)))
+    if rel is None:
+        return fail("%s was not one of the user's uncommitted files when job %s began: it is not restored this "
+                    "way" % (name, job))
+    cwd = checkout_dir(info)
+    parts = rel.split("/")
+    target = os.path.join(cwd, *parts)
+    # never outside the checkout: no `..`, no absolute path, no folder link that leads out of it
+    if os.path.isabs(rel) or ".." in parts or re.match(r"^[A-Za-z]:", rel) or \
+            not under(real_dir(os.path.dirname(target)), real_dir(cwd)):
+        return fail("%s is outside job %s's checkout %s: not restored" % (name, job, cwd))
+    copy = os.path.join(oke_home(), "jobs", job, DIRTY_COPIES, *parts)
+    removing, kept = snap["files"][rel] == "-", None  # "-": the user had deleted it
+    if not removing and rel not in (snap.get("copied") or []):
+        if file_mark(cwd, rel) != snap["files"][rel]:
+            return fail("OKe kept no copy of %s (over 2 MB, or past 100 MB of copies), only its hash: ask the user"
+                        % rel)
+    else:
+        if os.path.lexists(target):
+            if os.path.isdir(target) and not os.path.islink(target):
+                return fail("%s is a folder now: not restored, ask the user" % rel)
+            # what the file holds now is kept first: a restore never loses anything
+            kept = os.path.join(oke_home(), "jobs", job, "restored",
+                                *(parts[:-1] + ["%s.%s" % (parts[-1], time.strftime("%Y%m%d-%H%M%S"))]))
+            if os.path.lexists(kept):
+                kept += "-%d" % os.getpid()
+            try:
+                if not os.path.isdir(os.path.dirname(kept)):
+                    os.makedirs(os.path.dirname(kept))
+                if os.path.islink(target):
+                    with io.open(kept, "w", encoding="utf-8") as f:
+                        f.write(u"link to %s\n" % os.readlink(target))
+                else:
+                    shutil.copyfile(target, kept)
+                os.remove(target)  # a link is unlinked, never written through
+            except (IOError, OSError) as e:
+                return fail("could not keep %s before restoring it (%s): nothing restored" % (rel, e))
+        if not removing:
+            if not os.path.isdir(os.path.dirname(target)):
+                os.makedirs(os.path.dirname(target))
+            shutil.copyfile(copy, target)
+    out = {"job": job, "restored": rel, "same": file_mark(cwd, rel) == snap["files"][rel]}
+    if kept:
+        out["kept"] = native_path(kept)
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+def job_files(job, info, cwd, marks=None):
+    """The job's own uncommitted changes in `cwd`: {"paths": what the job's commit takes, "shared": the
+    user's uncommitted files the job changed too that nobody settled yet (in "paths" as well), "left":
+    such files the user said to leave out, "user": how many of the user's files stay as they were,
+    "new": the job's new (untracked) files, "check_left": files the Check command's runs made or
+    changed (never committed), "nested": git repositories inside the checkout that are not the
+    user's (never the job's)}. In place, a file counts as the job's when it differs from the
+    snapshot taken at the job's start, or is new. None when git fails."""
+    entries = dirty_paths(cwd)
+    if entries is None:
+        return None
+    own = marks is None
+    marks = marks or Marks(job)
+    whole = read_json(snapshot_path(job), None) if in_place(info) else None
+    snap = (whole or {}).get("files") or {}
+    goes_on = plan_files(job, "Continues")
+    settled = dict((path_key(rel_path(k)), v) for k, v in (info.get("user_files") or {}).items())
+    # in place without a record of the start (an older job): once the user named the job's files, only those
+    named = [k for k, v in settled.items() if v == "include"] if in_place(info) and whole is None else []
+    by_check = info.get("byproducts") or {}
+    out = {"paths": [], "shared": [], "left": [], "user": 0, "new": [], "check_left": [], "nested": []}
+    seen = set()
+    for xy, rel in entries:
+        if rel in seen or (xy == "??" and byproduct("?? " + rel)):
+            continue
+        seen.add(rel)
+        full = os.path.join(cwd, *rel.split("/"))
+        if xy == "??" and os.path.isdir(full) and not os.path.islink(full):
+            # git lists an untracked folder (with -uall) only when it is a repository of its own
+            if rel in snap:
+                out["user"] += 1
+            else:
+                out["nested"].append(rel)
+            continue
+        if xy == "??" and rel in by_check and settled.get(path_key(rel)) != "include" \
+                and marks.mark(cwd, rel) == by_check[rel]:
+            out["check_left"].append(rel)  # the Check command made or changed it: left as it is, uncommitted
+            continue
+        if named and not names_path(rel, named):
+            out["user"] += 1
+            continue
+        if rel in snap:
+            if marks.mark(cwd, rel) == snap[rel]:
+                out["user"] += 1  # the user's, untouched: never committed
+                continue
+            choice = "include" if names_path(rel, goes_on) else settled.get(path_key(rel))
+            if choice == "leave":
+                out["left"].append(rel)
+                continue
+            if choice != "include":
+                out["shared"].append(rel)
+        elif xy == "??":
+            out["new"].append(rel)
+        out["paths"].append(rel)
+    if own:
+        marks.save()
+    return out
+
+
+def nested_block(files, cwd):
+    """The refusal for git repositories in the job's checkout that are not the user's, or None."""
+    if not files or not files.get("nested"):
+        return None
+    return ("%s in %s %s a git repository of its own, made during the job: OKe never commits one into the "
+            "job's change. Move it out of the checkout (or ask the user), then run this again"
+            % (", ".join(files["nested"][:5]), cwd, "is" if len(files["nested"]) == 1 else "are"))
+
+
+def tree_of(cwd, paths):
+    """The tree of HEAD with `paths` as they are in `cwd`, through a temporary index (the real one is
+    untouched): what committing the job's change gives. None when git fails."""
+    idx = os.path.join(oke_home(), "tree-%d.index" % os.getpid())
+    env = dict(os.environ, GIT_INDEX_FILE=idx)
+    git = ["git", "--literal-pathspecs", "-C", cwd]
+    try:
+        head = git_out(cwd, "rev-parse", "-q", "--verify", "HEAD^{tree}")[1]
+        steps = [["read-tree", head] if head else ["read-tree", "--empty"]]
+        for n in range(0, len(paths), 200):  # a command line has a limit (Windows: 32k)
+            steps.append(["add", "-A", "--"] + paths[n:n + 200])
+        steps.append(["write-tree"])
+        for argv in steps:
+            result = run_timed(git + argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            if result.returncode != 0:
+                return None
+        return result.stdout.decode().strip()
+    finally:
+        try:
+            os.remove(idx)
+        except OSError:
+            pass
+
+
+def job_tree(job, info, cwd=None):
+    """(tree, files) of the job's work: its checkout's HEAD with the job's own changes, or (None, files)."""
+    cwd = cwd or work_dir(info)
+    files = job_files(job, info, cwd)
+    if files is None:
+        return None, None
+    return tree_of(cwd, files["paths"]), files
+
+
+def work_dir(info):
+    """Where a git job's files are: its own worktree, else its checkout."""
+    wt = (info.get("worktree") or {}).get("path")
+    return native_path(wt) if wt else checkout_dir(info)
+
+
+def checkout_dir(info):
+    """The checkout a git job's path names: the main checkout, or a linked worktree the user named.
+    A job works and delivers there unless it has a worktree of its own."""
+    if info.get("path") and not info.get("direct"):
+        return native_path(info["path"])
+    return native_path(repo_dir(info["git_key"]))
+
+
+def commit_groups(job, paths):
+    """[(message, [paths])]: the plan's `## Commits` groups in order (`- <message>: <path>, <path>`,
+    one group may be `rest`), each path of the job in the first group naming it, else in `rest`.
+    Without the section: one commit. A string says why the groups do not fit."""
+    section = plan_section(job, u"Commits")
+    lines = [l for l in section.splitlines() if re.match(r"^\s*[-*+]\s", l)]
+    if not lines:
+        return [("oke: %s" % job, list(paths))] if paths else []
+    groups, rest = [], None
+    for line in lines:
+        body = re.sub(r"^\s*[-*+]\s+", "", line).strip()
+        if ": " not in body:
+            return ("a `## Commits` line is `- <message>: <path>, <path>` (or `rest` for the files no "
+                    "other line names), not %r: fix plan.md, then deliver again" % body)
+        message, names = body.rsplit(": ", 1)
+        names = [rel_path(n.strip().strip("`\"'")) for n in names.split(",")]
+        groups.append((message.strip().strip("`"), [n for n in names if n], []))
+        if [n.lower() for n in groups[-1][1]] == ["rest"]:
+            rest = groups[-1]
+    unnamed = []
+    for p in paths:
+        g = next((g for g in groups if g is not rest and names_path(p, g[1])), rest)
+        (g[2] if g is not None else unnamed).append(p)
+    if unnamed:
+        return ("job %s changed files no `## Commits` line names, and there is no `rest` line: %s. Add them to "
+                "a line (or add `- <message>: rest`) in plan.md, then deliver again"
+                % (job, ", ".join(unnamed[:10]) + (" and %d more" % (len(unnamed) - 10) if len(unnamed) > 10 else "")))
+    return [(m, ps) for m, _, ps in groups if ps]
+
+
+def commit_paths(cwd, message, paths):
+    """One commit of `paths` only, as they are now (`git commit --only`: what the user staged
+    elsewhere stays staged, hooks run). (ok, git's output)."""
+    git = ["git", "--literal-pathspecs", "-C", cwd]
+    new = [p for p in paths if git_out(cwd, "--literal-pathspecs", "ls-files", "--", p)[1] == "" and
+           os.path.lexists(os.path.join(cwd, *p.split("/")))]
+    for n in range(0, len(new), 200):
+        r = run_timed(git + ["add", "--"] + new[n:n + 200], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if r.returncode != 0:
+            return False, r.stdout.decode("utf-8", "replace")
+    argv = git + ["commit", "-q", "-m", message, "--only"]
+    spec = None
+    if sum(len(p) + 3 for p in paths) > 20000:  # too long for one command line: git 2.25 reads a file
+        spec = os.path.join(oke_home(), "tmp", "commit-%d.paths" % os.getpid())
+        if not os.path.isdir(os.path.dirname(spec)):
+            os.makedirs(os.path.dirname(spec))
+        with io.open(spec, "wb") as f:
+            f.write(b"\0".join(p.encode("utf-8") for p in paths))
+        argv += ["--pathspec-from-file=" + spec, "--pathspec-file-nul"]
+    else:
+        argv += ["--"] + paths
+    try:
+        r = run_timed(argv, COMMIT_TIMEOUT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    finally:
+        if spec:
+            try:
+                os.remove(spec)
+            except OSError:
+                pass
+    if r.returncode != 0:
+        for n in range(0, len(new), 200):  # unstage what was added for it; the files stay as they are
+            call_timed(git + ["reset", "-q", "--"] + new[n:n + 200], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    return r.returncode == 0, r.stdout.decode("utf-8", "replace")
+
+
+def paths_differ(cwd, paths):
+    """Does any of `paths` differ from HEAD in `cwd` (changed, staged, deleted or untracked)? True
+    when git cannot tell: the commit then says."""
+    for n in range(0, len(paths), 200):
+        code, out = git_out(cwd, "--literal-pathspecs", "status", "--porcelain", "-uall", "--",
+                            *paths[n:n + 200])
+        if code != 0 or out:
+            return True
+    return False
+
+
+def staged_entries(cwd, paths):
+    """The index entries of `paths` in `cwd` ({path bytes: b"mode sha stage"}), or None when git fails."""
+    out = {}
+    for n in range(0, len(paths), 200):
+        p = run_timed(["git", "--literal-pathspecs", "-C", cwd, "ls-files", "-s", "-z", "--"] + paths[n:n + 200],
+                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        if p.returncode != 0:
+            return None
+        for rec in p.stdout.split(b"\0"):
+            if b"\t" in rec:
+                entry, path = rec.split(b"\t", 1)
+                out[path] = entry
+    return out
+
+
+def restore_staged(cwd, paths, staged):
+    """Put the index entries `staged_entries` read back: a path that was not in the index leaves it."""
+    if staged is None:
+        return
+    lines = [entry + b"\t" + path for path, entry in staged.items()]
+    lines += [b"0 " + b"0" * 40 + b"\t" + p.encode("utf-8") for p in paths if p.encode("utf-8") not in staged]
+    if lines:
+        run_timed(["git", "-C", cwd, "update-index", "-z", "--index-info"], input=b"\0".join(lines) + b"\0",
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def commit_job(job, cwd, paths, reviewed):
+    """Commit the job's `paths` in `cwd`, one commit per `## Commits` group, and make sure the
+    result is the reviewed tree. (commits made, None) or (None, why); on a failure nothing stays
+    committed."""
+    groups = commit_groups(job, paths)
+    if isinstance(groups, str):
+        return None, groups
+    pre = git_out(cwd, "rev-parse", "HEAD")[1]
+    made = []
+    staged = staged_entries(cwd, paths)  # what the user had staged: an undo gives it back
+
+    def undo(why):
+        if made:
+            call_timed(["git", "-C", cwd, "reset", "-q", "--soft", pre])
+            for n in range(0, len(paths), 200):
+                call_timed(["git", "--literal-pathspecs", "-C", cwd, "reset", "-q", "--"] + paths[n:n + 200],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            restore_staged(cwd, paths, staged)
+        return None, why
+    for message, group in groups:
+        if not paths_differ(cwd, group):
+            continue  # a group whose files hold what HEAD has: no empty commit
+        ok, text = commit_paths(cwd, message, group)
+        if not ok:
+            return undo("git commit failed: %s" % text.strip())
+        made.append(git_out(cwd, "rev-parse", "HEAD")[1])
+    if git_out(cwd, "rev-parse", "HEAD^{tree}")[1] != reviewed:  # changed meanwhile, or a hook changed it
+        return undo("the changes in %s moved during the commit (or a commit hook changed them): run `$OKE job "
+                    "deliver %s` again" % (cwd, job))
+    return made, None
 
 
 PHASE_FROM = {
@@ -4996,8 +6380,8 @@ def cmd_interview(args):
     except (TypeError, ValueError):
         return fail("interview_threshold / interview_max_rounds in config.json must be numbers")
     data = read_json(path, None)
-    if not isinstance(data, dict):
-        data = {"rounds": [], "done": False}
+    if not isinstance(data, dict) or data.get("reason") in TRIAGE_SKIPS and not data.get("rounds"):
+        data = {"rounds": [], "done": False}  # `job triage` skipped it, but the request is unclear after all
     if data.get("done"):
         return fail("the interview of %s is already done (%s)" % (args.job, data.get("reason")))
     number = len(data["rounds"])  # round 0 scores the user's first request, no question
@@ -5021,6 +6405,144 @@ def cmd_interview(args):
            "weakest": min(DIMENSIONS, key=lambda d: (scores[d[0]] - 1) * d[1])[0],
            "stalled": len(last) == STALL_ROUNDS and max(last) - min(last) <= STALL_BAND,
            "challenge": None if reason else CHALLENGES.get(number)}
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+# ---------------------------------------------------------------- triage
+
+# A first look at the user's words, so the orchestrator follows facts, not a judgement: how big the
+# request looks (the PM may still choose another size) and whether it names something concrete.
+SMALL_PREFIX = re.compile(r"^\s*(?:quick|simple|tiny|minor|small|just|only)\s*:", re.I)
+LARGE_SIGNAL = re.compile(u"\\b(?:refactor\\w*|migrat\\w*|architect\\w*|redesign\\w*|rewrite)\\b|"
+                          u"\\b(?:entire|whole) (?:codebase|code base|repo(?:sitory)?|project)\\b|"
+                          u"리팩터|리팩토링|마이그레이션|아키텍처|재설계|전체|구조(?!체)", re.I)
+SMALL_SIGNAL = re.compile(u"\\b(?:typos?|renam\\w*|one[- ]liner|one[- ]line)\\b|"
+                          u"오타|이름\\s*(?:을|만)?\\s*바꿔|이름\\s*변경|한\\s*줄|간단히|간단한", re.I)
+LARGE_WORDS, SMALL_WORDS = 200, 50
+# a path: starts at the top, home, here or a drive letter, or has 2+ separators, or ends in a file name
+PATH_LIKE = re.compile(r"(?<![\w.~:/\\-])(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|[\\/])?[\w.~-]+(?:[\\/][\w.~-]*)+")
+PATH_START = re.compile(r"^(?:[A-Za-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|[\\/][\w.~-])")
+NOT_PATHS = frozenset(["ui/ux", "client/server", "input/output", "read/write", "on/off", "and/or", "yes/no",
+                       "i/o", "either/or", "w/o", "true/false", "front/back", "pros/cons", "tcp/ip"])
+# a framework or product name, not a file the user means
+NOT_FILES = frozenset(["node.js", "vue.js", "next.js", "nuxt.js", "react.js", "angular.js", "express.js",
+                       "nest.js", "three.js", "chart.js", "ember.js", "backbone.js", "svelte.js", "deno.js",
+                       "asp.net", "ado.net", "vb.net", "socket.io", "math.js", "moment.js", "d3.js"])
+FILE_LIKE = re.compile(r"\b[A-Za-z_][\w-]+\.(?:[a-z]{2,5}|[ch]|[A-Z]{2,4})\b")
+
+
+def path_anchor(words):
+    for m in PATH_LIKE.finditer(words):
+        text = m.group(0).rstrip(".,;:!?)")
+        if text.lower() in NOT_PATHS or "://" in words[m.start():m.end() + 3]:
+            continue
+        parts = [s for s in re.split(r"[\\/]", text) if s]
+        if PATH_START.match(text) or len(re.findall(r"[\\/]", text.rstrip("/\\"))) >= 2 \
+                or re.search(r"\.\w{1,5}$", parts[-1] if parts else ""):
+            return text
+    return None
+
+
+def file_anchor(words):
+    for m in FILE_LIKE.finditer(words):
+        if m.group(0).lower() not in NOT_FILES:
+            return m.group(0)
+    return None
+
+
+ANCHORS = (  # (kind, pattern or function): something concrete the PM can start from
+    ("path", path_anchor),
+    ("file", file_anchor),
+    # code, a call, camelCase with 2+ humps, snake_case, a::b
+    ("symbol", re.compile(r"`[^`\n]+`|\b[A-Za-z_]\w*\(\)|\b[a-z]+(?:[A-Z][a-z0-9]+){2,}\b|"
+                          r"\b\w*[A-Za-z]_[A-Za-z]\w*\b|\b\w+::\w+")),
+    ("error", re.compile(r"\b\w*(?:Error|Exception)\b|Traceback|\berror:|\bE\d{3,5}\b|exit (?:code|status) \d+")),
+    ("command", re.compile(r"\b(?:(?:npm|pnpm|yarn) (?:run|test|install|build|i)|npx \w+|pytest|cargo \w+|"
+                           r"go (?:test|build|run|vet)|make (?:test|build|check|all|install|lint)|"
+                           r"python3? (?:-m \w+|\S+\.py)|node \S+\.[cm]?js|(?:ba)?sh \S+\.sh|pip3? install|"
+                           r"git (?:status|diff|log|commit|push|pull|merge|rebase|checkout|branch|clone|stash|"
+                           r"reset|add|show|fetch|cherry-pick|bisect|blame)|mvn \w+|gradle \w+|dotnet \w+|"
+                           r"docker \w+|kubectl \w+)\b")),
+    ("url", re.compile(r"https?://\S+")),
+    ("issue", re.compile(r"(?<![\w&])#\d+\b")),
+)
+NUMBERED_STEP = re.compile(r"^\s*\d+[.)]\s+\S", re.M)
+# only the explicit phrases: "자동으로 저장되게" or "알아서 잘" asks for a feature or for care, not for no questions
+# said to the agent: "확인 없이 삭제되는 버그" or "deletes files without asking" describes the program
+AUTO_ASKED = re.compile(u"묻지\\s*말고|물어보지\\s*말고|확인\\s*없이\\s*(?:바로\\s*)?(?:진행|해|고쳐|처리)|승인\\s*없이\\s*(?:바로\\s*)?진행|"
+                        u"\\bno need to ask\\b|\\bdon[’']?t ask me\\b|\\bdo not ask me\\b|"
+                        u"\\bwithout asking me\\b", re.I)
+TRIAGE_SKIPS = ("anchored", "small")  # interview.json reasons for an interview `job triage` skipped
+
+
+def size_hint(words):
+    """(small | normal | large, why) from the user's words alone: an escape prefix (quick:, just:, ...),
+    large signals or more than LARGE_WORDS words, small signals or at most SMALL_WORDS words."""
+    count = len(words.split())
+    if SMALL_PREFIX.match(words):
+        return "small", "starts with %s" % words.strip().split(":", 1)[0].lower() + ":"
+    m = LARGE_SIGNAL.search(words)
+    if m:
+        return "large", "says %s" % m.group(0)
+    if count > LARGE_WORDS:
+        return "large", "%d words" % count
+    m = SMALL_SIGNAL.search(words)
+    if m:
+        return "small", "says %s" % m.group(0)
+    if count <= SMALL_WORDS:
+        return "small", "%d words" % count
+    return "normal", "%d words" % count
+
+
+def anchors_in(words):
+    """The concrete things the user's words name: [{"kind", "text"}], at most one per kind."""
+    found = []
+    for kind, pattern in ANCHORS:
+        if callable(pattern):
+            text = pattern(words)
+        else:
+            m = pattern.search(words)
+            text = m.group(0) if m else None
+        if text:
+            found.append({"kind": kind, "text": text.strip()[:80]})
+    if len(NUMBERED_STEP.findall(words)) >= 2:
+        found.append({"kind": "steps", "text": "%d numbered steps" % len(NUMBERED_STEP.findall(words))})
+    return found
+
+
+def triage(words):
+    hint, why = size_hint(words)
+    anchors = anchors_in(words)
+    return {"size_hint": hint, "why": why, "anchors": anchors,
+            # an interview whenever the words name nothing concrete, whatever their size
+            "interview": not anchors,
+            "auto_asked": bool(AUTO_ASKED.search(words))}
+
+
+def cmd_triage(job):
+    """`job triage`: size hint and anchors from intake.md's User's words, recorded on the job. A
+    request that needs no interview gets a finished one, so planning may start."""
+    try:
+        with io.open(os.path.join(oke_home(), "jobs", job, "intake.md"), encoding="utf-8-sig") as f:
+            words = (text_section(f.read(), u"User's words") or "").strip()
+    except (IOError, OSError, UnicodeDecodeError):
+        words = ""
+    if not words:
+        return fail("job %s: write intake.md with the user's words under `## User's words` first" % job)
+    out = dict(triage(words), job=job)
+    with locked():
+        state = load_state()
+        if job not in state["jobs"]:
+            return fail("unknown job: %s" % job)
+        state["jobs"][job].update(size_hint=out["size_hint"], anchors=[a["kind"] for a in out["anchors"]])
+        save_state(state)
+    data = read_json(interview_path(job), None)
+    asked = isinstance(data, dict) and data.get("rounds")
+    if not out["interview"] and not asked:
+        write_json_atomic(interview_path(job), {"rounds": [], "done": True, "reason": "anchored"})
+    elif out["interview"] and not asked and isinstance(data, dict) and data.get("reason") in TRIAGE_SKIPS:
+        os.remove(interview_path(job))  # new words that name nothing concrete: the interview runs
     print(json.dumps(out, ensure_ascii=False))
     return 0
 
@@ -5135,11 +6657,12 @@ def remove_kept_worktree(job, kept, force):
             runtime_bg.git_worktree_remove(wt, main, force=force)
         except HerdrError:
             pass
-    subprocess.call(["git", "-C", main, "worktree", "prune"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if wt:
+        forget_worktree(wt, worktree_admins(main))
     if wt and os.path.isdir(wt):
         return False, None
-    subprocess.call(["git", "-C", main, "branch", "-q", "-D" if force else "-d", branch],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    call_timed(["git", "-C", main, "branch", "-q", "-D" if force else "-d", branch],
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     left = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/" + branch)[0] == 0
     return True, branch if left else None
 
@@ -5187,7 +6710,8 @@ def clean_job(job, force=False):
                         "--force` deletes it" % (branch, base or "its base branch", job))
     out = {"job": job}
     if not has_dir and not has_branch:
-        subprocess.call(["git", "-C", main, "worktree", "prune"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if wt:
+            forget_worktree(native_path(wt), worktree_admins(main))
         out["result"] = "already clean"
     else:
         # checked above: what goes is the user's call, or only byproducts and a merged branch
@@ -5393,23 +6917,24 @@ def job_locked(args):
                 return fail(problem)
         if args.phase in ("awaiting_approval", "working", "reviewing", "done") and experiment_none(args.slug, info):
             return fail(experiment_none(args.slug, info))
-        if args.phase == "working" and experiment(info) and not plan_own_worktree(args.slug):
-            return fail("job %s is an experiment (output result): its plan's `## Workspace` must name branch "
-                        "oke/%s, so its edits never reach the main checkout" % (args.slug, args.slug))
-        if args.phase == "working" and info.get("git_key") and not info.get("direct") \
-                and not is_answer(info) and not plan_worktree(args.slug) and not info.get("worked_in_main") \
-                and not ("worked_in_main" not in info and info.get("worked")):
-            # it starts in the main checkout: every uncommitted change there becomes the job's,
-            # so the plan must name each one it takes in (the user approved that)
-            main = native_path(repo_dir(info["git_key"]))
-            named = set(plan_uncommitted(args.slug))
-            unnamed = [" <- ".join(paths) for paths in (uncommitted_tracked(main) or [])
-                       if not named.intersection(paths)]
-            if unnamed:
-                return fail(u"the main checkout %s has uncommitted changes the plan of job %s does not take in "
-                            u"(%s): working there, the job would commit them. Ask the user, then give the PM "
-                            u"`kind: plan`: a worktree, or `Takes over: <files>` naming them as the job's"
-                            % (main, args.slug, ", ".join(unnamed[:5])))
+        if args.phase in ("awaiting_approval", "working") and not is_answer(info) and plan_too_big(args.slug):
+            return fail(plan_too_big(args.slug) + ". Give the PM `kind: plan` to shorten it")
+        starts = args.phase == "working" and now == "awaiting_approval" and not is_answer(info)
+        in_checkout = bool(info.get("git_key")) and not info.get("direct") and not plan_worktree(args.slug)
+        if starts and in_checkout:
+            # two jobs changing one checkout in place would mix their files: the later one waits
+            other = checkout_busy(state, args.slug)
+            if other:
+                info["queued"] = {"for": other, "at": time.time()}
+                save_state(state)
+                print(json.dumps({"job": args.slug, "result": "waiting", "waits_for": other,
+                                  "note": "job %s works in the same checkout: this job starts when it is delivered, "
+                                          "archived or stopped (`$OKE pending` lists it as `released`); write no "
+                                          "execute assignment yet" % other}, ensure_ascii=False))
+                return 3
+        if starts and in_checkout and not snapshot_dirty(args.slug, info, getattr(args, "snapshot", None)):
+            # what is uncommitted there now is the user's: only what the job changes after this is its own
+            return fail("git cannot read the checkout %s of job %s" % (info.get("path"), args.slug))
         if args.phase == "done" and experiment(info) and not info.get("no_change"):
             job_dir = os.path.join(oke_home(), "jobs", args.slug)
             review = latest_report(job_dir, r"-rv\d*$")
@@ -5431,6 +6956,8 @@ def job_locked(args):
             if problem:
                 return fail(problem)
         state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
+        if args.phase != "awaiting_approval":
+            info.pop("queued", None)
         if args.phase == "working" and now not in ("working", "reviewing"):
             # set before its execute (curate) assignment is written: until a newer seq is,
             # whatever the PM reports is about the plan (or an answer to it), not the work.
@@ -5459,6 +6986,32 @@ def job_locked(args):
             save_state(state)
         print(json.dumps({"job": args.slug, "round": review_round(args.slug),
                           "limit": info.get("review_rounds", load_config().get("max_review_rounds"))}))
+        return 0
+    if args.action == "auto":
+        info = state["jobs"][args.slug]
+        if info.get("phase") in DONE_PHASES:
+            return fail("job %s is finished: nothing left to approve" % args.slug)
+        if args.off:
+            info.pop("auto", None)
+        else:
+            info["auto"] = True
+        save_state(state)
+        print(json.dumps({"job": args.slug, "auto": bool(info.get("auto"))}))
+        return 0
+    if args.action == "files":
+        # the user's answer about their own uncommitted files the job changed too: commit them with the
+        # job (their edits included), or leave them out of its commits (both edits stay uncommitted)
+        info = state["jobs"][args.slug]
+        if info.get("phase") in DONE_PHASES:
+            return fail("job %s is %s: nothing left to commit" % (args.slug, info.get("phase")))
+        settled = info.setdefault("user_files", {})
+        for f in args.files:
+            settled[rel_path(f)] = args.choice
+        save_state(state)
+        print(json.dumps({"job": args.slug, "user_files": settled,
+                          "next": "the job's tree changed: `$OKE check %s`, a new review with the new `tree:`, "
+                                  "then deliver" % args.slug if args.choice == "leave" else
+                                  "deliver again"}, ensure_ascii=False))
         return 0
     if args.action == "output":
         return set_output(state, args)
@@ -5782,8 +7335,7 @@ def set_output(state, args):
         return fail("job %s is on hold: leave it until a message says it is back" % args.slug)
     if is_answer(info):
         return fail("job %s is an answer: its output is its answer (result)" % args.slug)
-    if no_path(args.slug, info) and not args.no_change:
-        return fail(no_path(args.slug, info))
+    # the output needs no path: the planner names both at once, and the PM may record either first
     if info.get("direct") and not args.no_change:
         return fail("job %s changes a folder outside git: its output is the files" % args.slug)
     phase = info.get("phase")
@@ -5811,15 +7363,9 @@ def set_output(state, args):
         print(json.dumps(out))
         return 0
     # the user ends a job that changed nothing: only the orchestrator, on the user's answer
-    pane = runtime().whoami()
-    if pane:
-        try:
-            me = whoami(state, pane)[0]
-        except HerdrError:
-            me = None
-        if me and me[0] != "orchestrator":
-            return fail("only the orchestrator ends a job with no change, on the user's answer: report a "
-                        "question")
+    if not caller_is_orchestrator(state, save=False):
+        return fail("only the orchestrator ends a job with no change, on the user's answer: report a "
+                    "question")
     if args.output != "result":
         return fail("--no-change ends the job with output result")
     if phase in DONE_PHASES or deliver_state(args.slug)[0] != "none":
@@ -5850,7 +7396,7 @@ def job_changes(job, info):
     """What a git job changed so far, in words, or None: commits on its branch beyond the
     point it started from, tracked changes, new files that look like work."""
     wt = (info.get("worktree") or {}).get("path")
-    main = native_path(repo_dir(info["git_key"]))
+    main = checkout_dir(info)
     # the main checkout counts only when the job worked there (a job from before the flag:
     # it worked without a worktree in its plan); otherwise its changes are the user's or another job's
     in_main = info.get("worked_in_main") or (
@@ -5859,29 +7405,21 @@ def job_changes(job, info):
         return None  # it never worked, or its work belongs in a worktree it does not have yet
     cwd = native_path(wt) if wt else main
     for where in ([cwd, main] if wt and in_main else [cwd]):
-        code, dirty = git_out(where, "status", "--porcelain", "-uno")
-        if code != 0:
+        # in the checkout, the user's uncommitted files from before the job are not its change
+        files = job_files(job, dict(info, worktree=None) if where == main else info, where)
+        if files is None:
             return "git status failed in %s" % where
-        if where == main:  # the main checkout: the user's edits from before the job are not its change
-            before = set(info.get("main_before") or [])
-            dirty = "\n".join(l for l in dirty.splitlines() if l.strip() not in before)
-        if dirty:
-            # git_out strips the output: the first line lost its leading space
-            return "changed files%s: " % (" in the main checkout" if where != cwd else "") + \
-                ", ".join(l[2:].strip() for l in dirty.splitlines()[:5])
-    if wt:
-        loose = untracked_work(cwd)
-        if loose:
-            return "new files: " + ", ".join(loose[:5])
+        if files["paths"]:
+            return "changed files%s: " % (" in the checkout" if where != cwd else "") + ", ".join(files["paths"][:5])
     branch = "refs/heads/" + job_branch(job, info)
-    point = base_point(info, cwd)
+    point = base_point(info, cwd, job)
     tips = [git_out(cwd, "rev-parse", "HEAD")[1]] if wt else []
     if branch and git_out(main, "rev-parse", "-q", "--verify", branch)[0] == 0:
         tips.append(git_out(main, "rev-parse", branch)[1])
     for tip in tips:
         # the tree counts, not the commits: a reverted change leaves commits but no change
-        if subprocess.call(["git", "-C", main, "diff", "--quiet", point or "HEAD", tip],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
+        if call_timed(["git", "-C", main, "diff", "--quiet", point or "HEAD", tip],
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) != 0:
             return "commits on its branch change files"
     return None
 
@@ -6329,8 +7867,10 @@ def cmd_take_mail(args):
 
 # ---------------------------------------------------------------- pending
 
-PENDING_RANKS = {"unsent": 0, "unassigned": 0, "split": 0, "report_done": 0, "answer": 0, "no_change": 0, "silent": 1,
-                 "question": 1, "blocked": 1, "failed": 1, "peer": 1, "plan": 2}
+# an assignment written (an approval or an answer acted on) but not sent yet comes before anything else:
+# the user's answer is never pushed back by other jobs' reports
+PENDING_RANKS = {"unsent": -1, "unassigned": -1, "split": 0, "report_done": 0, "answer": 0, "no_change": 0, "silent": 1,
+                 "question": 1, "blocked": 1, "failed": 1, "peer": 1, "plan": 2, "released": 0}
 ASKING_PHASES = ("planning", "working", "reviewing")
 
 
@@ -6395,6 +7935,11 @@ def pending_item(name, job):
         # an older research job may report done still in intake: it is an answer too
         # an answer (`job answer`) ends with its report: no plan to show, nothing to deliver
         kind, since, mark = "answer" if is_answer(job) else "report_done", mtime, seq
+    elif phase == "awaiting_approval" and job.get("queued"):
+        # approved, waiting for another job in the same checkout: released once that one is out of the way
+        if checkout_busy(load_state(), name):
+            return None
+        kind, since, mark = "released", job["queued"].get("at"), job["queued"].get("for")
     elif phase == "awaiting_approval":
         kind, since, mark = "plan", job.get("phase_at"), job.get("phase_at")
     else:
@@ -6404,12 +7949,25 @@ def pending_item(name, job):
             "key": key, "deferred": job.get("deferred") == key}
     if ruling and kind in ("peer", "question", "blocked", "failed"):
         item["peers"] = ruling  # the answer that settles this item must settle these too
+    if job.get("auto") and not ruling:  # the user said not to ask again for this job (`job auto`)
+        if kind == "plan":
+            item["auto"] = "approve"
+        elif kind == "question":
+            picks = recommended_picks(name)
+            if picks:
+                item.update(auto="recommended", picks=picks)
+    if kind == "blocked" and report.get("rule"):
+        item["oke_rule"] = report["rule"]  # an OKe rule stops the work, not a dialog: a bug for OKe's maintainer
     if kind == "no_change":
         item["text"] = ("job %s ended with no change (the user agreed): do not ask again; finish it as the "
                         "Flow row says (wiki, `job phase done`, archive)" % name)
     if kind == "unassigned":
         item["text"] = ("job %s is in phase working but its assignment for that (execute or curate) "
                         "was never written: write and send it now" % name)
+    if kind == "released":
+        item["text"] = ("job %s was approved and waited for job %s in the same checkout, which is out of the "
+                        "way now: run `$OKE job phase %s working`, then give the PM `kind: execute` (no question)"
+                        % (name, job["queued"].get("for"), name))
     if kind == "answer":
         item["text"] = ("job %s is answered: nothing changes. Tell the user the report's Summary, then "
                         "`job phase %s done` and `job archive %s`" % (name, name, name))
@@ -6497,7 +8055,33 @@ def build_parser():
     jbase = job_sub.add_parser("base", help="the branch a job's work goes onto, when it has none (the user names it)")
     jbase.add_argument("slug")
     jbase.add_argument("branch")
-    job_sub.add_parser("tree", help="the tree a review of a job without a worktree names").add_argument("slug")
+    job_sub.add_parser("tree", help="the tree of the job's work (its own changes on HEAD), which a review of "
+                       "uncommitted work names").add_argument("slug")
+    job_sub.add_parser("plan", help="the PM, after writing plan.md: refuses a plan too big to show or check"
+                       ).add_argument("slug")
+    jf = job_sub.add_parser("files", help="the user's answer about their uncommitted files the job changed too")
+    jf.add_argument("slug")
+    jf.add_argument("choice", choices=("include", "leave"))
+    jf.add_argument("files", nargs="+")
+    job_sub.add_parser("triage", help="size hint and anchors from intake.md's User's words; says whether to "
+                       "interview").add_argument("slug")
+    jauto = job_sub.add_parser("auto", help="the user said: do not ask again for this job (approvals, questions "
+                               "with a recommended option)")
+    jauto.add_argument("slug")
+    jauto.add_argument("--off", action="store_true", help="ask again")
+    jr = job_sub.add_parser("restore-user", help="bring one of the user's files back to what it held when the "
+                            "job began (never `git checkout` it)")
+    jr.add_argument("slug")
+    jr.add_argument("file")
+    jac = job_sub.add_parser("accept-check", help="the user accepts a failing check whose base could not run, "
+                             "or whose new failures the base has too (base_has_it) (orchestrator)")
+    jac.add_argument("slug")
+    jac.add_argument("target", help="the commit or tree:<sha> `oke check` printed")
+    jac.add_argument("--by-user", action="store_true", help="the user answered it (needed on `job auto`)")
+    jah = job_sub.add_parser("accept-head", help="the user made the commits in the checkout during the job "
+                             "(orchestrator)")
+    jah.add_argument("slug")
+    jah.add_argument("--by-user", action="store_true", help="the user answered it (needed on `job auto`)")
     job.set_defaults(func=cmd_job)
 
     wk = sub.add_parser("wiki", help="read and write a wiki: capped pages, read before write, a log line per job")
@@ -6524,10 +8108,11 @@ def build_parser():
             p.add_argument("--reason", required=True)
     wk.set_defaults(func=cmd_wiki)
 
-    bl = sub.add_parser("baseline", help="record the plan's Check command failures before the work starts")
+    bl = sub.add_parser("baseline")  # no help line: older skills' no-op, `check` runs the base itself
     bl.add_argument("job")
     bl.set_defaults(func=cmd_baseline)
-    ck = sub.add_parser("check", help="run the Check command on the job's work and judge it against the baseline")
+    ck = sub.add_parser("check", help="run the Check command on the job's work; on a failure, also on its base "
+                        "commit, so failures that were there already do not count")
     ck.add_argument("job")
     ck.set_defaults(func=cmd_check)
     ledger = sub.add_parser("ledger")

@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { THEME_NAMES, framesOf, gitDenied, keyDenied, orchestratorDenied, paletteOf, promptRole, withBriefs, workerDenied, writeVerdict } from './register'
+import { THEME_NAMES, framesOf, gitDenied, jobActionDenied, keyDenied, orchestratorDenied, paletteOf, pendingWords, promptRole, todoLine, withBriefs, workerDenied, writeVerdict } from './register'
 
 type Run = { argv: readonly string[] }
 
@@ -311,6 +311,23 @@ test('the step line names the PMs a job waits on', async ($, on) => {
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^now\s+plan\s+\(wait PM api\)$/ })).toBeTruthy()
+  await ui.unmount()
+  tickBoard = BOARD
+  tickRole = 'worker'
+})
+
+test('the step line says how long the step runs and when the job approves without asking', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { HERDR_PANE_ID: 'w7:p1' })
+  tickRole = 'orchestrator'
+  tickBoard = [{ name: 'toy', key: 'toy', pm: null, jobs: [
+    { job: 'calc-sub', phase: 'planning', deliver: 'none', pending: null, step: 'planning', auto: true,
+      since: Date.now() / 1000 - 12 * 60, agents: [] }] }]
+  engine(on, [], [])
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^now\s+planning\s+· 1[23]m\s+⏵ auto$/ })).toBeTruthy()
   await ui.unmount()
   tickBoard = BOARD
   tickRole = 'worker'
@@ -709,6 +726,57 @@ test('a PM, worker or reviewer cannot run git commands that lose or publish work
   expect(ran.length).toBe(12)
 })
 
+test('workers, reviewers and subagents may not stash or throw away the whole tree', () => {
+  for (const bad of ['git stash', 'git stash push -m x', 'git -C r stash pop', 'git checkout -- .', 'git checkout .',
+    'git restore .', 'git restore --staged .', 'git restore -- ./', 'cd r && git checkout -- . && ls',
+    'git reset --hard', 'git clean -fdx', 'git branch -D oke/j', 'git push']) {
+    for (const role of ['worker', 'reviewer']) expect(gitDenied(bad, role)).toMatch(/^OKe blocks `git /)
+    expect(gitDenied(bad, 'pm', true)).toMatch(/^OKe blocks `git /)  // a PM's subagent
+  }
+  for (const ok of ['git checkout -- calc.py', 'git restore src/a.py', 'git checkout .gitignore',
+    'git checkout -b oke/j', 'git status', 'git commit -m "git stash it later"']) {
+    expect(gitDenied(ok, 'worker')).toBeNull()
+  }
+  // the PM itself cleans up its own worktrees
+  expect(gitDenied('git checkout -- .', 'pm')).toBeNull()
+  expect(gitDenied('git stash', 'pm')).toBeNull()
+})
+
+test('no way round the whole-tree rule: a revision, a pathspec of everything, a forced switch', () => {
+  for (const bad of ['git checkout HEAD -- .', 'git checkout HEAD .', 'git checkout main~2 -- .', 'git restore -s HEAD .',
+    'git restore --source=HEAD .', 'git restore --source HEAD -- .', 'git rm -r .', 'git rm -rf -- .',
+    "git checkout -- '*'", 'git checkout -- "*"', 'git checkout -- :/', 'git restore :/', 'git switch -f main',
+    'git switch --discard-changes main', 'git switch --force main']) {
+    expect(gitDenied(bad, 'worker')).toMatch(/^OKe blocks `git /)
+    expect(gitDenied(bad, 'pm', true)).toMatch(/^OKe blocks `git /)
+  }
+  for (const ok of ['git checkout HEAD -- calc.py', 'git restore -s HEAD src/a.py', 'git rm -r old/', 'git switch oke/j',
+    'git rm calc.py']) {
+    expect(gitDenied(ok, 'worker')).toBeNull()
+  }
+})
+
+test('a worker in the user\'s checkout and a PM\'s subagents never commit; the PM and other workers may', () => {
+  for (const bad of ['git commit -m x', 'git -C r commit -am x', 'git revert HEAD', 'git cherry-pick abc',
+    'git merge main', 'git rebase main', 'git am p.patch']) {
+    expect(gitDenied(bad, 'worker', false, true)).toMatch(/^OKe blocks `git /)
+    expect(gitDenied(bad, 'pm', true, true)).toMatch(/^OKe blocks `git /)
+  }
+  expect(gitDenied('git commit -m x', 'worker')).toBeNull()  // a worktree of the job's own
+  expect(gitDenied('git commit -m x', 'pm')).toBeNull()
+  expect(gitDenied('grep -n "git commit" notes.md', 'worker', false, true)).toBeNull()
+  expect(gitDenied('git log --oneline', 'worker', false, true)).toBeNull()
+})
+
+test('the board reads a released job and a rule block plainly, and counts no auto-taken plan', () => {
+  expect(pendingWords({ pending: 'released' })).toContain('starts now')
+  expect(pendingWords({ pending: 'blocked', oke_rule: true })).toBe('blocked by an OKe rule')
+  expect(pendingWords({ pending: 'blocked' })).toBe('PM is blocked')
+  expect(todoLine([{ pending: 'plan', phase: 'awaiting_approval', auto_pending: true },
+    { pending: 'plan', phase: 'awaiting_approval' }, { pending: 'question', phase: 'working' }]))
+    .toBe('To do for you: 1 approval · 1 question')
+})
+
 test('the orchestrator opens a pull request through oke, never with git push', () => {
   expect(gitDenied('"$OKE" job pr fix-a', 'orchestrator')).toBeNull()
   expect(gitDenied('python C:/oke/bin/oke.py job pr fix-a', 'orchestrator')).toBeNull()
@@ -1005,6 +1073,25 @@ test('a write in its own folder, tmp, memory or a git job area needs no python; 
   const posix = { home: '/h/.oke', wiki: '/h/.oke/wiki', folder: null, memories: [], areas: [{ path: '/src/app', direct: false }] }
   expect(writeVerdict('/src/app/a.py', posix)).toBe('allow')
   expect(writeVerdict('/SRC/App/a.py', posix)).toBe('ask')
+  // in a job's folder: OKe's file cache and the copies of the user's files are OKe's alone
+  const job = { ...dirs, folder: 'C:/oke/jobs/j' }
+  expect(writeVerdict('C:/oke/jobs/j/notes.md', job)).toBe('allow')
+  for (const f of ['C:/oke/jobs/j/marks.json', 'C:/oke/jobs/j/dirty-before/src/a.py', 'C:/oke/jobs/j/dirty-before',
+    'C:/oke/jobs/j/dirty-before.new-12/a.py']) {
+    expect([f, writeVerdict(f, job)]).toEqual([f, 'ask'])
+  }
+})
+
+test('only the orchestrator runs the oke job actions that record the user or move a job', () => {
+  for (const c of ['python /p/oke.py job phase j done', '"$OKE" job auto j on', '$OKE job files j include a.py',
+    'python3 "C:/x/oke.py" job accept-check j tree:abc --by-user', '${OKE} job accept-head j',
+    '$OKE job output j result --no-change']) {
+    for (const role of ['pm', 'worker', 'reviewer']) expect([c, role, jobActionDenied(c, role) !== null]).toEqual([c, role, true])
+    expect(jobActionDenied(c, 'orchestrator')).toBeNull()
+  }
+  for (const c of ['$OKE job tree j', '$OKE job deliver j', '$OKE job output j result', 'echo job phase', '$OKE check j']) {
+    expect(jobActionDenied(c, 'pm')).toBeNull()
+  }
 })
 
 test('a PM, worker or reviewer write outside its areas is refused by oke path-check', async ($, on) => {

@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Quality protocol: failure signatures, baseline, oke check."""
+"""Quality protocol: failure signatures, oke check and its base run."""
+import contextlib
+import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 
 import oke
@@ -127,19 +131,6 @@ class TestSignatures(unittest.TestCase):
         self.assertEqual(len(oke.signature_lines("\n".join("E%d boom" % i for i in range(300)))), 200)
         self.assertEqual(oke.signature_lines("x" * 501), [])
 
-    def test_diff_green_to_red_is_new_even_without_lines(self):
-        new, _ = oke.diff_baseline(entry(0), entry(1))
-        self.assertEqual(new, ["<exited with code 1>"])
-
-    def test_diff_red_reports_only_new_lines_and_counts_resolved(self):
-        new, resolved = oke.diff_baseline(entry(1, ["old", "gone"]), entry(1, ["old", "fresh"]))
-        self.assertEqual((new, resolved), (["fresh"], ["gone"]))
-
-    def test_diff_unrunnable_and_no_baseline(self):
-        new, _ = oke.diff_baseline(entry(1), entry(127, unrunnable=True))
-        self.assertEqual(new, ["<command became unrunnable>"])
-        self.assertEqual(oke.diff_baseline(None, entry(2, ["x"]))[0], ["<exited with code 2>", "x"])
-
     def test_run_signatures_ignores_output_on_success(self):
         d = tempfile.mkdtemp()
         old = os.environ.get("OKE_HOME")
@@ -183,142 +174,100 @@ class TestBaselineCheck(SpawnBase):
         self.assertEqual(len({a, b, oke.criteria_rev("q")}), 3)
         self.assertEqual(oke.plan_command("q"), "true")
 
-    def test_check_without_baseline_exits_2_and_writes_no_row(self):
+    def test_a_pass_needs_no_base_run(self):
         self.plan("true")
-        self.assertEqual(self.cli("check", "q"), 2)
-        self.assertIn("`$OKE baseline", self.err)
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        out = json.loads(self.out)
+        self.assertEqual((out["result"], out["new"], out["pre_existing"]), ("pass", [], []))
+        self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "q", "baseline.json")))
+        self.assertEqual([r["result"] for r in self.rows()], ["pass"])
+
+    def test_the_baseline_command_is_a_no_op(self):
+        self.plan("true")
+        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["result"], "not_needed")
         self.assertEqual(self.rows(), [])
 
-    def test_baseline_then_pass(self):
-        self.plan('test -f a.txt || { echo "FAILED old"; exit 1; }')
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        with open(os.path.join(self.home, "jobs", "q", "baseline.json")) as f:
-            base = json.load(f)
-        self.assertEqual((base["exit"], base["signatures"]), (1, ["FAILED old"]))
-        self.write(os.path.join(self.wt, "a.txt"), "a\n")
-        self.git(self.wt, "add", "a.txt")
-        self.git(self.wt, "commit", "-q", "-m", "a")
+    def test_a_failure_the_base_has_too_is_pre_existing(self):
+        self.plan("cat fails.txt 2>/dev/null; echo FAILED old_case; exit 1")
         self.assertEqual(self.cli("check", "q"), 0, self.err)
-        row = self.rows()[-1]
-        self.assertEqual(row["result"], "pass")
-        self.assertEqual(row["detail"].split()[0], oke.criteria_rev("q"))
-        self.assertEqual(row["commit"], self.git_out(self.wt, "rev-parse", "HEAD"))
+        out = json.loads(self.out)
+        self.assertEqual((out["result"], out["new"], out["pre_existing"]), ("pass", [], ["FAILED old_case"]))
+        self.assertTrue(os.path.exists(os.path.join(self.home, "jobs", "q", "baseline.json")))
+        # the temporary checkout of the base is gone again
+        self.assertFalse(os.path.exists(os.path.join(self.home, "tmp", "base-q")))
+        self.assertNotIn("base-q", self.git_out(self.repo, "worktree", "list"))
+        self.write(os.path.join(self.wt, "fails.txt"), "FAILED new_case\n")
+        self.assertEqual(self.cli("check", "q"), 1, self.err)
+        out = json.loads(self.out)
+        self.assertEqual((out["new"], out["pre_existing"]), (["FAILED new_case"], ["FAILED old_case"]))
+        self.assertEqual([r["result"] for r in self.rows()], ["pass", "fail"])
 
-    def test_new_line_fails_old_line_does_not(self):
-        self.plan('echo "FAILED old"; test -f b.txt && echo "FAILED new"; exit 1')
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        self.assertEqual(self.cli("check", "q"), 0, self.err)
-        self.write(os.path.join(self.wt, "b.txt"), "b\n")
-        self.git(self.wt, "add", "b.txt")
-        self.assertEqual(self.cli("check", "q"), 1)
-        self.assertEqual(json.loads(self.out)["new"], ["FAILED new"])
+    def test_a_base_failure_that_names_a_changed_file_is_a_regression(self):
+        self.plan("echo FAILED calc.py::test_add; exit 1")
+        self.assertEqual(self.cli("check", "q"), 0, self.err)  # the job changed nothing yet
+        self.assertEqual(json.loads(self.out)["pre_existing"], ["FAILED calc.py::test_add"])
+        self.write(os.path.join(self.wt, "calc.py"), "x = 1\n")  # a new file counts as the job's
+        self.assertEqual(self.cli("check", "q"), 1, self.err)
+        self.assertEqual(json.loads(self.out)["new"], ["FAILED calc.py::test_add"])
+
+    def test_a_base_that_passed_makes_any_failure_new(self):
+        self.plan("test ! -f broken.txt")
+        self.write(os.path.join(self.wt, "broken.txt"), "x\n")
+        self.assertEqual(self.cli("check", "q"), 1, self.err)
+        self.assertEqual(json.loads(self.out)["new"][0], "<exited with code 1>")
+
+    def test_a_base_that_cannot_run_fails_the_check(self):
+        self.plan("sh check.sh")
+        self.write(os.path.join(self.wt, "check.sh"), "echo FAILED x\nexit 1\n")  # not on the base
+        self.assertEqual(self.cli("check", "q"), 1, self.err)
+        self.assertIn("could not check the base: ", self.err)
         self.assertEqual(self.rows()[-1]["result"], "fail")
 
-    def test_stale_baseline_refused(self):
-        self.plan("true")
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        self.plan("true && true")
-        self.assertEqual(self.cli("check", "q"), 2)
-        self.assertIn("`$OKE baseline", self.err)
-
-    def test_rebaseline_keeps_history(self):
-        self.plan('echo "FAILED one"; exit 1')
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        self.plan('echo "FAILED two"; exit 1')
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        out = json.loads(self.out)
-        self.assertEqual((out["added"], out["removed"]), (1, 1))
-        self.assertEqual(len(os.listdir(os.path.join(self.home, "jobs", "q", "baseline.history"))), 1)
-
-    def test_uncommitted_worktree_change_is_recorded_as_a_tree(self):
-        self.plan("true")
-        self.write(os.path.join(self.wt, "c.txt"), "c\n")
-        self.git(self.wt, "add", "c.txt")
-        self.git(self.wt, "commit", "-q", "-m", "c")
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        self.write(os.path.join(self.wt, "c.txt"), "changed\n")
-        self.assertEqual(self.cli("check", "q"), 0, self.err)
-        target = self.rows()[-1]["commit"]
-        self.assertTrue(target.startswith("tree:"), target)
-        self.assertNotEqual(target[5:], self.git_out(self.wt, "rev-parse", "HEAD^{tree}"))
-
-    def test_untracked_work_file_refuses_the_check(self):
-        # a forgotten `git add`: the check would pass on a file the branch never carries
-        self.plan("true")
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        self.write(os.path.join(self.wt, "new_module.py"), "x = 1\n")
-        self.assertEqual(self.cli("check", "q"), 2)
-        self.assertIn("new_module.py", self.err)
-        self.assertEqual(self.rows(), [])
-        self.write(os.path.join(self.wt, "__pycache__", "m.pyc"), "x")  # a byproduct does not count
-        os.remove(os.path.join(self.wt, "new_module.py"))
-        self.assertEqual(self.cli("check", "q"), 0, self.err)
-
-    def test_rebaseline_after_work_still_sees_the_base_code(self):
-        # a worker cannot erase its own failure by recording a new baseline
-        self.plan('test -f broken.txt && { echo "FAILED broken"; exit 1; }; exit 0')
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        self.write(os.path.join(self.wt, "broken.txt"), "x\n")
-        self.git(self.wt, "add", "broken.txt")
-        self.git(self.wt, "commit", "-q", "-m", "work")
-        self.assertEqual(self.cli("check", "q"), 1)
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        with open(os.path.join(self.home, "jobs", "q", "baseline.json")) as f:
-            self.assertEqual(json.load(f)["exit"], 0)
-        self.assertEqual(self.cli("check", "q"), 1)
-        self.assertEqual(self.git_out(self.repo, "worktree", "list").count("\n"), 1)  # temp checkout removed
-
     def test_unrunnable_command_is_never_a_pass(self):
-        self.plan("no-such-command-oke-xyz")
-        self.assertEqual(self.cli("baseline", "q"), 2)
-        self.assertIn("could not run", self.err)
-        self.assertEqual(self.cli("check", "q"), 2)  # unrunnable at baseline too: still no pass
-        self.assertEqual(self.rows(), [])
-
-    def test_baseline_of_another_version_counts_as_none(self):
-        # an older OKe normalized failure lines differently: its signatures would make old failures new
-        self.plan('echo "FAILED old"; exit 1')
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        path = os.path.join(self.home, "jobs", "q", "baseline.json")
-        with open(path) as f:
-            base = json.load(f)
-        self.assertEqual(base["version"], oke.BASELINE_VERSION)
-        oke.write_json_atomic(path, dict(base, version=1, signatures=[]))
-        self.assertIsNone(oke.read_baseline("q"))
+        self.plan("definitely-not-a-command-xyz")
         self.assertEqual(self.cli("check", "q"), 2)
-        self.assertIn("`$OKE baseline q`", self.err)
-        self.assertIn("older", self.err)
-        self.assertEqual(self.rows(), [])
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        self.assertEqual(len(os.listdir(os.path.join(self.home, "jobs", "q", "baseline.history"))), 1)
-        self.assertEqual(self.cli("check", "q"), 0, self.err)
-
-    def test_unrunnable_baseline_keeps_the_previous_one(self):
-        self.plan("true")
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        path = os.path.join(self.home, "jobs", "q", "baseline.json")
-        with open(path) as f:
-            before = f.read()
-        self.plan("no-such-command-oke-xyz")
-        self.assertEqual(self.cli("baseline", "q"), 2)
         self.assertIn("could not run", self.err)
-        with open(path) as f:
-            self.assertEqual(f.read(), before)
-        self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "q", "baseline.history")))
+        self.assertEqual(self.rows(), [])
 
-    def test_baselines_in_one_second_keep_distinct_history_in_order(self):
-        from unittest import mock
-        with mock.patch.object(oke, "BASELINE_HISTORY", 2), \
-                mock.patch("time.strftime", return_value="20260101T000000"):
-            for n in range(4):
-                self.plan('echo "FAILED %d"; exit 1' % n)
-                self.assertEqual(self.cli("baseline", "q"), 0, self.err)
-        history = os.path.join(self.home, "jobs", "q", "baseline.history")
-        kept = []
-        for name in sorted(os.listdir(history)):
-            with open(os.path.join(history, name)) as f:
-                kept.append(json.load(f)["signatures"])
-        self.assertEqual(kept, [["FAILED 1"], ["FAILED 2"]])
+    def test_a_plan_too_big_is_refused(self):
+        self.plan("true", "1. " + "x" * 2100)
+        self.assertEqual(self.cli("check", "q"), 2)
+        self.assertIn("at most 2000", self.err)
+        self.assertEqual(self.cli("job", "plan", "q"), 1)
+        self.assertIn("Shorten it", self.err)
+        self.plan("true", "\n".join("%d. criterion %s" % (i, "y" * 60) for i in range(400)))
+        self.assertEqual(self.cli("job", "plan", "q"), 1)
+        self.assertIn("KB", self.err)
+        self.plan("true")
+        self.assertEqual(self.cli("job", "plan", "q"), 0, self.err)
+
+    def test_the_brief_cuts_long_lists(self):
+        text = "\n".join(["Continues: " + ", ".join("src/file%03d.py" % i for i in range(200))]
+                         + ["line %d" % i for i in range(60)])
+        lines = oke.brief_lines(text)
+        self.assertLessEqual(len(lines[0]), oke.BRIEF_CHARS + 30)
+        self.assertIn("more", lines[0])
+        self.assertEqual(lines[-1], "... 21 more lines in plan.md")
+
+    def test_an_in_place_result_is_checked_reviewed_and_left_uncommitted(self):
+        st = oke.load_state()
+        st["jobs"]["q"].update(output="result", worktree=None)
+        oke.save_state(st)
+        self.plan("test -f report.md")
+        self.write(os.path.join(self.repo, "mine.txt"), "the user's\n")  # left alone
+        self.write(os.path.join(self.repo, "report.md"), "the result\n")
+        self.write(os.path.join(self.home, "jobs", "q", "q-rv", "report.md"), "seq: 1\n---\nverdict: pass\n")
+        head = self.git_out(self.repo, "rev-parse", "HEAD")
+        self.assertEqual(self.cli("job", "deliver", "q"), 1)
+        self.assertIn("no recorded run", self.err)
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        self.assertEqual(self.cli("job", "deliver", "q"), 0, self.err)
+        out = json.loads(self.out)
+        self.assertEqual((out["result"], out["committed"]), ("in_place", False))
+        self.assertIn("report.md", out["results"])
+        self.assertEqual(self.git_out(self.repo, "rev-parse", "HEAD"), head)
+        self.assertIn("mine.txt", self.git_out(self.repo, "status", "--porcelain"))
 
     def test_ledger_add_cannot_forge_check(self):
         self.assertEqual(self.cli("ledger", "add", "q", "--by", "w", "--commit", "abc", "--check", "check",
@@ -330,12 +279,355 @@ class TestBaselineCheck(SpawnBase):
         state["jobs"]["q"]["worktree"] = None
         oke.save_state(state)
         self.plan("true")
-        self.assertEqual(self.cli("baseline", "q"), 0, self.err)
+        self.write(os.path.join(self.repo, "a.txt"), "a\n")
         self.assertEqual(self.cli("check", "q"), 0, self.err)
-        self.assertEqual(self.rows()[-1]["commit"], "tree:" + oke.pending_tree(self.repo))
+        tree, files = oke.job_tree("q", oke.load_state()["jobs"]["q"], self.repo)
+        self.assertEqual(self.rows()[-1]["commit"], "tree:" + tree)
+        self.assertEqual(self.cli("job", "tree", "q"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["tree"], tree)
 
     def git_out(self, cwd, *args):
         return subprocess.check_output(["git", "-C", cwd] + list(args)).decode().strip()
+
+
+class TestCheckInPlace(SpawnBase):
+    """A job in its checkout: what the Check command leaves, the base run's checkout, its leftovers."""
+    plan, rows, git_out = TestBaselineCheck.plan, TestBaselineCheck.rows, TestBaselineCheck.git_out
+
+    def setUp(self):
+        SpawnBase.setUp(self)
+        self.job("q", "working")
+        self.restart()
+
+    def restart(self):
+        """The job begins now: what is uncommitted in the checkout is the user's."""
+        if os.path.exists(oke.snapshot_path("q")):
+            os.remove(oke.snapshot_path("q"))
+        self.assertTrue(oke.snapshot_dirty("q", oke.load_state()["jobs"]["q"]))
+
+    def worktrees(self):
+        return self.git_out(self.repo, "worktree", "list", "--porcelain")
+
+    def test_what_the_check_makes_is_left_out_and_the_tree_settles(self):
+        self.plan("echo $RANDOM$RANDOM$$ > run.log; mkdir -p out; date +%s%N > out/stamp.txt; true")
+        self.write(os.path.join(self.repo, "a.txt"), "a\n")  # the job's
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        first = json.loads(self.out)
+        self.assertEqual(sorted(first["check_left"]), ["out/stamp.txt", "run.log"])
+        self.assertEqual(self.cli("check", "q"), 0, self.err)  # another run writes other bytes
+        second = json.loads(self.out)
+        self.assertEqual(first["commit"], second["commit"])
+        self.assertEqual(self.cli("job", "tree", "q"), 0, self.err)
+        out = json.loads(self.out)
+        self.assertEqual("tree:" + out["tree"], second["commit"])
+        self.assertEqual((out["files"], out["new_files"]), (1, ["a.txt"]))
+        self.assertEqual(sorted(out["check_left"]), ["out/stamp.txt", "run.log"])
+        self.assertIn("left by the check (not committed): out/stamp.txt, run.log", oke.job_brief("q"))
+        self.write(os.path.join(self.repo, "run.log"), "the worker wrote it\n")  # changed after: the job's
+        self.assertIn("run.log", oke.job_files("q", oke.load_state()["jobs"]["q"], self.repo)["paths"])
+
+    def test_the_base_run_has_the_users_files_and_installed_folders(self):
+        self.write(os.path.join(self.repo, ".gitignore"), "node_modules/\n")
+        self.git(self.repo, "add", ".gitignore")
+        self.git(self.repo, "commit", "-q", "-m", "ignore deps")
+        self.write(os.path.join(self.repo, "node_modules", "lib.txt"), "installed\n")
+        self.write(os.path.join(self.repo, "conf.txt"), "the user's\n")  # uncommitted when the job begins
+        self.restart()
+        self.plan("if test -f conf.txt && test -f node_modules/lib.txt; then echo FAILED old_case; fi; exit 1")
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        out = json.loads(self.out)
+        self.assertEqual((out["new"], out["pre_existing"]), ([], ["FAILED old_case"]))
+        self.assertTrue(os.path.isfile(os.path.join(self.repo, "node_modules", "lib.txt")))  # the link went, not its target
+        self.assertFalse(os.path.exists(os.path.join(self.home, "tmp", "base-q")))
+        self.assertNotIn("base-q", self.worktrees())
+
+    def test_failure_lines_naming_the_users_files_are_pre_existing(self):
+        self.write(os.path.join(self.repo, "draft.py"), "x\n")  # the user's
+        self.restart()
+        self.plan("if test -f x.txt; then echo FAILED draft.py::test_x; else echo FAILED other; fi; exit 1")
+        self.write(os.path.join(self.repo, "x.txt"), "x\n")  # the job's: without it the base fails otherwise
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["pre_existing"], ["FAILED draft.py::test_x"])
+
+    def test_a_killed_base_run_is_cleaned_up_and_other_worktrees_stay(self):
+        where = os.path.join(self.home, "tmp", "base-q")
+        self.git(self.repo, "worktree", "add", "-q", "--detach", where, "HEAD")  # a run killed midway
+        target = self.path("installed")
+        self.write(os.path.join(target, "keep.txt"), "x\n")
+        link = os.path.join(where, "node_modules")
+        if os.name == "nt":
+            subprocess.check_call(["cmd", "/c", "mklink", "/J", link, target], stdout=subprocess.DEVNULL)
+        else:
+            os.symlink(target, link)
+        gone = self.path("unmounted")  # the user's worktree on a drive that is not there now
+        self.git(self.repo, "worktree", "add", "-q", "--detach", gone, "HEAD")
+        os.rename(gone, gone + "-away")
+        self.plan("true")
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        self.assertFalse(os.path.exists(where))
+        self.assertTrue(os.path.isfile(os.path.join(target, "keep.txt")))
+        listed = self.worktrees()
+        self.assertNotIn("base-q", listed)
+        self.assertIn("unmounted", listed)  # never pruned by OKe
+
+    def test_a_base_run_leaves_no_worktree(self):
+        self.plan("exit 1")
+        self.assertEqual(self.cli("check", "q"), 0, self.err)  # the base fails the same way
+        self.assertTrue(os.path.exists(os.path.join(self.home, "jobs", "q", "baseline.json")))
+        self.assertNotIn("base-q", self.worktrees())
+        self.assertEqual(os.listdir(os.path.join(self.home, "tmp")), [])
+
+    def test_a_base_that_cannot_run_is_accepted_only_by_the_user(self):
+        self.plan("sh check.sh")
+        self.write(os.path.join(self.repo, "check.sh"), "echo FAILED x\nexit 1\n")  # not on the base
+        self.assertEqual(self.cli("check", "q"), 1, self.err)
+        out = json.loads(self.out)
+        self.assertTrue(out["base_unrunnable"])
+        self.assertIn("job accept-check q " + out["commit"], out["next"])
+        self.assertEqual(self.cli("job", "accept-check", "q", "tree:0000"), 1)
+        self.assertEqual(self.cli("job", "accept-check", "q", out["commit"]), 0, self.err)
+        row = self.rows()[-1]
+        self.assertEqual((row["result"], row["by"], row["commit"]), ("pass", "user", out["commit"]))
+        self.assertEqual(row["detail"].split()[:2], [oke.criteria_rev("q"), "accepted_by_user"])
+        self.assertEqual(self.cli("job", "accept-check", "q", out["commit"]), 1)  # the last row is a pass now
+
+    def test_a_result_is_run_once_and_recorded(self):
+        st = oke.load_state()
+        st["jobs"]["q"]["output"] = "result"
+        oke.save_state(st)
+        self.plan("echo the result > report.md; exit 3")
+        self.write(os.path.join(self.repo, "sim.cfg"), "steps=2\n")  # the temporary edit
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        out = json.loads(self.out)
+        self.assertEqual((out["result"], out["exit"], out["check_left"]), ("ran", 3, ["report.md"]))
+        self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "q", "baseline.json")))  # no second run
+        self.assertEqual(self.rows()[-1]["result"], "ran")
+        self.write(os.path.join(self.home, "jobs", "q", "q-rv", "report.md"), "seq: 1\n---\nverdict: pass\n")
+        self.assertEqual(self.cli("job", "deliver", "q"), 0, self.err)
+        self.assertIn("report.md", json.loads(self.out)["results"])
+        self.write(os.path.join(self.repo, "sim.cfg"), "steps=3\n")  # the edit changed after the run
+        self.assertEqual(self.cli("job", "deliver", "q"), 1)
+        self.assertIn("no recorded run", self.err)
+
+    def test_a_hanging_check_is_stopped_and_leaves_no_worktree(self):
+        with open(os.path.join(self.home, "config.json"), "w") as f:
+            json.dump({"check_timeout": 0.03}, f)  # 1.8 seconds
+        self.plan("sleep 60; true")
+        start = time.time()
+        self.assertEqual(self.cli("check", "q"), 1, self.err)
+        out = json.loads(self.out)
+        self.assertTrue(out["timed_out"])
+        self.assertIn("check_timeout", out["new"][0])
+        self.assertFalse(os.path.exists(os.path.join(self.home, "jobs", "q", "baseline.json")))  # no base run
+        # it hangs only on the base: the base run is stopped too, and its worktree removed
+        self.plan("test -f x.txt || sleep 60; exit 1")
+        self.write(os.path.join(self.repo, "x.txt"), "x\n")
+        self.assertEqual(self.cli("check", "q"), 1, self.err)
+        out = json.loads(self.out)
+        self.assertTrue(out["base_unrunnable"])
+        self.assertIn("time limit", self.err)
+        self.assertLess(time.time() - start, 45)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "tmp", "base-q")))
+        self.assertNotIn("base-q", self.worktrees())
+
+    def test_the_base_run_links_only_dependency_folders_and_copies_small_ignored_files(self):
+        self.write(os.path.join(self.repo, ".gitignore"), "node_modules/\ndist/\n.pytest_cache/\n.env\nbig.bin\n")
+        self.git(self.repo, "add", ".gitignore")
+        self.git(self.repo, "commit", "-q", "-m", "ignore")
+        self.write(os.path.join(self.repo, "node_modules", "lib.txt"), "installed\n")
+        self.write(os.path.join(self.repo, "dist", "out.js"), "built\n")
+        self.write(os.path.join(self.repo, ".pytest_cache", "v"), "cache\n")
+        self.write(os.path.join(self.repo, ".env"), "KEY=1\n")
+        with open(os.path.join(self.repo, "big.bin"), "wb") as f:
+            f.write(b"x" * (oke.BASE_COPY_FILE + 1))
+        self.restart()
+        # on the base only: the dependency folder and the small file are there, the outputs and the big file not
+        self.plan("echo made > node_modules/made.txt; if test -f node_modules/lib.txt && test -f .env && ! test -e dist "
+                  "&& ! test -e .pytest_cache && ! test -e big.bin; then echo FAILED base_ok; else echo FAILED here; fi; "
+                  "exit 1")
+        self.assertEqual(self.cli("check", "q"), 1, self.err)
+        self.assertEqual(json.loads(self.out)["new"], ["FAILED here"])
+        base = oke.read_json(os.path.join(self.home, "jobs", "q", "baseline.json"), None)
+        self.assertEqual(base["signatures"], ["FAILED base_ok"])
+        self.assertTrue(os.path.isfile(os.path.join(self.repo, "dist", "out.js")))
+        self.assertTrue(os.path.isfile(os.path.join(self.repo, ".env")))
+        # a known limit: what the run writes into a linked folder lands in the user's (planner.md: never install)
+        self.assertTrue(os.path.isfile(os.path.join(self.repo, "node_modules", "made.txt")))
+
+    def test_a_tracked_file_the_check_changes_is_the_jobs_change(self):
+        self.write(os.path.join(self.repo, "gen.txt"), "generated\n")
+        self.git(self.repo, "add", "gen.txt")
+        self.git(self.repo, "commit", "-q", "-m", "generated file")
+        self.restart()
+        self.plan("date +%s%N > gen.txt; date +%s%N > run.log; true")
+        self.write(os.path.join(self.repo, "a.txt"), "a\n")
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["check_left"], ["run.log"])
+        self.assertNotIn("gen.txt", oke.load_state()["jobs"]["q"].get("byproducts") or {})
+        self.assertEqual(self.cli("job", "tree", "q"), 0, self.err)
+        out = json.loads(self.out)
+        self.assertEqual((out["files"], out["check_left"]), (2, ["run.log"]))  # a.txt and gen.txt
+        # the user said a byproduct goes with the job: it does
+        self.assertEqual(self.cli("job", "files", "q", "include", "run.log"), 0, self.err)
+        self.assertIn("run.log", oke.job_files("q", oke.load_state()["jobs"]["q"], self.repo)["paths"])
+
+    def test_commits_in_the_checkout_stop_the_check_until_the_user_accepts_them(self):
+        self.plan("true")
+        self.write(os.path.join(self.repo, "other.txt"), "x\n")
+        self.git(self.repo, "add", "other.txt")
+        self.git(self.repo, "commit", "-q", "-m", "someone's commit")
+        self.assertEqual(self.cli("check", "q"), 2)
+        out = json.loads(self.out)
+        self.assertEqual(out["result"], "head_moved")
+        self.assertEqual(len(out["commits"]), 1)
+        self.assertIn("someone's commit", out["commits"][0])
+        self.assertIn("asks: head_moved", out["next"])
+        self.assertEqual(self.rows(), [])  # nothing ran
+        self.assertEqual(self.cli("job", "tree", "q"), 0, self.err)
+        self.assertEqual(len(json.loads(self.out)["head_moved"]), 1)
+        self.assertEqual(self.cli("job", "accept-head", "q"), 0, self.err)
+        self.assertEqual(self.cli("check", "q"), 0, self.err)
+        self.assertEqual(self.cli("job", "tree", "q"), 0, self.err)
+        self.assertNotIn("head_moved", json.loads(self.out))
+
+    def test_job_auto_never_accepts_for_the_user(self):
+        self.plan("sh check.sh")
+        self.write(os.path.join(self.repo, "check.sh"), "echo FAILED x\nexit 1\n")  # not on the base
+        self.assertEqual(self.cli("check", "q"), 1, self.err)
+        target = json.loads(self.out)["commit"]
+        self.assertIn("asks: check_accept", json.loads(self.out)["next"])
+        self.assertEqual(self.cli("job", "auto", "q"), 0, self.err)
+        self.assertEqual(self.cli("job", "accept-check", "q", target), 1)
+        self.assertIn("never answers this", self.err)
+        self.assertEqual(self.cli("job", "accept-head", "q"), 1)
+        self.assertIn("asks: head_moved", self.err)
+        self.assertEqual(self.cli("job", "accept-check", "q", target, "--by-user"), 0, self.err)
+        self.assertEqual(self.cli("job", "accept-head", "q", "--by-user"), 0, self.err)
+
+    def test_a_failure_the_base_has_too_that_names_a_changed_file_may_be_accepted(self):
+        self.plan("echo FAILED calc.py::test_add; exit 1")
+        self.write(os.path.join(self.repo, "calc.py"), "x = 1\n")  # the job's
+        self.assertEqual(self.cli("check", "q"), 1, self.err)
+        out = json.loads(self.out)
+        self.assertEqual((out["new"], out["base_has_it"]), (["FAILED calc.py::test_add"], ["FAILED calc.py::test_add"]))
+        self.assertIn("asks: check_accept", out["next"])
+        self.assertIn("base_has_it=1", self.rows()[-1]["detail"])
+        self.assertEqual(self.cli("job", "accept-check", "q", out["commit"]), 0, self.err)
+        self.assertEqual(self.rows()[-1]["result"], "pass")
+
+    def test_a_new_failure_the_base_lacks_is_never_accepted(self):
+        self.plan("test -f calc.py && echo FAILED calc.py::test_sub; echo FAILED calc.py::test_add; exit 1")
+        self.write(os.path.join(self.repo, "calc.py"), "x = 1\n")
+        self.assertEqual(self.cli("check", "q"), 1, self.err)
+        out = json.loads(self.out)
+        self.assertEqual(out["base_has_it"], ["FAILED calc.py::test_add"])
+        self.assertNotIn("next", out)
+        self.assertEqual(self.cli("job", "accept-check", "q", out["commit"]), 1)
+
+    def test_only_the_recorded_orchestrator_runs_its_job_actions(self):
+        for argv in (["job", "auto", "q"], ["job", "accept-head", "q"], ["job", "phase", "q", "reviewing"]):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = oke.main(argv)  # no runtime place and no recorded session: refused
+            self.assertEqual(code, 1, argv)
+            self.assertIn("only the orchestrator", err.getvalue())
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "someone-else"
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(oke.main(["job", "auto", "q"]), 1)
+        self.assertFalse(oke.load_state()["jobs"]["q"].get("auto"))
+
+    def test_an_empty_commit_group_is_skipped(self):
+        self.write(os.path.join(self.repo, "b.txt"), "b\n")
+        self.git(self.repo, "add", "b.txt")
+        self.git(self.repo, "commit", "-q", "-m", "b")
+        self.write(os.path.join(self.repo, "a.txt"), "a\n")
+        self.write(os.path.join(self.home, "jobs", "q", "plan.md"),
+                   "job: q\n---\n## Commits\n- first: a.txt\n- second: b.txt\n")
+        reviewed = oke.tree_of(self.repo, ["a.txt", "b.txt"])
+        made, why = oke.commit_job("q", self.repo, ["a.txt", "b.txt"], reviewed)
+        self.assertIsNone(why)
+        self.assertEqual(len(made), 1)
+        self.assertEqual(self.git_out(self.repo, "log", "-1", "--format=%s").strip(), "first")
+
+    def test_the_base_run_never_writes_through_a_link(self):
+        outside = self.path("outside")
+        os.makedirs(outside)
+        where = self.path("base")
+        os.makedirs(where)
+        link = os.path.join(where, "sub")
+        if os.name == "nt":
+            subprocess.check_call(["cmd", "/c", "mklink", "/J", link, outside], stdout=subprocess.DEVNULL)
+        else:
+            os.symlink(outside, link)
+        copies = os.path.join(self.home, "jobs", "q", oke.DIRTY_COPIES)
+        self.write(os.path.join(copies, "sub", "x.txt"), "the user's\n")
+        self.write(os.path.join(copies, "top.txt"), "the user's\n")
+        oke.write_json_atomic(oke.snapshot_path("q"), {"head": "x", "files": {"sub/x.txt": "m", "top.txt": "m"},
+                                                       "copied": ["sub/x.txt", "top.txt"]})
+        oke.overlay_user_files("q", oke.load_state()["jobs"]["q"], where)
+        self.assertEqual(os.listdir(outside), [])
+        self.assertTrue(os.path.isfile(os.path.join(where, "top.txt")))
+        oke.drop_link(link)
+
+    def test_a_big_file_is_marked_by_size_and_time(self):
+        big, oke.BIG_FILE = oke.BIG_FILE, 10
+        try:
+            self.write(os.path.join(self.repo, "big.dat"), "x" * 20)
+            self.assertTrue(oke.file_mark(self.repo, "big.dat").startswith("stat:20:"))
+            self.assertEqual(len(oke.file_mark(self.repo, "notes-none") or ""), 1)  # gone: "-"
+        finally:
+            oke.BIG_FILE = big
+
+    def test_a_git_repository_made_in_the_checkout_is_never_the_jobs(self):
+        inner = os.path.join(self.repo, "vendor")
+        os.makedirs(inner)
+        self.git(inner, "init", "-q")
+        self.write(os.path.join(inner, "x.txt"), "x\n")
+        self.plan("true")
+        self.assertEqual(self.cli("job", "tree", "q"), 1)
+        self.assertIn("a git repository of its own", self.err)
+        self.assertEqual(self.cli("check", "q"), 2)
+        self.assertIn("vendor", self.err)
+
+
+class TestRunTimed(unittest.TestCase):
+    def test_a_process_left_holding_the_output_does_not_stall(self):
+        # the child starts a grandchild that keeps its stdout open, then exits at once
+        child = ("import subprocess, sys; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                 "print('child done')")
+        start = time.time()
+        r = oke.run_timed([sys.executable, "-c", child], 10, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.assertLess(time.time() - start, 15)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(b"child done", r.stdout)
+
+    def test_a_command_over_its_time_is_stopped(self):
+        start = time.time()
+        r = oke.run_timed([sys.executable, "-c", "import time; print('a', flush=True); time.sleep(30)"], 2,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.assertLess(time.time() - start, 15)
+        self.assertEqual(r.returncode, oke.TIMED_OUT)
+        self.assertIn(b"OKe stopped it", r.stdout)
+
+    def test_input_and_output(self):
+        r = oke.run_timed([sys.executable, "-c", "import sys; sys.stdout.write(sys.stdin.read().upper())"],
+                          input=b"abc", stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual((r.returncode, r.stdout, r.stderr), (0, b"ABC", b""))
+
+
+class TestSnapshotBeforeLock(SpawnBase):
+    """The user's files are read before the state lock when a job starts work in place."""
+
+    def test_starting_work_takes_the_snapshot_and_leaves_no_temporary_copies(self):
+        self.job("s", "awaiting_approval")
+        self.write(os.path.join(self.repo, "notes.txt"), "the user's\n")
+        self.assertEqual(self.cli("job", "phase", "s", "working"), 0, self.err)
+        snap = oke.read_json(oke.snapshot_path("s"), None)
+        self.assertIn("notes.txt", snap["files"])
+        self.assertEqual(snap["copied"], ["notes.txt"])
+        folder = os.path.join(self.home, "jobs", "s")
+        self.assertEqual(sorted(n for n in os.listdir(folder) if n.startswith("dirty-before")),
+                         ["dirty-before", "dirty-before.json"])
 
 
 if __name__ == "__main__":
