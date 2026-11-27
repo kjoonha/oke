@@ -619,6 +619,7 @@ class TestContinue(DeliverBase):
         info = oke.load_state()["jobs"]["fix-b"]
         self.assertEqual((info["base"], info["start_commit"]), ("the-a-base", self.a_tip))
         self.assertEqual(oke.base_point(info, out["path"]), self.a_tip)  # its review covers its own commits
+        os.environ["OKE_RUNTIME"] = "herdr"  # status under bg looks for claude, which CI lacks
         self.assertEqual(self.cli("status"), 0, self.err)
         self.assertEqual(json.loads(self.out)["jobs"]["fix-b"]["review_base"], self.a_tip)
 
@@ -703,6 +704,7 @@ class TestContinue(DeliverBase):
         st = oke.load_state()
         st["jobs"]["fix-b"]["base"] = self.base
         oke.save_state(st)
+        os.environ["OKE_RUNTIME"] = "herdr"  # status under bg looks for claude, which CI lacks
         self.assertEqual(self.cli("status"), 0, self.err)
         self.assertEqual(json.loads(self.out)["jobs"]["fix-b"]["review_base"], base_head)
         self.reviewed_b()
