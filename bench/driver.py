@@ -458,6 +458,9 @@ STARTUP = [
                 r"paste code here|anthropic console account)"), "abort"),
     (re.compile(r"(?i)(choose the text style|dark mode|light mode)"), "enter"),
     (re.compile(r"(?i)press enter to continue"), "enter"),
+    # the bench's own orch folder; no numbers on the options, so no popup parse. "No, exit" is preselected
+    (re.compile(r"(?i)yes, i trust this folder"), ("down", "enter")),
+    (re.compile(r"(?i)bypass permissions mode[\s\S]*yes, i accept"), ("down", "enter")),
 ]
 
 
@@ -483,7 +486,7 @@ def start_orchestrator(b, args):
                 write_text(os.path.join(b.logs, "startup-abort.txt"), scr)
                 raise SystemExit("claude asks to log in: the free-proxy env did not reach it; aborting")
             write_text(os.path.join(b.logs, "startup-dialog-%d.txt" % time.time()), scr)
-            b.keys(hit[0])
+            b.keys(*(hit[0] if isinstance(hit[0], tuple) else (hit[0],)))
             ready_since = None
             continue
         p = parse_popup(scr)
