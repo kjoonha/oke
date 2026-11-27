@@ -2779,9 +2779,13 @@ WAITING_WORDS = {"plan": "your approval of the plan", "question": "your answer t
 WORDS_SHORT = 100  # characters of the user's words a folded job shows
 
 
+SAID = "You said: "  # the frame's label for the user's own words
+FULL_HINT = "(oke board --full shows everything)"
+
+
 def short_words(words, job):
     words = words or "(job %s)" % job
-    return words if len(words) <= WORDS_SHORT else words[:WORDS_SHORT].rstrip() + "..."
+    return words if len(words) <= WORDS_SHORT else words[:WORDS_SHORT].rstrip() + u"…"
 
 
 def board_lines(tree, recent=None, full=False):
@@ -2790,16 +2794,26 @@ def board_lines(tree, recent=None, full=False):
     the PM's last jobs done. Jobs done of a PM no longer on the board come last."""
     out = []
     recent = recent or []
+    cut = []  # some words were cut: one hint at the end names --full
+
+    def said(words, job):
+        """The user's words with their label (`full`: whole, else cut at WORDS_SHORT)."""
+        if not words:
+            return "(job %s)" % job
+        shown = words if full else short_words(words, job)
+        if shown != words:
+            cut.append(job)
+        return SAID + shown
 
     def done(entries, depth):
         out.append((depth, "Done"))
         for r in entries:
-            mark = "x" if r.get("phase") == "failed" else "v"
+            mark = u"✗" if r.get("phase") == "failed" else u"✓"
             what = "stopped" if r.get("phase") == "failed" else "answered" if r.get("answer") else "done"
             tail = [t for t in (r.get("result"), "branch %s" % r["branch"] if r.get("branch") else "") if t]
-            out.append((depth + 1, "%s %s  (%s, %s)%s" % (mark, short_words(r.get("words"), r.get("job") or "?"),
-                                                         r.get("job") or "?",
-                                                         what, ": " + " - ".join(tail) if tail else "")))
+            out.append((depth + 1, u"%s %s  (%s, %s)%s" % (mark, said(r.get("words"), r.get("job") or "?"),
+                                                          r.get("job") or "?",
+                                                          what, ": " + " - ".join(tail) if tail else "")))
 
     def agent(n, depth):
         out.append((depth, "%s %s: %s%s%s%s" % (
@@ -2826,8 +2840,7 @@ def board_lines(tree, recent=None, full=False):
             if not job.get("words"):
                 out.append((1, "job %s" % job["job"]))  # no intake yet: its name is all there is
             else:
-                out.append((1, "%s  (%s)" % (job["words"] if full else short_words(job["words"], job["job"]),
-                                             job["job"])))
+                out.append((1, u"%s  (%s)" % (said(job["words"], job["job"]), job["job"])))
             now = job.get("step") or job["phase"]
             if job.get("held"):
                 now += ", on hold"
@@ -2849,6 +2862,8 @@ def board_lines(tree, recent=None, full=False):
         done(others, 0)
     if not jobs and not recent and not any(repo["pm"] for repo in tree):
         return [(0, "no OKe agents yet")]
+    if cut:
+        out.append((0, FULL_HINT))
     return out
 
 
@@ -2856,7 +2871,9 @@ def cmd_board(args):
     """The board for hosts that cannot draw the mod's pane (SDK hosts)."""
     state = load_state()
     lines = board_lines(board_tree(state, list_agents()), recent_jobs(state), full=args.full)
-    text = "\n".join("  " * d + t for d, t in lines) + "\n"
+    dim = sys.stdout.isatty()  # the hint is dim on a terminal, plain when a program reads it
+    text = "\n".join("  " * d + ("\x1b[2m%s\x1b[0m" % t if dim and t == FULL_HINT else t)
+                     for d, t in lines) + "\n"
     out = getattr(sys.stdout, "buffer", None)
     if out is not None:  # the user's words may be in any language: never the console's code page
         out.write(text.encode("utf-8"))

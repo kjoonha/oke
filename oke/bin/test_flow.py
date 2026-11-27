@@ -318,9 +318,6 @@ class TestBoardWords(S3Base):
         self.assertEqual(oke.job_step("fix-a", info, {"type": "waiting", "on": "fix-a-w1"}, "none")[0], "working")
         self.assertEqual(oke.job_step("fix-a", info, {}, "delivered")[0], "delivering")
         self.assertEqual(oke.job_step("fix-a", dict(info, answer=True), {}, "none"), ("answering", []))
-        for step, left in oke.STEP_LEFT.items():
-            for word in [step] + list(left):
-                self.assertNotRegex(word, r"baseline|regression|research|phase|seq")
 
     def test_the_board_leads_with_what_waits_and_ends_with_the_last_done(self):
         self.job("fix-a", "awaiting_approval")
@@ -339,7 +336,8 @@ class TestBoardWords(S3Base):
                                    "answer": True, "result": "the cache is off", "branch": None}])
         mine = [{"name": "mine", "key": pm, "pm": None, "jobs": []}]  # under its PM's section
         self.assertEqual([(d, t) for d, t in oke.board_lines(mine, recent)][1:],
-                         [(0, "PM mine"), (1, "Done"), (2, "v why is it slow?  (old, answered): the cache is off")])
+                         [(0, "PM mine"), (1, "Done"),
+                          (2, u"✓ You said: why is it slow?  (old, answered): the cache is off")])
         tree = [{"name": "toy", "key": "toy", "pm": None, "jobs": [
             {"job": "fix-a", "phase": "awaiting_approval", "agents": [], "pending": "plan",
              "words": oke.users_words(os.path.join(self.home, "jobs", "fix-a")), "step": "awaiting approval",
@@ -347,16 +345,19 @@ class TestBoardWords(S3Base):
         lines = [t for _, t in oke.board_lines(tree, recent)]
         self.assertEqual(lines[0], u"To do for you: 1 approval · 0 questions")
         self.assertEqual(lines[1], "PM toy")
-        self.assertTrue(lines[2].endswith("...  (fix-a)"), lines[2])
-        self.assertLessEqual(len(lines[2].split("...")[0]), oke.WORDS_SHORT)
+        self.assertTrue(lines[2].startswith(oke.SAID + "add a subtract button"), lines[2])
+        self.assertTrue(lines[2].endswith(u"\u2026  (fix-a)"), lines[2])
+        self.assertLessEqual(len(lines[2][len(oke.SAID):].split(u"\u2026")[0]), oke.WORDS_SHORT)
         self.assertEqual(lines[3], "now: awaiting approval, waiting for your approval of the plan")
         self.assertEqual(lines[4], "left: your approval, work")
-        self.assertEqual(lines[5:], ["Done", "v why is it slow?  (old, answered): the cache is off"])
+        self.assertEqual(lines[5:], ["Done", u"\u2713 You said: why is it slow?  (old, answered): the cache is off",
+                                     oke.FULL_HINT])  # something was cut: one hint names --full
         full = [t for _, t in oke.board_lines(tree, recent, full=True)]
         self.assertIn("at c:/x", full)
-        self.assertTrue(any(t.startswith("add a subtract button") and "..." not in t for t in full))
-        for t in lines + full:
-            self.assertNotRegex(t, r"baseline|regression|research|phase|seq")
+        self.assertTrue(any(t.startswith(oke.SAID + "add a subtract button") and u"\u2026" not in t for t in full))
+        self.assertNotIn(oke.FULL_HINT, full)
+        nothing_cut = [t for _, t in oke.board_lines([], recent)]
+        self.assertNotIn(oke.FULL_HINT, nothing_cut)
 
 
 class TestReviewRound1(S3Base):

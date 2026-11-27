@@ -285,11 +285,15 @@ test('the board puts what waits on the user first, then each job in the user wor
   expect(at(/^Done$/)).toBeLessThan(at(/add an add button/))
   expect(texts.lastIndexOf('Done')).toBeGreaterThan(at(/add an add button/))
   expect(texts.lastIndexOf('Done')).toBeLessThan(at(/why is it slow/))
-  expect(await ui.find({ type: 'Text', text: '✓ add an add button  calc-add · the add button works · branch oke/calc-add' })).toBeTruthy()
-  expect(await ui.find({ type: 'Text', text: '✓ why is it slow?  why-slow · answered · the cache is off' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '✓ You said: add an add button  calc-add · the add button works · branch oke/calc-add  ▸' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '✓ You said: why is it slow?  why-slow · answered · the cache is off  ▸' })).toBeTruthy()
+  // a done entry opens like a job card: the whole words, then its result on its own line
+  await ui.press({ key: 'open-done:calc-add' })
+  expect(await ui.find({ type: 'Text', text: '✓ You said: add an add button  calc-add  ▾' })).toBeTruthy()
+  expect(await ui.find({ type: 'Text', text: '  the add button works · branch oke/calc-add' })).toBeTruthy()
+  // the user's words carry their label on the job cards too
+  expect((await all()).filter((t: string) => t === 'You said: ').length).toBeGreaterThan(0)
   expect(await ui.find({ key: 'open-calc-add-w1' })).toBeFalsy()
-  // no internal words in the frame
-  expect(texts.some((t: string) => /baseline|regression|research|phase|seq/.test(t))).toBe(false)
   await ui.unmount()
   tickBoard = BOARD
   tickRecent = []

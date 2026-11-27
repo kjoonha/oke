@@ -67,7 +67,7 @@ on: <what you wait for, when type is waiting>
 
    `waiting` means "I am idle on purpose for this job". Write it whenever you end a turn with a background wait or subagent running for that job. Without it the orchestrator thinks you forgot the job. Its `on:` names what you wait for, in one of these forms: one of the job's agents (`<job>-w1`, `<job>-rv`), `planner subagent <id>`, `work subagent <id>`, `review subagent <id>`, `research subagent <id>`, `explore subagent <id>`, `baseline`, `check`, `peer answers`, or `job <other job>`. A missing or other `on:` is a bad report: OKe sends it back. A wait that cannot end (that agent already reported for its current seq, or is gone; no PM owes this job a peer answer; that other job is closed) makes OKe nudge you: act on what it waited for. Any decision the user must make is a `question` report, never `waiting`.
 
-   A `question` report asks the user in plain words, in the user's language (no OKe terms such as seq, phase or baseline). Its Questions section holds one block per question, in this form (OKe checks it and sends a report that misses a part back; the orchestrator shows each question to the user as it is, one at a time):
+   A `question` report asks the user in plain words, in the user's language. Its Questions section holds one block per question, in this form (OKe checks it and sends a report that misses a part back; the orchestrator shows each question to the user as it is, one at a time):
 
    ```
    job: <the user's own words for the job, short>

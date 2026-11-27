@@ -22,7 +22,7 @@ job 이 내놓는 것 (`oke status` 의 `output`) 은 세 가지다. `code` 는 
 
 요청은 질문이든 변경이든 같은 흐름을 탄다. PM 이 읽기만 하며 조사하고 (계획이 승인되기 전에는 job 의 경로에서 아무것도 바뀔 수 없다), 답으로 끝내거나 (계획, 승인, worktree, 리뷰, 전달 없음) 변경을 계획한다. 계획을 사용자가 승인하면 worker 가 일하고 reviewer 가 리뷰하고 PM 이 넘긴다. "원인을 찾아서 고쳐" 는 묻지 않고 바로 계획으로 간다. PM 이 사용자에게 묻는 것은 사용자의 언어로, 하나씩 팝업으로 온다: 어느 job 인지 (사용자의 말로), 무엇을 정하는지, 선택지마다 고르면 어떻게 되는지.
 
-보드 (`/oke-board`, 셸에서는 `oke board`, 모두 펼치려면 `oke board --full`) 맨 위에는 사용자를 기다리는 것이 있다: "To do for you: N approvals · N questions". 그 아래 PM 별로 job 카드가 있다: 사용자가 한 말 (앞 100 자, 카드를 펼치면 전부), 지금 어디인지, 남은 단계. 펼친 카드에는 크기, 일하는 절대 경로, PM, worker, reviewer 와 비용, todo 가 나온다. 각 PM 아래 "Done" 에 그 PM 의 최근 끝난 job 5 개가 결과와 merge 할 브랜치와 함께 나온다 (없어진 PM 의 job 은 맨 끝). 보관된 job 은 한 번만 읽고 그 줄을 `$OKE_HOME/recent-index.json` 에 둔다.
+보드 (`/oke-board`, 셸에서는 `oke board`, 모두 펼치려면 `oke board --full`) 맨 위에는 사용자를 기다리는 것이 있다: "To do for you: N approvals · N questions". 그 아래 PM 별로 job 카드가 있다: "You said:" 뒤에 사용자가 한 말 (앞 100 자, 카드를 펼치면 전부. 셸에서는 잘린 것이 있으면 마지막 줄이 `oke board --full` 을 알려 준다), 지금 어디인지, 남은 단계. 펼친 카드에는 크기, 일하는 절대 경로, PM, worker, reviewer 와 비용, todo 가 나온다. 각 PM 아래 "Done" 에 그 PM 의 최근 끝난 job 5 개가 결과와 merge 할 브랜치와 함께 나온다 (✓ 끝남, ✗ 멈춤. 없어진 PM 의 job 은 맨 끝). 하나를 펼치면 사용자가 한 말 전부와 결과가 따로 한 줄로 나온다. 보관된 job 은 한 번만 읽고 그 줄을 `$OKE_HOME/recent-index.json` 에 둔다.
 
 PM 관리: "PM 추가", "PM <x> 이름 바꿔", "PM <x> 지워" 라고 말한다. 열린 job 이나 보류 job 이 있는 PM 은 그 job 들을 취소하는 데 동의해야 지운다 (wiki 는 `<name>.removed-<time>` 으로 옮겨 둔다). 이름은 열린 job 이나 보류 job 이 있는 동안에만 못 바꾼다. 끝난 job 은 새 이름을 따라간다. 셸에서는 `oke pm list` 로 본다.
 

@@ -401,6 +401,14 @@ export function jobWords(job: { job: string, words?: string }, full = false): st
   return full || words.length <= WORDS_SHORT ? words : `${words.slice(0, WORDS_SHORT).trimEnd()}…`
 }
 
+/** The frame's label for the user's own words (none before intake: the job's name is not theirs). */
+export const SAID = 'You said: '
+
+/** The user's words with their label, cut as jobWords cuts them. */
+export function saidWords(job: { job: string, words?: string }, full = false): string {
+  return `${job.words ? SAID : ''}${jobWords(job, full)}`
+}
+
 /** "To do for you: N approvals · N questions" from the board's jobs. */
 export function todoLine(jobs: { pending: string | null, phase: string }[]): string {
   const open = jobs.filter(j => j.phase !== 'done' && j.phase !== 'failed')
@@ -1538,16 +1546,29 @@ export const register: Register = on => {
       )
     }
     const short = (n: BoardNode, job: BoardJob) => (n.agent.startsWith(`${job.job}-`) ? n.agent.slice(job.job.length + 1) : n.agent)
-    // the last jobs done, under their PM (a PM no longer on the board: at the end)
+    // the last jobs done, under their PM (a PM no longer on the board: at the end). Each one
+    // opens like a job card: the whole of the user's words, then the result on its own line
     const doneCard = (list: RecentJob[]) => (
       <Box flexDirection="column" marginTop={1}>
         <Text bold color={INK.green}>{'Done'}</Text>
-        {list.map(r => (
-          <Text wrap="truncate-end" color={r.phase === 'failed' ? INK.red : undefined} dimColor>
-            {`${r.phase === 'failed' ? '✗' : '✓'} ${jobWords(r)}${r.words ? `  ${r.job}` : ''}${r.phase === 'failed' ? ' · stopped' : r.answer ? ' · answered' : ''}`
-              + `${r.result ? ` · ${r.result}` : ''}${r.branch ? ` · branch ${r.branch}` : ''}`}
-          </Text>
-        ))}
+        {list.map(r => {
+          const key = `done:${r.job}`
+          const isOpenDone = open.includes(key)
+          const failed = r.phase === 'failed'
+          const head = `${failed ? '✗' : '✓'} ${saidWords(r, isOpenDone)}${r.words ? `  ${r.job}` : ''}`
+            + `${failed ? ' · stopped' : r.answer ? ' · answered' : ''}`
+          const result = [r.result, r.branch ? `branch ${r.branch}` : ''].filter(Boolean).join(' · ')
+          return (
+            <Box flexDirection="column">
+              <Button key={`open-${key}`} plain onPress={() => toggle(key)}>
+                <Text wrap={isOpenDone ? 'wrap' : 'truncate-end'} color={failed ? INK.red : undefined} dimColor>
+                  {`${head}${!isOpenDone && result ? ` · ${result}` : ''}${isOpenDone ? '  ▾' : '  ▸'}`}
+                </Text>
+              </Button>
+              {isOpenDone && result ? <Text wrap="wrap" dimColor>{`  ${result}`}</Text> : ''}
+            </Box>
+          )
+        })}
       </Box>
     )
     for (const repo of tree) {
@@ -1576,6 +1597,7 @@ export const register: Register = on => {
         cards.push(
           <Box flexDirection="column" borderStyle="round" borderColor={job.pending ? INK.yellow : hurt ? INK.red : INK.lavender} paddingX={1} marginTop={1}>
             <Button key={`open-${key}`} plain onPress={() => toggle(key)}>
+              {job.words ? <Text dimColor>{SAID}</Text> : ''}
               <Text bold color={INK.white} wrap="wrap">{jobWords(job, isOpenJob)}</Text>
               <Text dimColor>{`${job.words ? `  ${job.job}` : ''}${isOpenJob ? '  ▾' : '  ▸'}`}</Text>
             </Button>
