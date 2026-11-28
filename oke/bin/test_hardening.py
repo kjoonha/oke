@@ -295,6 +295,20 @@ class TestUserAnswers(SpawnBase):
         self.assertEqual(self.as_orchestrator(["job", "cancel", "fix-a"]), 0, self.err)
         self.assertEqual(oke.load_state()["jobs"]["fix-a"]["phase"], "failed")
 
+    def test_auto_needs_no_popup_when_the_users_words_asked_for_it(self):
+        # seen live: "don't ask, go ahead" in the request, and `job auto` was refused for want of a popup
+        self.job("fix-a", "intake")
+        with oke.locked():
+            st = oke.load_state()
+            st["orchestrator"]["ask_gate"] = True
+            oke.save_state(st)
+        self.assertEqual(self.cli("job", "auto", "fix-a"), 1)  # nothing in the words: a popup first
+        with oke.locked():
+            st = oke.load_state()
+            st["jobs"]["fix-a"]["auto_asked"] = True  # `job triage` read it in the user's words
+            oke.save_state(st)
+        self.assertEqual(self.cli("job", "auto", "fix-a"), 0, self.err)
+
     def test_setting_failed_is_giving_up_and_needs_a_popup_answer_too(self):
         # seen live: refused a cancel, an orchestrator ran `job phase failed` and archived the job
         self.job("fix-a", "working")

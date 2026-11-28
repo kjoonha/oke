@@ -3671,7 +3671,8 @@ def user_decision(state, args):
             return None
         return "approve"
     if args.action == "auto":
-        return None if args.off else "auto"
+        # the user's own words asked for it ("don't ask"): `job triage` read them in the intake
+        return None if args.off or info.get("auto_asked") else "auto"
     if args.action == "files":
         return "files"
     if args.action in ("accept-check", "accept-head"):
@@ -6704,7 +6705,8 @@ def cmd_triage(job):
         state = load_state()
         if job not in state["jobs"]:
             return fail("unknown job: %s" % job)
-        state["jobs"][job].update(size_hint=out["size_hint"], anchors=[a["kind"] for a in out["anchors"]])
+        state["jobs"][job].update(size_hint=out["size_hint"], anchors=[a["kind"] for a in out["anchors"]],
+                                  auto_asked=out["auto_asked"])
         save_state(state)
     data = read_json(interview_path(job), None)
     asked = isinstance(data, dict) and data.get("rounds")

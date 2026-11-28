@@ -1388,6 +1388,10 @@ export const register: Register = on => {
         role = was.role
         folder = was.folder
         named = was.named  // a role oke recorded clears again when oke stops naming it
+        // the agent was at work before the reload: an idle one never ends a turn again, so its mail
+        // would wait for good (seen live: a PM reloaded at a turn's end got no job for an hour). A
+        // turn still running takes a submitted prompt after it ends.
+        if (inTurn === null) inTurn = false
       }
     }
     await tick($)
