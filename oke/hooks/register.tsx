@@ -1449,7 +1449,8 @@ export const register: Register = on => {
           const out = await oke($, ['job', 'brief', '--json'])
           const questions = Array.isArray(out?.briefs) && out.briefs.length
             ? withBriefs((e as any).questions, out.briefs, Array.isArray(out.jobs) ? out.jobs : []) : null
-          if (questions) return next({ ...e, questions } as any)
+          // not returned here: the answer below is still counted
+          if (questions) e = { ...e, questions }
         }
       }
       const ran: any = await next(e)
