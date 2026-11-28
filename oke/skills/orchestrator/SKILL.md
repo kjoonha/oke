@@ -151,7 +151,7 @@ One wait per PM covers all of its jobs. Run it in the background (Bash `run_in_b
 $OKE wait <pm_agent> --jobs
 ```
 
-The wait also types queued messages into the PM when it is idle, so a PM with open jobs always needs one. Starting a new wait makes the older one stop with `superseded`; when you are not sure a wait runs, start one.
+The wait also types queued messages into the PM when it is idle, so a PM with open jobs always needs one. Starting a new wait makes the older one stop with `superseded`; when you are not sure a wait runs, start one. A PM that no wait of yours has watched for 90 seconds gets one from OKe: its output comes to you as a prompt (`$OKE wait <pm> --jobs returned: <output>`), and you act on it as on your own wait's.
 
 When it finishes, read the first line of its output. If the user speaks before it finishes, answer them; the wait keeps running.
 

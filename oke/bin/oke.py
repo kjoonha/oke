@@ -2201,7 +2201,37 @@ def claim_wait(agent):
 
 def superseded(agent, token):
     mark = read_json(wait_mark(agent), None)
+    try:
+        os.utime(wait_mark(agent), None)  # each look: a wait is still running (`unwatched`)
+    except OSError:
+        pass
     return isinstance(mark, dict) and mark.get("token") not in (None, token)
+
+
+WAIT_STALE = 90  # seconds since a wait's last look: no wait watches that agent any more
+
+
+def unwatched(state):
+    """The PM agents with open jobs that no running wait watches: no wait looked at them for
+    WAIT_STALE seconds."""
+    out = []
+    for key, record in sorted(state["pms"].items()):
+        agent = (record.get("pm") or {}).get("agent")
+        if not agent or not (open_jobs(state, key) or inbox_messages(agent)):
+            continue
+        try:
+            fresh = time.time() - os.path.getmtime(wait_mark(agent)) < WAIT_STALE
+        except OSError:
+            fresh = False
+        if not fresh:
+            out.append(agent)
+    return out
+
+
+def cmd_unwatched(args):
+    """`unwatched`: the PMs the orchestrator's mod waits on itself, as no wait of its own does."""
+    print(json.dumps({"pms": unwatched(load_state())}))
+    return 0
 
 
 RETRY_MARKER_GRACE = 120  # seconds past the marker's own delay
@@ -2217,7 +2247,7 @@ def retry_pending(marker):
     return age < delay + RETRY_MARKER_GRACE
 
 
-def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, jobs_key=None):
+def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, jobs_key=None, max_seconds=None):
     """No time limit: a five hour simulation is a normal wait. A herdr state read
     right after input can be stale and a report can be mid-write, so an idle
     verdict needs IDLE_CONFIRMATIONS consecutive polls."""
@@ -2235,6 +2265,8 @@ def wait_loop(agent, report, seq, poll=2, max_polls=None, after_blocked=False, j
         polls += 1
         if superseded(agent, token):
             return "superseded"
+        if max_seconds is not None and time.time() - started > max_seconds:
+            return "still"  # nothing yet: the caller waits again
         try:
             if jobs_key is None:
                 result = check_once(agent, report, seq)
@@ -2340,7 +2372,8 @@ def cmd_wait(args):
         if not keys:
             return fail(never_started(state, args.agent) or "--jobs needs a PM agent: %s is not one" % args.agent)
         return wait_said(args.agent, wait_loop(args.agent, None, None, poll=args.poll,
-                                               after_blocked=args.after_blocked, jobs_key=keys[0]))
+                                               after_blocked=args.after_blocked, jobs_key=keys[0],
+                                               max_seconds=args.max_seconds))
     if args.report is None or args.seq is None:
         return fail("wait needs --report and --seq, or --jobs for a PM")
     return wait_said(args.agent, wait_loop(args.agent, native_path(args.report), args.seq, poll=args.poll,
@@ -8333,6 +8366,8 @@ def build_parser():
     spawn.add_argument("--resume")
     spawn.set_defaults(func=cmd_spawn)
 
+    sub.add_parser("unwatched", help="PMs with open jobs that no wait watches (the mod)").set_defaults(
+        func=cmd_unwatched)
     wait = sub.add_parser("wait")
     wait.add_argument("agent")
     wait.add_argument("--report")
@@ -8340,6 +8375,8 @@ def build_parser():
     wait.add_argument("--jobs", action="store_true")
     wait.add_argument("--poll", type=float, default=None)
     wait.add_argument("--after-blocked", action="store_true")
+    wait.add_argument("--for", dest="max_seconds", type=float, default=None,
+                      help="give up after this many seconds with `still` (the mod's own waits)")
     wait.set_defaults(func=cmd_wait)
 
     status = sub.add_parser("status")

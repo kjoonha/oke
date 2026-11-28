@@ -358,6 +358,55 @@ async function takeMail($: any) {
   }
 }
 
+// The orchestrator's PMs that no wait of its own watches: the mod waits on them (seen live:
+// an orchestrator ended its turns without `oke wait`, and an idle PM was never nudged).
+const ownWaits = new Set<string>()
+const waitResults: string[] = []
+
+async function watchPms($: any) {
+  if (role !== 'orchestrator' || !python) return
+  const out = await oke($, ['unwatched'])
+  for (const pm of (out?.pms ?? []) as string[]) {
+    if (ownWaits.has(pm)) continue
+    ownWaits.add(pm)
+    void (async () => {
+      let text = ''
+      try {
+        // a run lasts ten minutes at most: the wait ends before, and the next tick starts another
+        const script = `${$.plugin.root}/bin/oke.py`.replace(/\\/g, '/')
+        const r = await $.process.run([python as string, script, 'wait', pm, '--jobs', '--for', '540'],
+          { timeoutMs: 600_000 })
+        text = r.exitCode === 0 ? r.stdout.trim() : ''
+      } catch {
+        text = ''
+      } finally {
+        ownWaits.delete(pm)
+      }
+      // nothing yet, mail it typed in, or a newer wait took over: nothing for the orchestrator to do
+      if (!text || text === 'still' || text.startsWith('superseded') || text === 'no_jobs'
+        || text.startsWith('{"deliver"')) return
+      waitResults.push(`$OKE wait ${pm} --jobs returned: ${text}`)
+      await flushWaits($)
+    })()
+  }
+}
+
+async function flushWaits($: any) {
+  if (!waitResults.length || inTurn !== false || pending || taking) return
+  if ((await $.prompt.read()).text.trim()) return  // the person is typing here
+  const text = 'OKe ran these waits for you (no wait of yours watched these PMs):\n'
+    + waitResults.join('\n') + '\nAct on each as the oke:orchestrator skill says.'
+  const sent = waitResults.splice(0)
+  inTurn = true
+  try {
+    if ((await $.prompt.submit({ text }))?.drop === undefined) return
+  } catch {
+    // goes back below
+  }
+  inTurn = false
+  waitResults.unshift(...sent)
+}
+
 let asked: Set<string> | null = null
 
 /** A new item waiting on the person raises a native notification at once (they may be
@@ -1409,6 +1458,7 @@ export const register: Register = on => {
       if (role === 'worker' || role === 'reviewer') return takeMail($)  // a file check, no python
       if (role === null && --early < 0 && ++skipped < UNKNOWN_EVERY) return
       skipped = 0
+      if (role === 'orchestrator') void watchPms($).then(() => flushWaits($))
       return tick($)
     })
     // The conductor moves while there is something to show; rest breathes at half speed.
@@ -1628,7 +1678,7 @@ export const register: Register = on => {
         inTurn = null  // the person stepped in (Esc) and may type next: only the waits deliver
       } else if (!compacting) {
         inTurn = false
-        $.clock.after(0, () => takeMail($))  // after this turn has settled, not inside its hook
+        $.clock.after(0, () => (role === 'orchestrator' ? flushWaits($) : takeMail($)))  // after this turn has settled
       }
       return r
     }

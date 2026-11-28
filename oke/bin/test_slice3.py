@@ -484,6 +484,23 @@ class TestPmWait(InboxBase):
         finally:
             oke.check_pm_once = original
 
+    def test_a_pm_with_open_jobs_and_no_running_wait_is_unwatched(self):
+        # seen live: the orchestrator never ran a wait, and a PM that went idle was never nudged
+        self.pm_job("fix-a", 2, REPORT("waiting", 2))
+        self.assertEqual(oke.unwatched(oke.load_state()), ["pm-toy"])
+        self.fake({"agent get": [AGENT("working")]})
+        self.wait(1)  # a wait looks at it
+        self.assertEqual(oke.unwatched(oke.load_state()), [])
+        old = time.time() - oke.WAIT_STALE - 1
+        os.utime(oke.wait_mark("pm-toy"), (old, old))  # that wait ended long ago
+        self.assertEqual(oke.unwatched(oke.load_state()), ["pm-toy"])
+
+    def test_a_wait_with_a_time_limit_says_still_when_nothing_came(self):
+        self.pm_job("fix-a", 2, REPORT("waiting", 2))
+        self.fake({"agent get": [AGENT("working")]})
+        self.assertEqual(oke.wait_loop("pm-toy", None, None, poll=0, max_polls=50, jobs_key="pm-toy",
+                                       max_seconds=0), "still")
+
     def test_a_job_still_silent_after_a_nudge_is_reported_again_then_left(self):
         self.pm_job("fix-a", 3, REPORT("waiting", 2))
         self.fake({"agent get": [AGENT("idle")]})

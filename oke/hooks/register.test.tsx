@@ -33,6 +33,7 @@ let writeAreas: { path: string; direct: boolean }[] = []  // the tick's write ar
 let tickFolder = '/oke/jobs/j/w1'
 let failTick = false  // oke tick prints no JSON
 let failCheck = false  // oke path-check prints no JSON
+let unwatchedPms: string[] = []  // PMs no wait watches (oke unwatched)
 
 function answer(args: readonly string[]) {
   if (args[0] === 'tick') {
@@ -45,6 +46,7 @@ function answer(args: readonly string[]) {
     mailText = null
     return text ? { text, names: ['1.txt'] } : { text: null }
   }
+  if (args[0] === 'unwatched') return { pms: unwatchedPms }
   if (args[0] === 'boundary') return { role: tickRole, answered: answeredNow, next: nextWork, min_percent: 30 }
   if (args[0] === 'path-check') {
     if (failCheck) return undefined
@@ -60,6 +62,7 @@ function answer(args: readonly string[]) {
 function engine(on: any, runs: Run[], prompts: string[]) {
   on('process.run', (_: any, e: Run) => {
     runs.push({ argv: e.argv })
+    if (e.argv[2] === 'wait') return { value: { exitCode: 0, stdout: 'report done add-mod\n', stderr: '' } }
     return { value: { exitCode: 0, stdout: JSON.stringify(answer(e.argv.slice(2))), stderr: '' } }
   })
   on('command.register', () => ({ value: { command: 'oke-board' } }))
@@ -992,6 +995,21 @@ test('the orchestrator has no inbox to take', async ($, on) => {
   await s.clock.advance(10_000)
   expect(s.takes().length).toBe(0)
   mailFlag = false
+  tickRole = 'worker'
+})
+
+test('the orchestrator waits on a PM no wait of its own watches, and gets its report after its turn', async ($, on) => {
+  // seen live: an orchestrator never ran `oke wait`, and an idle PM's jobs sat for good
+  const s = await mailSession($, on, 'orchestrator')
+  await $.prompt.submit({ text: 'add mod' } as any)
+  unwatchedPms = ['calc']
+  await s.clock.advance(10_000)
+  expect(s.runs.find(r => r.argv[2] === 'wait')?.argv.slice(3)).toEqual(['calc', '--jobs', '--for', '540'])
+  expect(s.prompts.some(p => p.includes('report done add-mod'))).toBe(false)  // its turn still runs
+  await $.turn.complete({ ...TURN, reason: 'completed' } as any)
+  await s.clock.advance(1)
+  expect(s.prompts.at(-1)).toContain('$OKE wait calc --jobs returned: report done add-mod')
+  unwatchedPms = []
   tickRole = 'worker'
 })
 
