@@ -8119,6 +8119,14 @@ def pending_item(name, job):
         item["text"] = ("job %s was approved and waited for job %s in the same checkout, which is out of the "
                         "way now: run `$OKE job phase %s working`, then give the PM `kind: execute` (no question)"
                         % (name, job["queued"].get("for"), name))
+    if kind == "report_done" and phase in ("working", "reviewing") and not not_code(job) \
+            and deliver_state(name)[0] != "delivered":
+        # seen live: a PM reported a small job done with no review and no delivery; the orchestrator,
+        # with nothing to do, tried to commit it itself
+        item["text"] = ("PM %s reported job %s done, but it was never delivered (`$OKE job deliver` after a passing "
+                        "review): never commit or deliver it yourself. Give the PM `kind: answer`: \"Have it reviewed "
+                        "(the reviewer, or the review subagent for a small job), then `$OKE job deliver %s`, then "
+                        "report done again.\"" % (job.get("pm"), name, name))
     if kind == "answer":
         item["text"] = ("job %s is answered: nothing changes. Tell the user the report's Summary, then "
                         "`job phase %s done` and `job archive %s`" % (name, name, name))

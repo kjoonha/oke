@@ -929,6 +929,8 @@ class TestPendingStart(PmBase):
         self.assertNotIn("fix-a", self.kinds())  # an answer while working is no unassigned
         self.write("home/jobs/fix-a/pm/report.md", "type: done\nseq: 3\n---\nwork reviewed\n")
         self.assertEqual(self.kinds()["fix-a"]["kind"], "report_done")  # the work's own report
+        # never delivered: the item says to send it back to the PM (seen live: an orchestrator tried to commit)
+        self.assertIn("never delivered", self.kinds()["fix-a"]["text"])
 
     def test_an_approval_after_an_unanswered_peer_answer_is_still_unassigned(self):
         self.assertEqual(self.new("fix-a", "a", "--path", self.repo), 0, self.err)
