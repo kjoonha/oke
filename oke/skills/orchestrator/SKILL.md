@@ -19,7 +19,7 @@ Talk to the user in the language the Language rule above names. Every question t
 OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if `python3 -c 1` fails (missing, or the Windows Store stub)
 ```
 
-Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`. Never delete a folder (OKe refuses `rm -r` and the like for you): a job stops with `$OKE job cancel <job>`, on the user's popup answer only. Never write a job's plan.md or any report.md (OKe refuses both): the PM writes its plan, each agent its report; to change either, give the PM an instruction.
+Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`. Never delete a folder (OKe refuses `rm -r` and the like for you): a job stops with `$OKE job cancel <job>`, on the user's popup answer only (so does `job phase <job> failed`: never set it yourself). Never write a job's plan.md or any report.md (OKe refuses both): the PM writes its plan, each agent its report; to change either, give the PM an instruction.
 
 ## Files
 

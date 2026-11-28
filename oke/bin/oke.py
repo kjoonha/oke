@@ -1580,6 +1580,16 @@ def cmd_spawn(args):
             return fail("job %s is on hold: start none of its agents" % header["job"])
         if job["phase"] not in ("working", "reviewing"):
             return fail("plan not approved: job %s is in phase %s" % (header["job"], job["phase"]))
+        # a small job has no worker pane and a small or normal one no reviewer pane: their PM calls a
+        # subagent (seen live: a PM spawned both for a one-line typo, and the job took half an hour)
+        size = job.get("size")
+        if role == "worker" and size == "small" or role == "reviewer" and size in ("small", "normal"):
+            return fail("job %s is size %s: no %s pane. Call the Agent tool instead (%s), as the PM skill's "
+                        "Job size says; if the job is bigger than planned, `$OKE job size %s %s` first"
+                        % (header["job"], size, role,
+                           "subagent_type: general-purpose, the work subagent" if role == "worker"
+                           else "subagent_type: oke:reviewer, prompt `Review: %s`" % path,
+                           header["job"], "normal" if size == "small" and role == "worker" else "large"))
         over = role == "reviewer" and over_rounds(header["job"], job, config, int(header["seq"]))
         if over:
             return fail(over)
@@ -3649,9 +3659,13 @@ ORCHESTRATOR_ACTIONS = {
 def user_decision(state, args):
     """The user-only decision this `oke job` call records, or None: plan approval (`phase working`
     from awaiting_approval, unless the job is auto, autonomy is full or the user approved it
-    already and it waited), `auto` on, `files`, and `accept-check`/`accept-head --by-user`."""
+    already and it waited), `phase failed` (giving the job up, as `job cancel`), `auto` on, `files`, and
+    `accept-check`/`accept-head --by-user`."""
     info = state["jobs"].get(getattr(args, "slug", None) or "") or {}
     if args.action == "phase":
+        if args.phase == "failed":
+            # giving a job up, as `job cancel` (seen live: refused a cancel, an orchestrator set failed)
+            return "cancel"
         if args.phase != "working" or info.get("phase") != "awaiting_approval" or info.get("auto") \
                 or info.get("user_approved") or load_config().get("autonomy") == "full":
             return None

@@ -295,6 +295,16 @@ class TestUserAnswers(SpawnBase):
         self.assertEqual(self.as_orchestrator(["job", "cancel", "fix-a"]), 0, self.err)
         self.assertEqual(oke.load_state()["jobs"]["fix-a"]["phase"], "failed")
 
+    def test_setting_failed_is_giving_up_and_needs_a_popup_answer_too(self):
+        # seen live: refused a cancel, an orchestrator ran `job phase failed` and archived the job
+        self.job("fix-a", "working")
+        with oke.locked():
+            st = oke.load_state()
+            st["orchestrator"]["ask_gate"] = True
+            oke.save_state(st)
+        self.assertEqual(self.cli("job", "phase", "fix-a", "failed"), 1)
+        self.assertIn("AskUserQuestion", self.err)
+
 
 class TestInPlaceStaysInPlace(SpawnBase):
     def test_a_job_that_worked_in_place_gets_no_worktree(self):
