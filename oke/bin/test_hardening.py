@@ -234,3 +234,19 @@ class TestClaudeDevFixes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStrayAgentNotes(unittest.TestCase):
+    def test_an_agent_report_in_the_checkout_blocks_the_job_change(self):
+        # seen live: a worker wrote its report.md in the repository and delivery committed it
+        cwd = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, cwd)
+        for rel, text in (("report.md", u"type: done\nseq: 1\non: \n---\n## Summary\n"),
+                          ("docs/report.md", u"# Weekly report\ntype: notes\n"), ("board.md", u"type: x\n")):
+            os.makedirs(os.path.dirname(os.path.join(cwd, rel)) or cwd, exist_ok=True)
+            with io.open(os.path.join(cwd, rel), "w", encoding="utf-8") as f:
+                f.write(text)
+        files = {"new": ["report.md", "docs/report.md", "board.md", "a.py"], "nested": []}
+        self.assertEqual(oke.stray_notes(files, cwd), ["report.md"])
+        self.assertIn("agent's report or board", oke.nested_block(files, cwd))
+        self.assertIsNone(oke.nested_block({"new": ["docs/report.md"], "nested": []}, cwd))

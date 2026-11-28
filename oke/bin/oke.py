@@ -6146,8 +6146,34 @@ def job_files(job, info, cwd, marks=None):
     return out
 
 
+AGENT_NOTE = re.compile(r"^type:[ \t]*\w+[ \t]*\r?\n(?:[^\n]*\n){0,3}seq:", re.M)
+
+
+def stray_notes(files, cwd):
+    """New files of the job that are an OKe agent's report or board (a `type:` then `seq:` header):
+    seen live, a worker wrote its report.md in the repository and delivery committed it."""
+    out = []
+    for rel in files.get("new") or []:
+        if os.path.basename(rel).lower() not in ("report.md", "board.md"):
+            continue
+        try:
+            with io.open(os.path.join(cwd, rel), encoding="utf-8", errors="replace") as f:
+                head = f.read(400)
+        except (IOError, OSError):
+            continue
+        if AGENT_NOTE.match(head):
+            out.append(rel)
+    return out
+
+
 def nested_block(files, cwd):
-    """The refusal for git repositories in the job's checkout that are not the user's, or None."""
+    """The refusal for git repositories in the job's checkout that are not the user's, or for an agent's
+    report or board written there; None when neither."""
+    stray = stray_notes(files or {}, cwd)
+    if stray:
+        return ("%s in %s %s an OKe agent's report or board, written into the repository by mistake: an agent "
+                "writes these in its own folder. Move %s there, then run this again"
+                % (", ".join(stray[:5]), cwd, "is" if len(stray) == 1 else "are", "it" if len(stray) == 1 else "them"))
     if not files or not files.get("nested"):
         return None
     return ("%s in %s %s a git repository of its own, made during the job: OKe never commits one into the "
