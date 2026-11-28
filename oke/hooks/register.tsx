@@ -510,7 +510,8 @@ export function gitDenied(command: string, role?: string, subagent?: boolean, no
   const c = !m && noCommit ? COMMIT_DENIED.exec(text) : null
   if (c) {
     return `OKe blocks \`git ${c[1]}\` here: only \`oke job deliver\` commits the job's changes, after the review. `
-      + 'Leave the work uncommitted and report.'
+      + (role === 'orchestrator' ? 'Its PM delivers it; the user merges and commits their own work themselves.'
+        : 'Leave the work uncommitted and report.')
   }
   return m ? `OKe blocks \`git ${m[1]!.split(/\s/)[0]}\` here: it can lose work or publish it. `
     + (role === 'orchestrator' ? 'Tell the user to run it themselves if they want it.'
@@ -1329,7 +1330,8 @@ export const register: Register = on => {
       }
       if (e.tool === 'Bash' && (role === 'orchestrator' || role === 'pm' || role === 'worker' || role === 'reviewer')) {
         // a worker of a job in place, and a PM's subagents, never commit: `oke job deliver` does
-        const noCommit = (role === 'worker' && inPlace) || (role === 'pm' && Boolean(e.agent_id))
+        // an orchestrator never commits either: seen live, one committed the user's uncommitted files onto main
+        const noCommit = (role === 'worker' && inPlace) || (role === 'pm' && Boolean(e.agent_id)) || role === 'orchestrator'
         const denied = gitDenied(String(e.command ?? ''), role, Boolean(e.agent_id), noCommit)
           ?? jobActionDenied(String(e.command ?? ''), role)
         if (denied) return { deny: denied }

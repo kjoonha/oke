@@ -764,6 +764,8 @@ test('a worker in the user\'s checkout and a PM\'s subagents never commit; the P
   }
   expect(gitDenied('git commit -m x', 'worker')).toBeNull()  // a worktree of the job's own
   expect(gitDenied('git commit -m x', 'pm')).toBeNull()
+  // the orchestrator never commits (the tool.call hook passes noCommit for it)
+  expect(gitDenied('cd r && git add a.py && git commit -m x', 'orchestrator', false, true)).toMatch(/Its PM delivers it/)
   expect(gitDenied('grep -n "git commit" notes.md', 'worker', false, true)).toBeNull()
   expect(gitDenied('git log --oneline', 'worker', false, true)).toBeNull()
 })
