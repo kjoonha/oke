@@ -599,6 +599,52 @@ def send_prompt(b, text):
     return False
 
 
+CHAT_DONE = set()  # (job, kind, since) already answered in chat
+
+
+def chat_answer(b, by_job, popups):
+    """Answer, in chat, the first plan or question of a bench job that OKe's queue holds while no popup
+    asked it. True when an answer was sent."""
+    code, out, _ = b.oke("pending")
+    try:
+        items = (json.loads(out).get("items") or []) if code == 0 and out.strip() else []
+    except ValueError:
+        return False
+    for it in items:
+        job, kind = it.get("job"), it.get("kind")
+        task = by_job.get(job)
+        if not task or it.get("deferred") or it.get("auto"):
+            continue
+        if kind == "report_done":
+            # the PM's plan is ready, but the orchestrator asked in chat without moving the job on
+            if (b.all_jobs().get(job) or {}).get("phase") not in ("planning", "awaiting_approval"):
+                continue
+            kind = "plan"
+        elif kind not in ("plan", "question"):
+            continue
+        key = (job, kind, it.get("since"))
+        if key in CHAT_DONE:
+            continue
+        CHAT_DONE.add(key)
+        text = "승인해." if kind == "plan" else "추천하는 걸로 해줘."
+        if kind == "plan":
+            for i, r in enumerate(task.get("popups") or []):
+                act = r.get("do")
+                ukey = (task["id"], "t%d" % i)
+                if r.get("kind") == "approval" and isinstance(act, dict) and "type" in act and                         popups.used.get(ukey, 0) < (r.get("times") or 1):
+                    popups.used[ukey] = popups.used.get(ukey, 0) + 1
+                    text = act["type"]  # a change request, typed as the user would
+                    break
+        task["chat_asks"] = task.get("chat_asks", 0) + 1
+        n = task["chat_asks"]
+        write_text(os.path.join(task["folder"], "chat-ask-%02d.txt" % n),
+                   "job: %s\nkind: %s\nanswer: %s\n\n%s" % (job, kind, text, b.screen(lines=80)))
+        log("task %s: %s of %s asked in chat, not a popup; answering in chat: %s" % (task["id"], kind, job, text))
+        send_prompt(b, text)
+        return True
+    return False
+
+
 def unfinished(jobs, names):
     return [n for n in names if n in jobs and jobs[n]["phase"] not in DONE_PHASES and not jobs[n]["held"]
             and not jobs[n]["archived"]]
@@ -639,6 +685,7 @@ def run_group(b, group, cfg, popups, args):
         t["folder"] = os.path.join(b.logs, t["id"])
         os.makedirs(t["folder"], exist_ok=True)
         t["jobs"], t["status"], t["popups"] = [], None, 0
+        t["chat_asks"] = 0
     before = b.snapshot()
     for t in group:
         write_json(os.path.join(t["folder"], "before.json"), before)
@@ -653,6 +700,7 @@ def run_group(b, group, cfg, popups, args):
     sent = []
     current = None
     settle_since = None
+    idle_since = None
     status = None
     while True:
         b.guard()
@@ -693,6 +741,16 @@ def run_group(b, group, cfg, popups, args):
             last_activity = time.time()
             settle_since = None
             continue
+        # 2b. an ask in chat text instead of a popup: the orchestrator idles while OKe's queue holds a
+        # plan or question of our job. Answer it in chat as a user would, and count it as a missing popup.
+        if b.pane_status() in ("idle", "done"):
+            idle_since = idle_since or now
+            if now - idle_since > 45 and chat_answer(b, by_job, popups):
+                last_activity = time.time()
+                idle_since = None
+                continue
+        else:
+            idle_since = None
         # 3. jobs and phases
         jobs = b.all_jobs()
         for n in sorted(set(jobs) - known):
@@ -774,6 +832,7 @@ def run_group(b, group, cfg, popups, args):
         write_text(os.path.join(t["folder"], "final.txt"), final)
         res = {"task": t["id"], "status": t_status, "start": t.get("sent_at", start), "end": end,
                "wall_s": round(end - t.get("sent_at", start)), "jobs": t["jobs"], "popups": t["popups"],
+               "chat_asks": t.get("chat_asks", 0),
                "group": t.get("group")}
         write_json(os.path.join(t["folder"], "result.json"), res)
         log("task %s: %s in %ds, jobs %s, popups %d" % (t["id"], t_status, res["wall_s"], t["jobs"], t["popups"]))

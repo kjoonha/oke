@@ -448,6 +448,10 @@ def main():
             except Exception as ex:  # noqa: BLE001 - a broken check fails, never the report
                 ok, ev = False, "check crashed: %r" % ex
             checks.append((e["check"], ok, ev))
+        asks = (c.result or {}).get("chat_asks") or 0
+        if asks:  # the driver answered in chat what the orchestrator should have asked in a popup
+            checks.append(("asked_by_popup", False, "%d ask(s) came as chat text, not a popup "
+                                                    "(logs/<task>/chat-ask-NN.txt)" % asks))
         if not c.ran():
             verdict = "PENDING"
         else:
