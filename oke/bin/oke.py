@@ -1187,8 +1187,12 @@ def home_areas(state, me):
 
 def next_step(me):
     """What an agent does about a write it may not make."""
-    return {"pm": "If a job must change it: while the job plans, set its path with `$OKE job path`, or split "
-                  "a new job for that folder with `$OKE job split`; once it works, report a question for it.",
+    # seen live: a PM refused an Edit rewrote the file with a script and committed it itself
+    return {"pm": "A PM never changes a repository itself, by any tool (no Bash, script or git commit either): "
+                  "while the job plans, write its plan.md and report done; a worker makes the change once the "
+                  "user approved it. If the job must change another folder: while it plans, set its path with "
+                  "`$OKE job path`, or split a new job for that folder with `$OKE job split`; once it works, "
+                  "report a question for it.",
             "worker": "If the job needs it changed, report a question to your PM.",
             "reviewer": "Reviewers change nothing: name it in your review."}.get(me[0], "")
 
