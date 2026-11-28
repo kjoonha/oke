@@ -119,6 +119,28 @@ function here(): string[] {
   return sessionId ? ['--pane', pane as string, '--session', sessionId] : ['--pane', pane as string]
 }
 
+/** `command` with `python3` before an `oke.py` path changed to `python` when `python3` does not
+ * run here (missing, or the Windows Store stub). Seen live: agents told "use python if
+ * python3 fails" kept calling python3, then did the job by hand. */
+export function withPython(command: string, py: string | null): string {
+  if (py !== 'python') return command
+  return command.replace(/(^|[\s;&|(`$])python3(?=\s+["']?[^\s"']*oke\.py)/g, '$1python')
+}
+
+/** The Python that runs here, found once: python3, else python; null when neither does. */
+async function findPython($: any): Promise<string | null> {
+  if (python) return python
+  for (const py of ['python3', 'python']) {
+    try {
+      const r = await $.process.run([py, '-c', '1'], { timeoutMs: 30_000 })
+      if (r.exitCode === 0) return (python = py)
+    } catch {
+      // not on PATH: try the next name
+    }
+  }
+  return null
+}
+
 /** Run `oke.py <args>` and parse its JSON line; null when it failed. */
 async function oke($: any, args: string[]): Promise<any> {
   const script = `${$.plugin.root}/bin/oke.py`.replace(/\\/g, '/')
@@ -1297,6 +1319,10 @@ export const register: Register = on => {
 
   // Each agent's own task list goes to its folder, where the board reads it.
   on('tool.call', async ($, e: any, next) => {
+      if (e.tool === 'Bash' && /python3\s/.test(String(e.command ?? '')) && /oke\.py/.test(String(e.command))) {
+        const command = withPython(String(e.command), await findPython($))
+        if (command !== e.command) e = { ...e, command }
+      }
       if (role === 'orchestrator' || role === 'pm' || role === 'worker' || role === 'reviewer') {
         const denied = keyDenied(e)
         if (denied) return { deny: denied }

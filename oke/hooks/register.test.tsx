@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { THEME_NAMES, framesOf, gitDenied, jobActionDenied, keyDenied, orchestratorDenied, paletteOf, pendingWords, promptRole, todoLine, withBriefs, workerDenied, writeVerdict } from './register'
+import { THEME_NAMES, framesOf, gitDenied, jobActionDenied, keyDenied, orchestratorDenied, paletteOf, pendingWords, promptRole, todoLine, withBriefs, withPython, workerDenied, writeVerdict } from './register'
 
 type Run = { argv: readonly string[] }
 
@@ -1217,4 +1217,13 @@ test('the plan approval question shows the job brief as its first option preview
   expect(withBriefs(q('c:/work/conv 의 fix-b 를 merge 할까요?'), conv, ['conv', 'fix-b'])).toBeNull()
   expect(withBriefs(q('worktree oke/k-to-c.'), briefs)).not.toBeNull()
   expect(withBriefs(q('c:/work/conv 에서 작업합니다.'), briefs, ['k-to-c'])).not.toBeNull()
+})
+
+test('python3 before oke.py becomes python where python3 does not run', () => {
+  const cmd = 'python3 "C:/p/oke/bin/oke.py" status --claim && python3 -m pytest -q'
+  expect(withPython(cmd, 'python')).toBe('python "C:/p/oke/bin/oke.py" status --claim && python3 -m pytest -q')
+  expect(withPython(cmd, 'python3')).toBe(cmd)
+  expect(withPython(cmd, null)).toBe(cmd)
+  expect(withPython('cd r; python3 /p/bin/oke.py job phase j done', 'python')).toBe('cd r; python /p/bin/oke.py job phase j done')
+  expect(withPython('echo mypython3 /p/oke.py', 'python')).toBe('echo mypython3 /p/oke.py')
 })
