@@ -847,6 +847,9 @@ test('the orchestrator may write its own memory, not that of another project', (
   expect(write('C:/Users/u/.claude/projects/other/memory/a.md')).toMatch(/^OKe orchestrators/)
   expect(orchestratorDenied('Write', { file_path: 'C:/Users/u/.claude/projects/C--work-toy/memory/a.md' },
     { ...dirs, root: null })).toMatch(/^OKe orchestrators/)  // no root known: refused
+  // a job's plan is the PM's; its intake is the orchestrator's
+  expect(write('C:/oke/jobs/fix-a/plan.md')).toMatch(/never change a plan/)
+  expect(write('C:/oke/jobs/fix-a/intake.md')).toBeNull()
 })
 
 test('the first or revive prompt names the role and folder', () => {

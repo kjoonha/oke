@@ -741,6 +741,12 @@ export function orchestratorDenied(tool: string, input: any,
   // root it names otherwise (a git root above it) only refuses: never a foreign memory
   const memory = !!dirs.claude && !!dirs.root
     && under(`${dirs.claude}/projects/${dirs.root.replace(/[^A-Za-z0-9]/g, '-')}/memory`)
+  // a job's plan is the PM's and the user approved it as it is: seen live, an orchestrator rewrote
+  // the acceptance criteria after the approval
+  if (plain && under(dirs.home && `${dirs.home}/jobs`) && /\/plan\.md$/.test(target)) {
+    return 'OKe orchestrators never change a plan: plan.md is the PM\'s, and the user approves it as the PM wrote it. '
+      + 'To change it, send it back to the PM (`kind: plan`, saying what to change).'
+  }
   if (plain && ((under(dirs.home) && !under(dirs.wiki)) || memory)) return null
   return `${why} You may write only under ${dirs.home ?? '$OKE_HOME'} (a scratch file: its tmp/ folder; `
     + 'never a wiki: use `oke wiki`) and in your own memory folder.'

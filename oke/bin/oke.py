@@ -758,6 +758,14 @@ def cmd_rt(args):
             if info.get("phase") in SPLIT_PHASES and not (info.get("approved") or info.get("worked")):
                 return fail("job %s is %s and its plan was never approved: its worktree comes with the work, "
                             "after the approval" % (args.job, info.get("phase")))
+            if info.get("worked_in_main") and not (info.get("worktree") or {}).get("path") \
+                    and latest_report(os.path.join(oke_home(), "jobs", args.job), r"-w\d+$"):
+                # seen live: a PM made one for a job that worked in place, so delivery found an empty
+                # branch, delivered nothing and left the change uncommitted in the user's checkout
+                return fail("job %s works in place: its change is in %s, not on a branch. A new worktree would "
+                            "hold none of it. Deliver it in place: `$OKE job tree %s`, give the reviewer "
+                            "`tree: <that tree>`, then `$OKE job deliver %s`"
+                            % (args.job, info.get("path"), args.job, args.job))
             other = plan_continues(args.job)
             start = None
             if other:  # its own branch oke/<job>, made at the tip of oke/<other>
@@ -4176,6 +4184,11 @@ def deliver_job(job):
             if commit_leftover(job, info, native_path(wt), review[1], review_asg["tree"]) is None:
                 return 1
     code, tip = git_out(main, "rev-parse", "-q", "--verify", "refs/heads/%s^{commit}" % branch)
+    if code != 0 and not wt:
+        return fail("branch %s does not exist: job %s works in place (no worktree), so its change is "
+                    "uncommitted in %s and delivery commits it there. The review must cover that change: run "
+                    "`$OKE job tree %s`, give the reviewer a new instruction with `tree: <that tree>` (not "
+                    "`commit:`), then deliver. Never make a worktree for it now" % (branch, job, main, job))
     if code != 0:
         return fail("branch %s does not exist" % branch)
     if review_asg.get("tree"):

@@ -278,3 +278,13 @@ class TestUserAnswers(SpawnBase):
         oke.whoami = lambda state, pane, session=None: (("pm", "p", "k", {}), [])
         self.assertEqual(self.cli("answered", "--pane", "w2:p1"), 0)
         self.assertEqual(oke.load_state()["orchestrator"]["answers"], 2)  # a PM's popup is not the user's
+
+
+class TestInPlaceStaysInPlace(SpawnBase):
+    def test_a_job_that_worked_in_place_gets_no_worktree(self):
+        # seen live: a PM made one, so delivery found an empty branch and left the change uncommitted
+        self.job("fix-a", "working")
+        self.assertTrue(oke.load_state()["jobs"]["fix-a"].get("worked_in_main"))
+        self.write("home/jobs/fix-a/fix-a-w1/report.md", "type: done" + chr(10) + "seq: 1" + chr(10) + "---" + chr(10))
+        self.assertEqual(self.cli("worktree", "fix-a"), 1)
+        self.assertIn("works in place", self.err)
