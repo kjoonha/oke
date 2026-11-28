@@ -56,6 +56,17 @@ class PmBase(SpawnBase):
 
 
 class TestPmCommands(PmBase):
+    def test_send_and_wait_to_a_pm_never_started_say_to_start_it(self):
+        # seen live: "unknown agent" made an orchestrator do the job itself
+        self.assertEqual(self.pmc("add", "backend")[0], 0, self.err)
+        self.assertEqual(self.cli("send", "backend", "hello"), 1)
+        self.assertIn("never started", self.err)
+        self.assertIn("$OKE place backend", self.err)
+        self.assertEqual(self.cli("wait", "backend", "--jobs"), 1)
+        self.assertIn("never started", self.err)
+        self.assertEqual(self.cli("send", "nobody", "hello"), 1)
+        self.assertIn("unknown agent: nobody", self.err)
+
     def test_add_checks_the_name_and_writes_the_standing_assignment(self):
         for bad in ("Backend", "1abc", "orchestrator", "fix-w1", "fix-rv", "fix-rv2", "a" * 25):
             self.assertEqual(self.pmc("add", bad)[0], 1, bad)
@@ -829,7 +840,7 @@ class TestMemory(PmBase):
         other = os.path.join(claude, "projects", slug(plain), "memory", "m.md")
         self.assertIsNotNone(oke.write_problem(st, me, other))
         real = oke.whoami
-        oke.whoami = lambda state, pane: (me, [])
+        oke.whoami = lambda state, pane, session=None: (me, [])
         self.addCleanup(setattr, oke, "whoami", real)
         self.assertEqual(self.cli("tick", "--pane", "w1:p9"), 0, self.err)
         out = json.loads(self.out.strip().splitlines()[-1])

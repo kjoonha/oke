@@ -1505,7 +1505,7 @@ def cmd_path_check(args):
     # the mod asks only for a PM, worker or reviewer: whatever goes wrong refuses
     try:
         state = load_state()
-        me = whoami(state, args.pane)[0]
+        me = whoami(state, args.pane, args.session)[0]
         if not me or me[0] not in ("pm", "worker", "reviewer"):
             problem = cannot_check("pane %s is no OKe PM, worker or reviewer OKe knows" % args.pane)
         elif me[2] not in state["pms"]:
@@ -2315,7 +2315,7 @@ def cmd_wait(args):
         state = load_state()
         keys = [k for k, r in state["pms"].items() if (r.get("pm") or {}).get("agent") == args.agent]
         if not keys:
-            return fail("--jobs needs a PM agent: %s is not one" % args.agent)
+            return fail(never_started(state, args.agent) or "--jobs needs a PM agent: %s is not one" % args.agent)
         return wait_said(args.agent, wait_loop(args.agent, None, None, poll=args.poll,
                                                after_blocked=args.after_blocked, jobs_key=keys[0]))
     if args.report is None or args.seq is None:
@@ -2665,9 +2665,10 @@ def cmd_resume_all(args):
     return 0
 
 
-def whoami(state, pane):
+def whoami(state, pane, session=None):
     """(role, name, key, record) of the OKe agent in `pane`, or None. Pane ids come
-    back after a herdr restart, so a recorded session has to match as well."""
+    back after a herdr restart, so a recorded session has to match as well: herdr's, or
+    `session`, the one the mod runs in (herdr knows none without its Claude hook)."""
     if pane and pane.startswith("session:"):
         # a session id is never reused: no need to ask the runtime who is there
         sid = pane[len("session:"):]
@@ -2677,6 +2678,9 @@ def whoami(state, pane):
     if not mine:
         return None, []
     agents = list_agents()
+    for r in mine:
+        if session and r[3].get("session") == session:
+            return r, agents
     here = [a for a in agents if a.get("pane_id") == pane]
     if not here:
         return None, agents
@@ -3077,7 +3081,7 @@ def cmd_tick(args):
     events, offset = read_events(args.events_from)
     out = {"role": None, "agent": None, "events": events,
            "events_offset": offset, "board": None}
-    me, agents = whoami(state, args.pane)
+    me, agents = whoami(state, args.pane, args.session)
     if me is not None:
         role, name, key, record = me
         out["role"], out["agent"] = role, name
@@ -3170,7 +3174,7 @@ def cmd_boundary(args):
     one since the mod last looked is a task boundary, where the mod compacts when the
     context is at least `min_percent` full, keeping what `next` needs."""
     state = load_state()
-    me, _ = whoami(state, args.pane)
+    me, _ = whoami(state, args.pane, args.session)
     out = {"role": None, "answered": [], "next": "", "min_percent": load_config().get("compact_min_percent", 30)}
     if me is not None:
         role, name, key, record = me
@@ -3208,7 +3212,7 @@ def cmd_api_retry(args):
     """The mod reports an API-error turn (or a good turn with --clear); OKe decides
     whether to retry and after how long, and gives up with a failed report."""
     state = load_state()
-    me, _ = whoami(state, args.pane)
+    me, _ = whoami(state, args.pane, args.session)
     if me is None:
         print(json.dumps({"action": "none", "role": None}))
         return 0
@@ -7571,6 +7575,15 @@ def set_mail_flag(agent, on):
         pass  # on: the waits still deliver; off: one more take-mail look
 
 
+def never_started(state, agent):
+    """What to do when `agent` names a PM OKe knows that was never started, else None."""
+    if agent not in state["pms"] or (state["pms"][agent].get("pm") or {}).get("agent"):
+        return None
+    return ("PM %s was never started, so it has no inbox yet: start it first (`$OKE place %s` prints a place, "
+            "then `$OKE spawn %s --pane <place>`), then send again. Never do the job yourself"
+            % (agent, agent, os.path.join(pm_dir(agent), "assignment.md").replace("\\", "/")))
+
+
 def cmd_send(args):
     text = " ".join(" ".join(args.text).split())
     if not text:
@@ -7580,7 +7593,7 @@ def cmd_send(args):
     state = load_state()
     found = find_target(state, args.agent)
     if found is None:
-        return fail("unknown agent: %s" % args.agent)
+        return fail(never_started(state, args.agent) or "unknown agent: %s" % args.agent)
     if found[0] == "orchestrator":
         return fail("the orchestrator has no inbox: a PM reports to it instead")
     child_job = state["jobs"].get(found[3].get("job")) if found[0] == "reviewer" else None
@@ -8161,6 +8174,7 @@ def build_parser():
 
     tick = sub.add_parser("tick")
     tick.add_argument("--pane", required=True)
+    tick.add_argument("--session", help="the session the mod runs in")
     tick.add_argument("--board", action="store_true")
     tick.add_argument("--events-from", type=int)
     tick.set_defaults(func=cmd_tick)
@@ -8173,9 +8187,11 @@ def build_parser():
 
     boundary = sub.add_parser("boundary", help="the assignments this agent has answered (mod)")
     boundary.add_argument("--pane", required=True)
+    boundary.add_argument("--session", help="the session the mod runs in")
     boundary.set_defaults(func=cmd_boundary)
     retry = sub.add_parser("api-retry")
     retry.add_argument("--pane", required=True)
+    retry.add_argument("--session", help="the session the mod runs in")
     retry.add_argument("--attempt", type=int, default=1)
     retry.add_argument("--error", default="")
     retry.add_argument("--clear", action="store_true")
@@ -8234,6 +8250,7 @@ def build_parser():
 
     pc = sub.add_parser("path-check", help="may this agent write the file (mod)")
     pc.add_argument("--pane", required=True)
+    pc.add_argument("--session", help="the session the mod runs in")
     pc.add_argument("--path", required=True)
     pc.set_defaults(func=cmd_path_check)
 

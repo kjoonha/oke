@@ -24,6 +24,8 @@ const who = atom({ plugin: 'oke', key: 'who' } as const, null as { role: string,
 
 // Module state starts over on a reload; session.start runs again then.
 let pane: string | undefined
+/** This Claude session's id: OKe matches the agent by it when herdr knows no session. */
+let sessionId: string | undefined
 let role: string | null = null
 let named = false  // role and folder came from the first prompt, not yet from oke
 let folder: string | null = null
@@ -105,11 +107,16 @@ async function pathDenied($: any, tool: string, input: any): Promise<string | nu
   if (!file) return null
   // areas a failing tick left behind are stale: then python decides every write
   if (areasFresh && writeVerdict(file, { home, wiki, folder, memories: memoryDirs, areas: writeAreas }) === 'allow') return null
-  const out = await oke($, ['path-check', '--pane', pane, '--path', file])
+  const out = await oke($, ['path-check', ...here(), '--path', file])
   if (!out || typeof out.allow !== 'boolean') {
     return 'OKe: OKe could not check this write (oke path-check failed): try again; if it keeps failing, report a question'
   }
   return out.allow ? null : `OKe: ${out.reason}`
+}
+
+/** `--pane` and `--session` for oke.py's mod commands: who this agent is. */
+function here(): string[] {
+  return sessionId ? ['--pane', pane as string, '--session', sessionId] : ['--pane', pane as string]
 }
 
 /** Run `oke.py <args>` and parse its JSON line; null when it failed. */
@@ -150,7 +157,7 @@ async function tick($: any) {
   ticking = true
   try {
     if (role === null && !(await okeRunning($))) return
-    const args = ['tick', '--pane', pane, '--board']
+    const args = ['tick', ...here(), '--board']
     if (eventsOffset !== null) args.push('--events-from', String(eventsOffset))
     const out = await oke($, args)
     if (!out) return
@@ -290,7 +297,7 @@ function compactNote(done: string[], next: string): string {
  * the context is still less full than config `compact_min_percent`. */
 async function compactAtBoundary($: any): Promise<boolean> {
   if (role !== 'pm' && role !== 'worker' && role !== 'reviewer') return false
-  const out = await oke($, ['boundary', '--pane', pane as string])
+  const out = await oke($, ['boundary', ...here()])
   if (!out) return false
   const seen = await read($, answeredSeen)
   const done = (out.answered as string[]).filter(a => !seen.includes(a))
@@ -362,7 +369,7 @@ async function clearRetry($: any) {
   if (attempt > 0) $.ui.status(undefined)
   if (!pane) return
   // Keep the count until the marker is really gone, so the next good turn clears again.
-  if ((await oke($, ['api-retry', '--pane', pane, '--clear'])) !== null) attempt = 0
+  if ((await oke($, ['api-retry', ...here(), '--clear'])) !== null) attempt = 0
 }
 
 /** The board's colors: the mascot's neon pastels, bright enough on a dark terminal. */
@@ -1246,7 +1253,8 @@ export const register: Register = on => {
     const r = await next(e)
     // herdr pane, else this Claude session (bg children)
     // the process env has no session id (seen live): ask the session itself
-    pane = (await $.env.get('HERDR_PANE_ID')) || `session:${await $.session.id()}`
+    sessionId = await $.session.id()
+    pane = (await $.env.get('HERDR_PANE_ID')) || `session:${sessionId}`
     if (!pane) return r
     await $.command.register({ name: 'oke-board', description: 'Show the OKe agents and their boards' })
     // A process that died during a backoff leaves its marker; this one starts clean.
@@ -1482,7 +1490,7 @@ export const register: Register = on => {
     attempt += 1
     const kind = lastError
     lastError = ''
-    const out = await oke($, ['api-retry', '--pane', pane, '--attempt', String(attempt), '--error', kind])
+    const out = await oke($, ['api-retry', ...here(), '--attempt', String(attempt), '--error', kind])
     if (out?.action === 'retry') {
       $.ui.status(`OKe: API error (${kind || 'unknown'}), retry ${attempt}/${out.limit} in ${out.delay}s`)
       pending?.cancel()

@@ -518,6 +518,15 @@ class TestTick(ReviveBase):
         # pane ids come back after a herdr restart: pane alone is not identity
         out = self.tick("w7:p1", [AG(None, pane="w7:p1", session="someone-else")])
         self.assertIsNone(out["role"])
+        out = self.tick("w7:p1", [AG(None, pane="w7:p1", session="someone-else")], "--session", "someone-else")
+        self.assertIsNone(out["role"])
+
+    def test_the_mods_session_names_the_orchestrator_when_herdr_knows_none(self):
+        # herdr without its Claude hook lists no session: the mod's own session id still identifies it
+        out = self.tick("w7:p1", [AG(None, pane="w7:p1", session=None)])
+        self.assertIsNone(out["role"])
+        out = self.tick("w7:p1", [AG(None, pane="w7:p1", session=None)], "--session", "s-o")
+        self.assertEqual(out["role"], "orchestrator")
         self.assertEqual(self.revived, [])
 
     def test_a_pane_whose_session_herdr_does_not_know_is_not_the_orchestrator(self):
