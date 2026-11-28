@@ -855,6 +855,12 @@ test('the first or revive prompt names the role and folder', () => {
     + '/h/repos/r/pm/assignment.md and your board.md')).toEqual({ role: 'pm', folder: '/h/repos/r/pm' })
   expect(promptRole('Use the oke:worker skill. Your assignment file is C:/Users/A B/.oke/jobs/j/j-w1/assignment.md. Read'))
     .toEqual({ role: 'worker', folder: 'C:/Users/A B/.oke/jobs/j/j-w1' })
+  expect(promptRole('Call the Skill tool with the oke:pm skill. Do that first: read or change nothing before it. '
+    + 'Your assignment file is C:/h/pms/conv/assignment.md: then read it and follow it as the skill says.'))
+    .toEqual({ role: 'pm', folder: 'C:/h/pms/conv' })
+  expect(promptRole('You were restarted after a crash. Call the Skill tool with the oke:worker skill. Do that first, '
+    + 'then re-read your assignment file /h/jobs/j/j-w1/assignment.md and your board.md, and continue.'))
+    .toEqual({ role: 'worker', folder: '/h/jobs/j/j-w1' })
   expect(promptRole('please use the oke skill')).toBeNull()
 })
 

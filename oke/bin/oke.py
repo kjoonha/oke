@@ -383,8 +383,9 @@ def list_agents():
 # ---------------------------------------------------------------- spawn
 
 AGENT_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
-FIRST_PROMPT = ("Use the oke:{role} skill. Your assignment file is {path}. "
-                "Read it first, then follow it.")
+# "Call the Skill tool" outright: seen live, a model told only "use the skill" read files and did the job itself
+FIRST_PROMPT = ("Call the Skill tool with the oke:{role} skill. Do that first: read or change nothing before it. "
+                "Your assignment file is {path}: then read it and follow it as the skill says.")
 
 
 def folder_cost(folder):
@@ -2341,8 +2342,8 @@ def wait_said(agent, result):
 DONE_PHASES = ("done", "failed")
 GONE_CONFIRMATIONS = 3  # one failed look (a CLI hiccup) is not a death
 ORCH_NAME = "oke-orch"
-REVIVE_PROMPT = ("You were restarted after a crash. Use the oke:{role} skill. Re-read your "
-                 "assignment file {path} and your board.md, then continue.")
+REVIVE_PROMPT = ("You were restarted after a crash. Call the Skill tool with the oke:{role} skill. Do that "
+                 "first, then re-read your assignment file {path} and your board.md, and continue.")
 
 
 def pm_jobs_note(state, key):

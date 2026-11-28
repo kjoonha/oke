@@ -22,6 +22,7 @@ Options:
 import argparse
 import io
 import json
+import traceback
 import os
 import re
 import subprocess
@@ -684,7 +685,7 @@ def run_group(b, group, cfg, popups, args):
     for t in group:
         t["folder"] = os.path.join(b.logs, t["id"])
         os.makedirs(t["folder"], exist_ok=True)
-        t["jobs"], t["status"], t["popups"] = [], None, 0
+        t["jobs"], t["status"], t["popup_count"] = [], None, 0
         t["chat_asks"] = 0
     before = b.snapshot()
     for t in group:
@@ -735,7 +736,7 @@ def run_group(b, group, cfg, popups, args):
             seq[owner["id"]] = seq.get(owner["id"], 0) + 1
             rec = popups.answer(owner, p, kind, owner["folder"], seq[owner["id"]])
             if kind not in ("submit", "trust", "bypass_warning"):
-                owner["popups"] = owner.get("popups", 0) + 1
+                owner["popup_count"] = owner.get("popup_count", 0) + 1
             if not rec["moved"]:
                 time.sleep(POLL)  # the cursor would not move: look again, the budget still runs
             last_activity = time.time()
@@ -831,11 +832,11 @@ def run_group(b, group, cfg, popups, args):
         write_text(os.path.join(t["folder"], "cost.txt"), cost)
         write_text(os.path.join(t["folder"], "final.txt"), final)
         res = {"task": t["id"], "status": t_status, "start": t.get("sent_at", start), "end": end,
-               "wall_s": round(end - t.get("sent_at", start)), "jobs": t["jobs"], "popups": t["popups"],
+               "wall_s": round(end - t.get("sent_at", start)), "jobs": t["jobs"], "popups": t["popup_count"],
                "chat_asks": t.get("chat_asks", 0),
                "group": t.get("group")}
         write_json(os.path.join(t["folder"], "result.json"), res)
-        log("task %s: %s in %ds, jobs %s, popups %d" % (t["id"], t_status, res["wall_s"], t["jobs"], t["popups"]))
+        log("task %s: %s in %ds, jobs %s, popups %d" % (t["id"], t_status, res["wall_s"], t["jobs"], t["popup_count"]))
     return status
 
 
@@ -926,6 +927,7 @@ def main():
             raise
         except Exception as e:  # noqa: BLE001 - one task's crash must not stop the night
             log("task %s: ERROR %r" % (group[0]["id"], e))
+            log(traceback.format_exc().rstrip())
             for t in group:
                 t["status"] = "ERROR"
                 write_json(os.path.join(b.logs, t["id"], "result.json"),
