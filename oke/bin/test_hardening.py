@@ -279,6 +279,22 @@ class TestUserAnswers(SpawnBase):
         self.assertEqual(self.cli("answered", "--pane", "w2:p1"), 0)
         self.assertEqual(oke.load_state()["orchestrator"]["answers"], 2)  # a PM's popup is not the user's
 
+    def test_the_orchestrator_cancels_a_job_only_on_a_popup_answer(self):
+        # seen live: an orchestrator that could not deliver a job cancelled it by itself
+        self.job("fix-a", "working")
+        with oke.locked():
+            st = oke.load_state()
+            st["orchestrator"]["ask_gate"] = True
+            oke.save_state(st)
+        was = oke.whoami
+        self.addCleanup(setattr, oke, "whoami", was)
+        oke.whoami = lambda state, pane, session=None: (("orchestrator", "o", None, {}), [])
+        self.assertEqual(self.as_orchestrator(["job", "cancel", "fix-a"]), 1)
+        self.assertIn("AskUserQuestion", self.err)
+        self.assertEqual(self.cli("answered", "--pane", "w1:p1"), 0, self.err)
+        self.assertEqual(self.as_orchestrator(["job", "cancel", "fix-a"]), 0, self.err)
+        self.assertEqual(oke.load_state()["jobs"]["fix-a"]["phase"], "failed")
+
 
 class TestInPlaceStaysInPlace(SpawnBase):
     def test_a_job_that_worked_in_place_gets_no_worktree(self):

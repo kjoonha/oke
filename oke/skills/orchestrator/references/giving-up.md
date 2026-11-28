@@ -1,6 +1,6 @@
 # Orchestrator: giving up a job
 
-A job is the unit of cancelling. When the user gives a job up, cancel it yourself; never send it through the PM, which may be dead:
+A job is the unit of cancelling. Only the user gives a job up, in a popup answer (AskUserQuestion): a job that is stuck, or that you cannot deliver, is no reason to cancel it; tell the user and ask. OKe refuses `job cancel` from you when the user has answered no popup since OKe last took one. When the user gives a job up, cancel it yourself; never send it through the PM, which may be dead:
 
 1. `$OKE job cancel <job>`. It closes the job first (phase `failed`, so nothing starts for it again), then closes its worker and reviewer, and drops the messages about it still queued for the PM and its children. It refuses a job that is done: its branch is delivered; to throw it away, `$OKE job clean <job> --force` on the user's word. Its output lists `not_closed` children (the runtime did not answer): run `job cancel` again before the archive; if they stay, tell the user which panes to close. `refused` children (the runtime would not close them): do not run cancel again; tell the user which panes to close.
 2. `job cancel` also queued "Job <job> was cancelled" for the PM: a running PM gets it from its wait, a dead one is not started for it. If no wait of that PM runs, start one (see "Wait") so the notice goes in.

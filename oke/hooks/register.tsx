@@ -741,6 +741,11 @@ export function orchestratorDenied(tool: string, input: any,
   // root it names otherwise (a git root above it) only refuses: never a foreign memory
   const memory = !!dirs.claude && !!dirs.root
     && under(`${dirs.claude}/projects/${dirs.root.replace(/[^A-Za-z0-9]/g, '-')}/memory`)
+  // a report is its author's: seen live, an orchestrator wrote a PM's done report for it
+  if (plain && under(dirs.home && `${dirs.home}/jobs`) && /\/report\.md$/.test(target)) {
+    return 'OKe orchestrators never write a report: each agent writes its own. Wait for the PM\'s report, '
+      + 'or give the PM an instruction (`kind: answer`).'
+  }
   // a job's plan is the PM's and the user approved it as it is: seen live, an orchestrator rewrote
   // the acceptance criteria after the approval
   if (plain && under(dirs.home && `${dirs.home}/jobs`) && /\/plan\.md$/.test(target)) {

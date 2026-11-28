@@ -850,6 +850,8 @@ test('the orchestrator may write its own memory, not that of another project', (
   // a job's plan is the PM's; its intake is the orchestrator's
   expect(write('C:/oke/jobs/fix-a/plan.md')).toMatch(/never change a plan/)
   expect(write('C:/oke/jobs/fix-a/intake.md')).toBeNull()
+  expect(write('C:/oke/jobs/fix-a/pm/report.md')).toMatch(/never write a report/)
+  expect(write('C:/oke/jobs/fix-a/pm/assignment.md')).toBeNull()
 })
 
 test('the first or revive prompt names the role and folder', () => {

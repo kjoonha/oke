@@ -3803,10 +3803,19 @@ def cmd_job(args):
         print(json.dumps(out, ensure_ascii=False))
         return 0
     if args.action == "cancel":
+        # only the user gives a job up: seen live, an orchestrator that could not deliver a job
+        # cancelled it by itself and told the user it was done
+        state = load_state()
+        gated = bool((state.get("orchestrator") or {}).get("ask_gate")) and caller_is_orchestrator(state)
+        missing = gated and user_answer_missing(state, args.slug, "cancel")
+        if missing:
+            return fail(missing)
         with locked():
             code = job_locked(args)
         if code:
             return code
+        if gated:
+            spend_user_answer(args.slug, "cancel")
         return cancel_children(args.slug, load_state()["jobs"][args.slug].get("pm"))
     if args.action == "hold":
         with locked():
