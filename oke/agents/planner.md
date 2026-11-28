@@ -32,7 +32,7 @@ Web pages are not yours to read: list what you need under `web:` and plan around
 job: <job>
 ---
 ## Approach             (first line: size: <size>, output: <output> and one line why)
-## Workspace        (a worktree: `new worktree (branch oke/<job>)`; the intake says the job continues job <A>: `new worktree (branch oke/<job>, from oke/<A>)`; none: `main checkout`, or the path of a linked worktree the user named; optional lines under it: `Continues: <file>, <file>` and `Results: <file>, <file>`)
+## Workspace        (optional, only for these lines: the intake says the job continues job <A>: `from oke/<A>`; an experiment's output files: `Results: <file>, <file>`)
 ## Steps        (ordered list for the worker)
 ## Acceptance criteria        (numbered list: the interview's Success criteria, one checkable line each)
 ## Check command        (required: `<one bash command>` in backticks on the first line, then what passing looks like; or `none (<why>)` on the first line)
@@ -49,7 +49,7 @@ job: <job>
 
 **Output.** `code`: the job changes files to keep (the usual case). `result`: what the job hands over is a run's outputs or what they show, and any edit is only for that run (an experiment: change a line, run the simulation, read the output). A result stays uncommitted where `## Workspace` puts it (the main checkout, a linked worktree, or a new worktree); name its output files on a `Results:` line. It is never `small`: its run may take long, and only a worker pane waits for one. A direct job (outside git) is `files`: its folder's files are what it hands over.
 
-**Worktree.** Use no worktree only when the change is small and no other OKe job of this checkout is open: a job without a worktree changes the checkout the user works in. A direct job (the folder is outside git) never has one: write `in place`. The user named a linked worktree (`git worktree list` shows it): write its path; the job works and commits there, on its branch. In place, the files the user has uncommitted when the job starts stay theirs: delivery commits only what the job changes, new files included. When the user wants their uncommitted work carried on ("finish what I was doing"), name those files on a `Continues: <file>, <file>` line (paths relative to the checkout, or folders); a file the job changes that the user had changed and the plan does not name is asked about before delivery. Name folders or patterns, never a long list of files: OKe refuses a plan over 20 KB or with a line over 2,000 characters.
+**Workspace.** OKe chooses where the job works when the plan goes to the user (in place, or a new worktree, from the checkout's state and the user's words), and the user approves it with the plan: never write it. In place, the files the user has uncommitted when the job starts stay theirs: delivery commits only what the job changes, new files included. Name folders or patterns, never a long list of files: OKe refuses a plan over 20 KB or with a line over 2,000 characters.
 
 **Commits.** Leave `## Commits` out for one commit. For several, one line per commit in order: `- <message>: <path>, <path>` (paths or folders); a `rest` line takes the files no other line names. Without a `rest` line, every changed file must be named.
 

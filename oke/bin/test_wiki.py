@@ -240,12 +240,12 @@ class TestWiki(SpawnBase):
         self.advance("fix-a", "working")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
         self.assertIn("no branch oke/fix-a", self.err)
-        # the plan uses a worktree (the PM died before making it): main's edits are the user's
-        plan = os.path.join(oke.oke_home(), "jobs", "fix-a", "plan.md")
-        self.write(plan, "job: fix-a\n---\n## Approach\nx\n## Workspace\nnew worktree (branch oke/fix-a)\n## Steps\nx\n")
+        # it works in a worktree (the PM died before making it): main's edits are the user's
+        chosen = oke.workspace_path("fix-a")
+        self.write(chosen, json.dumps({"mode": "worktree"}))
         self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)
         self.assertEqual(self.cli("job", "unhold", "fix-a"), 0, self.err)
-        self.write(plan, "job: fix-a\n---\n## Workspace\nmain checkout\n## Steps\noke/fix-a later\n")
+        self.write(chosen, json.dumps({"mode": "here"}))
         self.assertEqual(self.cli("job", "hold", "fix-a"), 1)
         self.git(self.repo, "branch", "oke/fix-a")
         self.assertEqual(self.cli("job", "hold", "fix-a"), 0, self.err)

@@ -1056,6 +1056,11 @@ class TestOutputs(PmBase):
     def plan(self, job, worktree=True):
         self.write("home/jobs/%s/plan.md" % job, "job: %s\n---\n## Workspace\n%s\n" % (
             job, ("oke/" + job) if worktree else u"none"))
+        st = oke.load_state()
+        st["jobs"][job]["workspace_said"] = "worktree" if worktree else "here"  # where the test has it work
+        oke.save_state(st)
+        if os.path.exists(oke.workspace_path(job)):
+            oke.record_workspace(st, job)
 
     def report(self, job, child, verdict=None):
         body = ("verdict: %s\n" % verdict) if verdict else "done\n"
@@ -1198,15 +1203,70 @@ class TestOutputs(PmBase):
         files = oke.job_files("small", oke.load_state()["jobs"]["small"], self.repo)
         self.assertEqual((files["paths"], files["shared"]), ([], []))
 
+    def ready(self, job, *extra):
+        """A new job with a plan that says nothing of where it works, sent to the user."""
+        self.assertEqual(self.new(job, "a", "--path", self.repo, *extra), 0, self.err)
+        self.write("home/jobs/%s/plan.md" % job, u"job: %s\n---\n## Steps\nx\n" % job)
+        self.advance(job, "awaiting_approval")
+        return oke.read_json(oke.workspace_path(job), None)
+
+    def test_a_clean_checkout_with_no_other_job_is_worked_in_place(self):
+        chosen = self.ready("fix")
+        self.assertEqual((chosen["mode"], chosen["user_files"]), ("here", []))
+        self.assertFalse(oke.plan_worktree("fix"))
+        self.assertEqual(self.cli("status"), 0, self.err)
+        self.assertEqual(json.loads(self.out)["jobs"]["fix"]["workspace"], "here")
+        self.assertEqual(self.cli("job", "brief", "fix"), 0, self.err)
+        self.assertIn("in place, in this checkout", self.out)
+
+    def test_another_open_job_in_the_checkout_gets_a_worktree(self):
+        self.assertEqual(self.new("one", "a", "--path", self.repo), 0, self.err)
+        chosen = self.ready("two")
+        self.assertEqual(chosen["mode"], "worktree")
+        self.assertIn("job one", chosen["why"])
+        self.assertTrue(oke.plan_worktree("two"))
+
+    def test_the_users_uncommitted_files_get_a_worktree_and_the_approval_asks(self):
+        self.write("toy/mine.txt", "half done\n")
+        chosen = self.ready("fix")
+        self.assertEqual((chosen["mode"], chosen["user_files"]), ("worktree", ["mine.txt"]))
+        self.assertEqual(self.cli("job", "brief", "fix"), 0, self.err)
+        self.assertIn("mine.txt", self.out)
+        self.assertIn("ask:", self.out)
+        self.assertEqual(self.cli("job", "phase", "fix", "working"), 0, self.err)  # approved as it is
+        self.assertTrue(oke.plan_worktree("fix"))
+        self.assertEqual(oke.plan_files("fix", "Continues"), [])
+
+    def test_what_the_user_said_wins(self):
+        self.write("toy/mine.txt", "half done\n")
+        self.assertEqual(self.ready("fix", "--workspace", "here")["mode"], "here")
+        self.assertEqual(oke.plan_files("fix", "Continues"), [])  # their files stay theirs
+        self.assertEqual(self.cli("job", "brief", "fix"), 0, self.err)
+        self.assertIn("continue here", self.out)  # unless they say so at the approval
+        with io.open(os.path.join(oke.oke_home(), "config.json"), "w") as f:
+            f.write('{"workspace": "worktree"}')
+        os.remove("toy/mine.txt") if os.path.exists("toy/mine.txt") else None
+        self.assertEqual(self.ready("other")["mode"], "worktree")  # config, and fix is open there too
+
+    def test_the_workspace_choice_is_only_for_an_approval(self):
+        self.assertEqual(self.new("fix", "a", "--path", self.repo), 0, self.err)
+        self.advance("fix", "planning")
+        self.assertEqual(self.cli("job", "phase", "fix", "planning", "--workspace", "here"), 1)
+        self.assertIn("approval", self.err)
+
     def test_the_plan_names_files_it_continues_korean_names_too(self):
         self.assertEqual(self.new("small", "a", "--path", self.repo), 0, self.err)
-        self.write("home/jobs/small/plan.md",
-                   u"job: small\n---\n## Workspace\nmain checkout\nContinues: `문서.md`, \"READ ME.md\", src/\n")
-        self.assertEqual(oke.plan_files("small", "Continues"), [u"문서.md", "READ ME.md", "src"])
-        self.assertFalse(oke.plan_worktree("small"))
+        self.write("home/jobs/small/plan.md", u"job: small\n---\n## Steps\nx\n")
+        self.write(u"toy/문서.md", "x\n")  # the user's uncommitted work
         self.advance("small", "awaiting_approval")
-        self.write(u"toy/문서.md", "x\n")
-        self.assertEqual(self.cli("job", "phase", "small", "working"), 0, self.err)
+        self.assertTrue(oke.plan_worktree("small"))  # OKe keeps it apart; the approval asks
+        self.assertEqual(self.cli("job", "brief", "small"), 0, self.err)
+        self.assertIn(u"문서.md", self.out)
+        self.assertIn("continue here", self.out)
+        # the user goes on with it: the job works in place, and that file is its own
+        self.assertEqual(self.cli("job", "phase", "small", "working", "--workspace", "here"), 0, self.err)
+        self.assertFalse(oke.plan_worktree("small"))
+        self.assertEqual(oke.plan_files("small", "Continues"), [u"문서.md"])
         self.write(u"toy/문서.md", "x and more\n")
         files = oke.job_files("small", oke.load_state()["jobs"]["small"], self.repo)
         self.assertEqual((files["paths"], files["shared"]), ([u"문서.md"], []))  # named: the job's, no question

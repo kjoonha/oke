@@ -221,6 +221,9 @@ class TestQueueAfterDelivery(PmBase):
         for name in ("one", "two"):
             self.assertEqual(self.cli("job", "new", name, "--pm", "a", "--path", self.repo), 0, self.err)
             self.write("home/jobs/%s/plan.md" % name, "job: %s\n---\n## Workspace\nnone\n" % name)
+            st = oke.load_state()
+            st["jobs"][name]["workspace_said"] = "here"  # the user said: in their checkout
+            oke.save_state(st)
 
     def delivered(self, name):
         oke.ledger_add(name, "oke", "abc1234", "deliver", "ok", "main pre=abc1234")

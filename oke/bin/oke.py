@@ -3481,7 +3481,10 @@ def status_locked(args, herdr_info):
                                 "pm_job_dir": pm_job_dir(name).replace("\\", "/"),
                                 "size": job.get("size"), "direct": bool(job.get("direct")), "output": job_output(job),
                                 "held": job.get("held"), "base": job.get("base"),
-                                "split_from": job.get("split_from")}
+                                "split_from": job.get("split_from"),
+                                # where it works once approved: OKe chose it with the plan
+                                "workspace": (("worktree" if plan_worktree(name) else "here")
+                                              if job.get("git_key") and not job.get("direct") else None)}
         # `job triage`'s size from the user's words (the PM decides `size`), and the user's "do not ask again"
         result["jobs"][name].update(size_hint=job.get("size_hint"), auto=bool(job.get("auto")))
         # its branch starts at another job's branch: its own work is after that
@@ -3601,6 +3604,10 @@ def job_brief(job):
                      (" and %d more" % (len(left) - 10) if len(left) > 10 else ""))
     lines.append("")
     for name in BRIEF_SECTIONS:
+        ours = workspace_lines(job) if name == "Workspace" else None
+        if ours:
+            lines += ["## Workspace"] + ours + [""]
+            continue
         text = plan_section(job, name)
         if not text or (name in ("Impact elsewhere", "Questions for the user")
                         and text.lower().startswith("none")):
@@ -5964,8 +5971,90 @@ def plan_continues(job):
 
 
 def plan_worktree(job):
-    """Does the job's plan give it a worktree?"""
+    """Does the job work in a worktree of its own? OKe's choice (`workspace.json`) when it made
+    one, else what an older plan's `## Workspace` says."""
+    chosen = read_json(workspace_path(job), None)
+    if isinstance(chosen, dict) and chosen.get("mode") in WORKSPACE_MODES:
+        return chosen["mode"] == "worktree" or bool(plan_continues(job))
     return plan_own_worktree(job)
+
+
+WORKSPACE_MODES = ("here", "worktree")
+
+
+def workspace_path(job):
+    return os.path.join(oke_home(), "jobs", job, "workspace.json")
+
+
+def choose_workspace(state, job):
+    """Where git job `job` works, from facts: {"mode": "here" | "worktree", "why", "user_files"}.
+    The user's own words win (`job new --workspace`, or their answer at the approval), then
+    config `workspace`; a linked worktree the user named is worked in; a job that goes on from
+    an earlier one, or one that shares its checkout with another open job, gets a worktree; a
+    checkout with uncommitted files of the user's gets one too, and the approval asks (it may
+    go on with them in place instead); a clean checkout is worked in."""
+    info = state["jobs"][job]
+    said = info.get("workspace_said")
+    if said in WORKSPACE_MODES:
+        files = sorted(set(p for _, p in dirty_paths(native_path(info["path"])) or [])) \
+            if said == "here" and info.get("path") else []
+        return {"mode": said, "why": "you said so", "user_files": files}
+    if plan_continues(job):
+        return {"mode": "worktree", "why": "it goes on from job %s's branch" % plan_continues(job),
+                "user_files": []}
+    main = repo_dir(info["git_key"]) if info.get("git_key") else None
+    if main and normalize_path(info.get("path") or "") != normalize_path(main):
+        return {"mode": "here", "why": "it is the linked worktree you named", "user_files": []}
+    if load_config().get("workspace") == "worktree":
+        return {"mode": "worktree", "why": "config.json `workspace` is worktree", "user_files": []}
+    path = normalize_path(info.get("path") or "")
+    others = sorted(n for n, j in state["jobs"].items()
+                    if n != job and j.get("phase") not in DONE_PHASES and not is_answer(j) and not j.get("direct")
+                    and normalize_path(j.get("path") or "") == path)
+    if others:
+        return {"mode": "worktree", "why": "job %s is open in the same checkout" % others[0], "user_files": []}
+    dirty = dirty_paths(native_path(info["path"])) or []
+    files = sorted(set(p for _, p in dirty))
+    if files:
+        return {"mode": "worktree", "why": "you have uncommitted files there", "user_files": files}
+    return {"mode": "here", "why": "the checkout has no uncommitted files and no other open job",
+            "user_files": []}
+
+
+def record_workspace(state, job, choice=None):
+    """Write the job's workspace.json: `choice` (the user's answer at the approval: here or
+    worktree), else what choose_workspace finds. The answer `here` over the user's uncommitted
+    files goes on with them: they become the job's Continues files."""
+    found = choose_workspace(state, job)
+    if choice in WORKSPACE_MODES and choice != found["mode"]:
+        found = dict(found, mode=choice, why="you chose it at the approval")
+    if choice == "here" and found["user_files"]:
+        found["continues"] = found["user_files"]  # "continue here": the user's files are the job's too
+    write_json_atomic(workspace_path(job), found)
+    return found
+
+
+def workspace_lines(job):
+    """The brief's `## Workspace` from OKe's choice, or None (an older plan: its own section)."""
+    chosen = read_json(workspace_path(job), None)
+    if not isinstance(chosen, dict) or chosen.get("mode") not in WORKSPACE_MODES:
+        return None
+    files = chosen.get("user_files") or []
+    shown = ", ".join(files[:10]) + (" and %d more" % (len(files) - 10) if len(files) > 10 else "")
+    if plan_worktree(job):
+        lines = ["new worktree (branch oke/%s): %s" % (job, chosen.get("why"))]
+        if files:
+            lines.append("your uncommitted files stay as they are: %s" % shown)
+            lines.append("ask: approve as is, or `continue here` (the job works in your checkout and goes on "
+                         "with these files)")
+    else:
+        lines = ["in place, in this checkout: %s" % chosen.get("why")]
+        if chosen.get("continues"):
+            lines.append("goes on with your uncommitted files: %s" % shown)
+        elif files:
+            lines.append("your uncommitted files stay yours (only the job's own changes are committed): %s" % shown)
+            lines.append("ask: approve as is, or `continue here` (the job goes on with these files)")
+    return lines
 
 
 # a plan's worktree that starts from another job's branch: `new worktree (branch oke/b, from oke/a)`
@@ -5990,7 +6079,12 @@ def plan_place(job):
 
 def plan_files(job, name):
     """The files or folders the plan's `## Workspace` line `<name>: <path>, <path>` names
-    (`Continues` or `Results`), relative with forward slashes; [] for none or no such line."""
+    (`Continues` or `Results`), relative with forward slashes; [] for none or no such line.
+    Continues: the user's files the job goes on with, when they chose that at the approval."""
+    if name.lower() == "continues":
+        chosen = read_json(workspace_path(job), None)
+        if isinstance(chosen, dict) and chosen.get("mode") in WORKSPACE_MODES:
+            return [rel_path(p) for p in chosen.get("continues") or []]
     for m in FILE_LINE.finditer(plan_place(job) or ""):
         if m.group(1).lower() == name.lower():
             value = m.group(2).strip()
@@ -6973,11 +7067,15 @@ def job_locked(args):
                         % (args.pm, ", ".join(sorted(state["pms"])) or "(none yet)"))
         if args.shared_wiki and args.path:
             return fail("a shared-wiki curation changes no folder: no --path")
+        if args.workspace and args.shared_wiki:
+            return fail("a shared-wiki curation changes no folder: no --workspace")
         os.makedirs(job_dir)
         state["jobs"][args.slug] = {"pm": args.pm, "path": None, "phase": "intake", "worktree": None,
                                     "phase_at": time.time(), "created": time.time(), "base": None}
         if args.shared_wiki:
             state["jobs"][args.slug]["orchestrator_job"] = True
+        if args.workspace:
+            state["jobs"][args.slug]["workspace_said"] = args.workspace
         if args.path:
             try:
                 set_job_path(state, args.slug, args.path)
@@ -7132,6 +7230,11 @@ def job_locked(args):
         if args.phase in ("awaiting_approval", "working") and not is_answer(info) and plan_too_big(args.slug):
             return fail(plan_too_big(args.slug) + ". Give the PM `kind: plan` to shorten it")
         starts = args.phase == "working" and now == "awaiting_approval" and not is_answer(info)
+        if getattr(args, "workspace", None):
+            if not (starts and info.get("git_key") and not info.get("direct")):
+                return fail("--workspace is the user's answer at a git job's approval: only with `job phase %s "
+                            "working` from awaiting_approval" % args.slug)
+            record_workspace(state, args.slug, args.workspace)
         in_checkout = bool(info.get("git_key")) and not info.get("direct") and not plan_worktree(args.slug)
         if starts and in_checkout:
             # two jobs changing one checkout in place would mix their files: the later one waits
@@ -7167,6 +7270,9 @@ def job_locked(args):
             problem = interview_problem(args.slug)
             if problem:
                 return fail(problem)
+        git_job = bool(info.get("git_key")) and not info.get("direct") and not is_answer(info)
+        if git_job and args.phase == "awaiting_approval" and now != "awaiting_approval":
+            record_workspace(state, args.slug)  # the brief shows it; the user approves it with the plan
         state["jobs"][args.slug].update(phase=args.phase, phase_at=time.time())
         if args.phase != "awaiting_approval":
             info.pop("queued", None)
@@ -8232,6 +8338,8 @@ def build_parser():
     new.add_argument("slug")
     new.add_argument("--pm", required=True, help="the PM the user picked")
     new.add_argument("--path", help="the folder the job changes, only when the user said it")
+    new.add_argument("--workspace", choices=WORKSPACE_MODES,
+                     help="only when the user said where: here (their checkout) or worktree (a new one)")
     new.add_argument("--research", action="store_true", help=argparse.SUPPRESS)  # older instructions: ignored
     new.add_argument("--shared-wiki", action="store_true",
                      help="the orchestrator's own job, curating the shared wiki: --pm only for its wiki log, no PM "
@@ -8253,6 +8361,8 @@ def build_parser():
     phase = job_sub.add_parser("phase")
     phase.add_argument("slug")
     phase.add_argument("phase")
+    phase.add_argument("--workspace", choices=WORKSPACE_MODES,
+                       help="with working: the user's answer at the approval (`continue here`: here)")
     job_sub.add_parser("cancel", help="the user gave the job up: close it, its children and its mail").add_argument("slug")
     hold = job_sub.add_parser("hold", help="the user sets the job aside: its agents close, nothing revives them")
     hold.add_argument("slug")
