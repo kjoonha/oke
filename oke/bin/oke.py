@@ -6509,12 +6509,24 @@ def ambiguity(scores):
     return round(1 - sum(scores[name] * weight for name, weight in DIMENSIONS), 3)
 
 
+def clarity(value):
+    """An interview score: how clear one dimension of the request is, from 0 to 1."""
+    try:
+        score = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("%r is not a score: give how clear it is, a number from 0 (unknown) to 1 "
+                                         "(clear), e.g. 0.3; the words go in the intake" % value)
+    if not 0 <= score <= 1:
+        raise argparse.ArgumentTypeError("%s is not between 0 and 1" % value)
+    return score
+
+
 def interview_problem(job):
     """Why job `job` may not start planning yet, or None."""
     data = read_json(interview_path(job), None)
     if not isinstance(data, dict) or not data.get("done"):
-        return ("job %s has no finished interview: run `$OKE interview %s --goal .. --constraints .. "
-                "--criteria ..` until it says done" % (job, job))
+        return ("job %s has no finished interview: run `$OKE interview %s --goal <0..1> --constraints "
+                "<0..1> --criteria <0..1>` (how clear each is, a score) until it says done" % (job, job))
     return None
 
 
@@ -8374,7 +8386,9 @@ def build_parser():
     interview = sub.add_parser("interview")
     interview.add_argument("job")
     for name, _ in DIMENSIONS:
-        interview.add_argument("--" + name, type=float, required=True)
+        # seen live: an orchestrator passed the goal's text and got only "invalid float value"
+        interview.add_argument("--" + name, type=clarity, required=True, metavar="0..1",
+                               help="how clear the user's %s is, a score from 0 to 1, never its text" % name)
     interview.add_argument("--question")
     interview.add_argument("--answer")
     interview.add_argument("--stop", action="store_true", help="the user chose to stop asking")
