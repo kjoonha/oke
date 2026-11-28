@@ -79,6 +79,7 @@ class TestPhaseGates(SpawnBase):
         self.job("fix-a", "planning")
         self.logged("fix-a")
         self.verified("fix-a")
+        self.planned("fix-a")
         for step in ("awaiting_approval", "working", "reviewing", "done"):
             self.assertEqual(self.cli("job", "phase", "fix-a", step), 0, self.err)
 
@@ -250,3 +251,30 @@ class TestStrayAgentNotes(unittest.TestCase):
         self.assertEqual(oke.stray_notes(files, cwd), ["report.md"])
         self.assertIn("agent's report or board", oke.nested_block(files, cwd))
         self.assertIsNone(oke.nested_block({"new": ["docs/report.md"], "nested": []}, cwd))
+
+
+class TestUserAnswers(SpawnBase):
+    def test_a_user_only_decision_needs_a_popup_answer_once_a_mod_counts_them(self):
+        # seen live: an orchestrator approved a plan and put the user's files into a job's commit unasked
+        self.job("fix-a", "awaiting_approval")
+        self.job("fix-b", "awaiting_approval")
+        with oke.locked():
+            st = oke.load_state()
+            st["orchestrator"]["ask_gate"] = True  # the mod's tick turns it on
+            oke.save_state(st)
+        self.assertEqual(self.cli("job", "phase", "fix-a", "working"), 1)
+        self.assertIn("AskUserQuestion", self.err)
+        self.assertEqual(self.cli("job", "files", "fix-a", "include", "a.txt"), 1)
+        was = oke.whoami
+        self.addCleanup(setattr, oke, "whoami", was)
+        oke.whoami = lambda state, pane, session=None: (("orchestrator", "o", None, {}), [])
+        self.assertEqual(self.cli("answered", "--pane", "w1:p1", "--session", "s1"), 0, self.err)
+        self.assertEqual(self.cli("job", "phase", "fix-a", "working"), 0, self.err)
+        # one answer: the next job's approval needs its own
+        self.assertEqual(self.cli("job", "phase", "fix-b", "working"), 1)
+        self.assertEqual(self.cli("answered", "--pane", "w1:p1"), 0, self.err)
+        self.assertEqual(self.cli("job", "auto", "fix-b"), 0, self.err)
+        self.assertIn(self.cli("job", "phase", "fix-b", "working"), (0, 3), self.err)  # auto: no popup (it may wait for fix-a)
+        oke.whoami = lambda state, pane, session=None: (("pm", "p", "k", {}), [])
+        self.assertEqual(self.cli("answered", "--pane", "w2:p1"), 0)
+        self.assertEqual(oke.load_state()["orchestrator"]["answers"], 2)  # a PM's popup is not the user's

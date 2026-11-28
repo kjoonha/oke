@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { THEME_NAMES, framesOf, gitDenied, jobActionDenied, keyDenied, orchestratorDenied, paletteOf, pendingWords, promptRole, todoLine, withBriefs, withPython, workerDenied, writeVerdict } from './register'
+import { THEME_NAMES, answered, bashWrites, framesOf, gitDenied, jobActionDenied, keyDenied, orchestratorDenied, paletteOf, pendingWords, promptRole, rmDenied, todoLine, withBriefs, withPython, workerDenied, writeVerdict } from './register'
 
 type Run = { argv: readonly string[] }
 
@@ -1228,4 +1228,35 @@ test('python3 before oke.py becomes python where python3 does not run', () => {
   expect(withPython(cmd, null)).toBe(cmd)
   expect(withPython('cd r; python3 /p/bin/oke.py job phase j done', 'python')).toBe('cd r; python /p/bin/oke.py job phase j done')
   expect(withPython('echo mypython3 /p/oke.py', 'python')).toBe('echo mypython3 /p/oke.py')
+})
+
+test('bashWrites finds the files a Bash command writes in its common forms', () => {
+  const repo = 'C:/u/repo'
+  expect(bashWrites(`sed -i 's/a/b/' ${repo}/calc.py`)).toEqual([`${repo}/calc.py`])
+  expect(bashWrites(`cd "${repo}" && sed -i.bak 's/a/b/' calc.py`)).toEqual([`${repo}/calc.py`])
+  expect(bashWrites(`echo x > ${repo}/a.txt; echo y >>"${repo}/b c.txt"`)).toEqual([`${repo}/a.txt`, `${repo}/b c.txt`])
+  expect(bashWrites(`cat <<'EOF' > ${repo}/n.md\nline > not/a/file\nEOF`)).toEqual([`${repo}/n.md`])
+  expect(bashWrites(`git diff | tee -a ${repo}/d.txt`)).toEqual([`${repo}/d.txt`])
+  expect(bashWrites(`Set-Content -Path ${repo}\\x.py -Value 1`)).toEqual([`${repo}/x.py`])
+  expect(bashWrites(`cp a.py ${repo}/a.py`)).toEqual([`${repo}/a.py`])
+  // not writes: a quoted >, stream redirects, temp files, a relative path with no cd (the agent's cwd)
+  expect(bashWrites(`grep ">" ${repo}/a.py 2>&1 >/dev/null`)).toEqual([])
+  expect(bashWrites(`python x.py > /tmp/out.txt 2>$null; echo > C:/Users/u/AppData/Local/Temp/t`)).toEqual([])
+  expect(bashWrites('sed -i s/a/b/ calc.py')).toEqual([])
+})
+
+test('rmDenied refuses an orchestrator deleting a folder tree', () => {
+  for (const bad of ['rm -rf /h/jobs/x', 'cd /h && rm -r jobs/x', 'Remove-Item -Recurse -Force C:\\h\\jobs\\x',
+    'rmdir /s /q jobs', 'python -c "import shutil; shutil.rmtree(\'/h/jobs\')"']) {
+    expect(rmDenied(bad)).toMatch(/never delete folders/)
+  }
+  expect(rmDenied('rm /h/tmp/a.txt')).toBeNull()
+  expect(rmDenied('grep -n "rm -rf" notes.md')).toBeNull()
+})
+
+test('answered is a popup the user answered', () => {
+  expect(answered({ result: { questions: [], answers: { 'Approve?': 'Approve' } } })).toBe(true)
+  expect(answered({ result: { questions: [], answers: {} } })).toBe(false)
+  expect(answered({ deny: 'no' })).toBe(false)
+  expect(answered({ result: { answers: { q: 'x' } }, isError: true })).toBe(false)
 })

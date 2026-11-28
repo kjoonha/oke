@@ -114,7 +114,17 @@ class Base(unittest.TestCase):
             if step == "done":
                 self.logged(name)
                 self.verified(name)
+            if step == "awaiting_approval":
+                self.planned(name)
             self.assertEqual(self.cli("job", "phase", name, step), 0, self.err)
+
+    def planned(self, name):
+        """The PM's plan.md, which `job phase awaiting_approval` asks for."""
+        plan = os.path.join(oke.oke_home(), "jobs", name, "plan.md")
+        if not os.path.exists(plan):
+            os.makedirs(os.path.dirname(plan), exist_ok=True)
+            with io.open(plan, "w", encoding="utf-8") as f:
+                f.write(u"## Goal\nthe test's job\n")
 
     def verified(self, name):
         """A delivery OKe recorded, which `job phase done` asks for of a code job."""
@@ -414,6 +424,7 @@ class TestState(Base):
         self.git(repo, "branch", "oke/fix-a")
         self.assertEqual(self.cli("job", "new", "fix-a", "--repo", repo), 0, self.err)
         self.advance("fix-a", "planning")
+        self.planned("fix-a")
         self.assertEqual(self.cli("job", "phase", "fix-a", "awaiting_approval"), 1)
         self.assertIn("oke/fix-a", self.err)
         self.assertEqual(oke.load_state()["jobs"]["fix-a"]["phase"], "planning")

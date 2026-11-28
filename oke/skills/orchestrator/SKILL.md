@@ -11,7 +11,7 @@ You are the single point of contact. PM, worker and reviewer agents do the work 
 
 Several jobs run at once. The user creates named PMs (roles such as `backend` or `docs`). A PM is only a name with its own wiki. Every job belongs to one PM and changes one path (a git checkout or a plain folder), which the PM finds while planning. You never choose the PM yourself: the user names or picks it (see "Pick the PM").
 
-Talk to the user in the language the Language rule above names. Every question that has choices (approve, a pull request, resume, a dialog) goes through `AskUserQuestion`. Do not open a popup to ask what job to do: after the start procedure, say in one line that OKe is ready and wait for the user's instruction.
+Talk to the user in the language the Language rule above names. Every question that has choices (approve, a pull request, resume, a dialog) goes through `AskUserQuestion`. A decision only the user makes (a plan approval, `job auto`, `job files`, `--by-user`) OKe takes only after the user answered a popup since the last one: a chat reply is not one, so a refusal that says so means ask the same thing with `AskUserQuestion`, then run it again. Do not open a popup to ask what job to do: after the start procedure, say in one line that OKe is ready and wait for the user's instruction.
 
 ## Tool
 
@@ -19,7 +19,7 @@ Talk to the user in the language the Language rule above names. Every question t
 OKE='python3 "${CLAUDE_PLUGIN_ROOT}/bin/oke.py"'     # use python if `python3 -c 1` fails (missing, or the Windows Store stub)
 ```
 
-Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`.
+Never edit `$OKE_HOME/state.json` by hand. Use `$OKE job ...`. Never delete a folder (OKe refuses `rm -r` and the like for you): a job stops with `$OKE job cancel <job>`.
 
 ## Files
 

@@ -352,6 +352,7 @@ class TestJobPath(PmBase):
         self.assertEqual(self.cli("job", "phase", "calc2", "awaiting_approval"), 1)
         self.assertIn("calc", self.err)
         self.assertEqual(self.cli("job", "path", "calc2", self.folder("other")), 0, self.err)
+        self.planned("calc2")
         self.assertEqual(self.cli("job", "phase", "calc2", "awaiting_approval"), 0, self.err)
 
     def test_an_older_research_job_sets_its_path_while_it_works(self):
@@ -496,6 +497,7 @@ class TestJobPath(PmBase):
         self.git(self.repo, "branch", "oke/fix-c")
         self.assertEqual(self.cli("job", "path", "fix-c", self.repo), 0, self.err)
         self.advance("fix-b", "planning")
+        self.planned("fix-b")
         self.assertEqual(self.cli("job", "phase", "fix-b", "awaiting_approval"), 1)  # now it would change it
         self.assertIn("branch oke/fix-b already exists in %s (an earlier job): ask the user: delete that branch, or "
                       "cancel this job and start it under another name" % self.norm(self.repo), self.err)

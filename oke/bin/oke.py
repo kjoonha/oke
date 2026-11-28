@@ -3111,6 +3111,12 @@ def cmd_tick(args):
             out["in_place"] = in_place(state["jobs"].get(record.get("job")) or {})
         if role == "orchestrator":
             targets = [r for r in records(state) if r[0] == "pm"]
+            if not (state.get("orchestrator") or {}).get("ask_gate"):
+                # a mod runs here: it counts popup answers, so user-only decisions need one
+                with locked():
+                    s = load_state()
+                    s.setdefault("orchestrator", {})["ask_gate"] = True
+                    save_state(s)
         elif role == "pm":
             targets = [r for r in records(state)
                        if (r[0] == "orchestrator" and runtime().owns_orchestrator)
@@ -3632,6 +3638,76 @@ ORCHESTRATOR_ACTIONS = {
 }
 
 
+def user_decision(state, args):
+    """The user-only decision this `oke job` call records, or None: plan approval (`phase working`
+    from awaiting_approval, unless the job is auto, autonomy is full or the user approved it
+    already and it waited), `auto` on, `files`, and `accept-check`/`accept-head --by-user`."""
+    info = state["jobs"].get(getattr(args, "slug", None) or "") or {}
+    if args.action == "phase":
+        if args.phase != "working" or info.get("phase") != "awaiting_approval" or info.get("auto") \
+                or info.get("user_approved") or load_config().get("autonomy") == "full":
+            return None
+        return "approve"
+    if args.action == "auto":
+        return None if args.off else "auto"
+    if args.action == "files":
+        return "files"
+    if args.action in ("accept-check", "accept-head"):
+        return args.action if args.by_user else None
+    return None
+
+
+def user_answer_missing(state, slug, decision):
+    """The refusal when the orchestrator records a user's decision with no popup answer for it, or
+    None. Seen live: an orchestrator approved plans and put the user's uncommitted files into a job's
+    commit without asking. The mod counts AskUserQuestion answers (`oke answered`); without a mod
+    (`ask_gate` never set) nothing is checked. One answer covers the calls of one kind for one job."""
+    orch = state.get("orchestrator") or {}
+    if not orch.get("ask_gate"):
+        return None
+    seq, spent = orch.get("answers", 0), orch.get("spent") or {}
+    if seq > spent.get("seq", 0):
+        return None
+    if seq and spent.get("seq") == seq and spent.get("job") == slug and spent.get("what") == decision:
+        return None
+    return ("this records a decision only the user makes, and the user has answered no popup since OKe "
+            "last took one: ask them with AskUserQuestion (a popup, not a chat question), then run this again "
+            "with their answer. Never decide it for them")
+
+
+def spend_user_answer(slug, decision, waited=False):
+    """Mark the latest popup answer used for `decision` on `slug`; a plan approval that waited
+    (exit 3) stays approved for when the job is released."""
+    with locked():
+        state = load_state()
+        orch = state.setdefault("orchestrator", {})
+        if orch.get("ask_gate"):
+            orch["spent"] = {"seq": orch.get("answers", 0), "job": slug, "what": decision}
+        info = state["jobs"].get(slug)
+        if info is not None and decision == "approve":
+            if waited:
+                info["user_approved"] = True
+            else:
+                info.pop("user_approved", None)
+        save_state(state)
+
+
+def cmd_answered(args):
+    """The mod: the orchestrator's user answered an AskUserQuestion popup."""
+    with locked():
+        state = load_state()
+        me, _ = whoami(state, args.pane, args.session)
+        if me is None or me[0] != "orchestrator":
+            print(json.dumps({"counted": False}))
+            return 0
+        orch = state.setdefault("orchestrator", {})
+        orch["ask_gate"] = True
+        orch["answers"] = orch.get("answers", 0) + 1
+        save_state(state)
+    print(json.dumps({"counted": True}))
+    return 0
+
+
 def cmd_job(args):
     if args.action == "brief":
         if args.json:  # the mod: every job awaiting approval, for the approval popup's preview
@@ -3657,16 +3733,24 @@ def cmd_job(args):
     if args.action in ORCHESTRATOR_ACTIONS:
         # only the orchestrator moves a job: a PM's report does (seen live: a PM set its own job
         # done and never reported it, so nobody archived it). The others record the user's answer.
-        if not caller_is_orchestrator(load_state()):
+        state = load_state()
+        if not caller_is_orchestrator(state):
             return fail(ORCHESTRATOR_ACTIONS[args.action])
+        decision = user_decision(state, args)
+        missing = decision and user_answer_missing(state, args.slug, decision)
+        if missing:
+            return fail(missing)
+        args.decision = decision
     if args.action == "triage":
         return cmd_triage(args.slug)
     if args.action == "restore-user":
         return restore_user(args.slug, args.file)
-    if args.action == "accept-check":
-        return accept_check(args.slug, args.target, args.by_user)
-    if args.action == "accept-head":
-        return accept_head(args.slug, args.by_user)
+    if args.action in ("accept-check", "accept-head"):
+        code = accept_check(args.slug, args.target, args.by_user) if args.action == "accept-check" \
+            else accept_head(args.slug, args.by_user)
+        if code == 0 and getattr(args, "decision", None):
+            spend_user_answer(args.slug, args.decision)
+        return code
     if args.action == "plan":  # the PM, after it wrote plan.md: is it short enough to show and check
         path = os.path.join(oke_home(), "jobs", args.slug, "plan.md")
         if not os.path.isfile(path):
@@ -3754,6 +3838,8 @@ def cmd_job(args):
     try:
         with locked():
             code = job_locked(args)
+        if code in (0, 3) and getattr(args, "decision", None):
+            spend_user_answer(args.slug, args.decision, waited=code == 3)
     finally:
         taken = getattr(args, "snapshot", None)
         if taken:
@@ -6930,6 +7016,14 @@ def job_locked(args):
             # an older research job that already works goes on as it was (a dialog sets working again)
             return fail("job %s is answered (`job answer`): it has no plan or work; it ends with `job phase %s "
                         "done` after its done report" % (args.slug, args.slug))
+        if args.phase == "awaiting_approval" and now != "awaiting_approval" \
+                and not os.path.isfile(os.path.join(oke_home(), "jobs", args.slug, "plan.md")):
+            # seen live: a PM did the change while planning and reported done with no plan, and the
+            # orchestrator took it for one and let the job work
+            return fail("job %s has no plan.md: the user approves a plan, so there is none to show yet. A PM "
+                        "plans, it never makes the change itself: give it its planning assignment again (or, if "
+                        "it already changed files, tell the user what it did and ask whether to keep it)"
+                        % args.slug)
         if args.phase == "working" and now in ("intake", "planning") and not is_answer(info):
             # the older research flow set working at once: a job works only on an approved plan
             return fail("job %s cannot go from %s to working: a job works only on an approved plan. If it only "
@@ -8209,6 +8303,11 @@ def build_parser():
     tick.add_argument("--board", action="store_true")
     tick.add_argument("--events-from", type=int)
     tick.set_defaults(func=cmd_tick)
+
+    answered = sub.add_parser("answered", help="the orchestrator's user answered a popup (mod)")
+    answered.add_argument("--pane", required=True)
+    answered.add_argument("--session")
+    answered.set_defaults(func=cmd_answered)
 
     take = sub.add_parser("take-mail", help="the agent's mod takes its inbox after a turn (mod)")
     take.add_argument("--agent", required=True)

@@ -413,6 +413,7 @@ class TestReviewRound1(S3Base):
         self.assertEqual(self.cli("job", "answer", "look", "--undo"), 0, self.err)  # again: no change
         self.assertTrue(json.loads(self.out)["unchanged"])
         self.assertEqual(self.cli("job", "size", "look", "small"), 0, self.err)
+        self.planned("look")
         self.assertEqual(self.cli("job", "phase", "look", "awaiting_approval"), 0, self.err)
         st = oke.load_state()
         st["jobs"]["look"]["answer"] = True  # past planning an answer stays one
@@ -439,6 +440,7 @@ class TestReviewRound1(S3Base):
         # makes it a job with a plan
         self.assertEqual(self.cli("job", "size", "look", "normal"), 0, self.err)
         self.assertFalse(oke.is_answer(oke.load_state()["jobs"]["look"]))
+        self.planned("look")
         self.assertEqual(self.cli("job", "phase", "look", "awaiting_approval"), 0, self.err)
 
     def test_an_older_research_job_already_working_goes_on(self):

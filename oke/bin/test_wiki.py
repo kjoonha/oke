@@ -125,6 +125,7 @@ class TestWiki(SpawnBase):
         state["jobs"]["calc"]["created"] += 2  # the old line is now older than the job
         oke.save_state(state)
         self.assertEqual(self.cli("interview", "calc", "--goal", 1, "--constraints", 1, "--criteria", 1), 0)
+        self.planned("calc")
         for step in ("planning", "awaiting_approval", "working"):
             self.assertEqual(self.cli("job", "phase", "calc", step), 0, self.err)
         self.assertEqual(self.cli("job", "phase", "calc", "done"), 1)

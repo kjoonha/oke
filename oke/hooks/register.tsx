@@ -99,9 +99,84 @@ export function writeVerdict(file: string, dirs: { home: string | null, wiki: st
   return dirs.areas.some(a => !a.direct && underDir(file, a.path, win)) ? 'allow' : 'ask'
 }
 
-/** The refusal for an Edit or Write outside the agent's write areas, else null.
- * shortcut: a Bash write is not checked; the skills say the same. */
+/** Shell words of one command, quotes taken off (`quoted` set for those). */
+function words(segment: string): { v: string, quoted: boolean }[] {
+  const out: { v: string, quoted: boolean }[] = []
+  // a word joins quoted and plain parts (`>>"a b.txt"`)
+  const re = /(?:"(?:\\.|[^"\\])*"|'[^']*'|[^\s"'])+/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(segment))) {
+    out.push({ v: m[0].replace(/"((?:\\.|[^"\\])*)"|'([^']*)'/g, (_, d, q) => d ?? q), quoted: /^["']/.test(m[0]) })
+  }
+  return out
+}
+
+const NOT_A_FILE = /^(?:\/dev\/(?:null|stdout|stderr)|\$null|nul|&\d|\d)$/i
+
+/** The files a Bash command writes in its common forms: `>`/`>>` redirects, `tee`, `sed -i`,
+ * PowerShell's Set-Content, Add-Content and Out-File, `cp`/`mv` targets. Relative paths are joined
+ * to a leading `cd <dir>`, else left out (they are in the agent's own cwd). Seen live: PMs refused
+ * an Edit wrote the same file with sed, PowerShell and a heredoc. Not every write: a script's own
+ * writes are not seen. */
+export function bashWrites(command: string): string[] {
+  const text = command.replace(/<<-?\s*['"]?(\w+)['"]?([^\n]*)\n[\s\S]*?\n\s*\1\b/g, '<<_$2')
+  const files: string[] = []
+  let dir: string | null = null
+  for (const seg of text.split(/&&|\|\||;|\n|\|/)) {
+    const all = words(seg.trim())
+    if (!all.length) continue
+    if (all[0]!.v === 'cd' && all[1]) { dir = all[1].v; continue }
+    for (let i = 0; i < all.length; i++) {
+      // a quoted `>` is text (grep ">" x), not a redirect
+      const r = all[i]!.quoted ? null : /^\d?>>?(.*)$/.exec(all[i]!.v)
+      if (r && !r[1]!.startsWith('&')) {
+        const t = r[1] || all[i + 1]?.v
+        if (t && !NOT_A_FILE.test(t)) files.push(t)
+      }
+    }
+    const w = all.map(x => x.v)
+    const cmd = w[0]!.toLowerCase()
+    const args = w.slice(1).filter(a => !/^\d?>/.test(a))
+    if (cmd === 'tee') files.push(...args.filter(a => !a.startsWith('-')))
+    else if (cmd === 'sed' && args.some(a => /^-[a-z]*i/.test(a) || a.startsWith('--in-place'))) {
+      const last = args[args.length - 1]
+      if (last && !last.startsWith('-')) files.push(last)
+    } else if (['set-content', 'add-content', 'out-file'].includes(cmd)) {
+      const at = args.findIndex(a => /^-(?:path|filepath|literalpath)$/i.test(a))
+      const t = at >= 0 ? args[at + 1] : args.find(a => !a.startsWith('-'))
+      if (t) files.push(t)
+    } else if (cmd === 'cp' || cmd === 'mv' || cmd === 'copy-item' || cmd === 'move-item') {
+      const plain = args.filter(a => !a.startsWith('-'))
+      if (plain.length >= 2) files.push(plain[plain.length - 1]!)
+    }
+  }
+  const abs = (f: string) => /^([A-Za-z]:)?[\\/]/.test(f)
+  return files.filter(f => !NOT_A_FILE.test(f)).map(f => abs(f) || !dir ? f : `${dir}/${f}`)
+    .filter(abs).map(f => f.replace(/\\/g, '/'))
+    // a scratch file in a temporary folder is nobody's work
+    .filter(f => !/^\/tmp\/|\/temp\//i.test(f))
+}
+
+/** The refusal for a Bash command that deletes a folder tree, from the orchestrator, else null.
+ * Seen live: an orchestrator cancelled a job, then removed job folders in OKe's home with rm -rf. */
+export function rmDenied(command: string): string | null {
+  const text = unquoted(command)
+  const tree = /(?:^|[\s;&|(])(?:rm\s+(?:-\w*[rR]\w*|--recursive)|remove-item\b[^;&|\n]*-r(?:ecurse)?\b|rmdir\s+\/s|rd\s+\/s)/i
+  if (!tree.test(text) && !/shutil\.rmtree/.test(command)) return null
+  return 'OKe orchestrators never delete folders: they hold the jobs\' records. To stop a job: `$OKE job cancel <job>`; '
+    + 'a finished job\'s leftovers: `$OKE job clean <job>`, only when the user says so.'
+}
+
+/** The refusal for an Edit or Write outside the agent's write areas, else null. A Bash write is
+ * checked for the files `bashWrites` finds. */
 async function pathDenied($: any, tool: string, input: any): Promise<string | null> {
+  if (tool === 'Bash' && pane) {
+    for (const file of bashWrites(String(input.command ?? ''))) {
+      const denied = await pathDenied($, 'Write', { file_path: file })
+      if (denied) return denied
+    }
+    return null
+  }
   if (!['Edit', 'Write', 'NotebookEdit'].includes(tool) || !pane) return null
   const file = String(input.file_path ?? input.notebook_path ?? '')
   if (!file) return null
@@ -112,6 +187,13 @@ async function pathDenied($: any, tool: string, input: any): Promise<string | nu
     return 'OKe: OKe could not check this write (oke path-check failed): try again; if it keeps failing, report a question'
   }
   return out.allow ? null : `OKe: ${out.reason}`
+}
+
+/** Did an AskUserQuestion call come back with the user's answers? */
+export function answered(ran: any): boolean {
+  if (!ran || ran.deny !== undefined || ran.isError) return false
+  const answers = ran.result?.answers
+  return !!answers && typeof answers === 'object' && Object.values(answers).some(v => String(v ?? '').trim() !== '')
 }
 
 /** `--pane` and `--session` for oke.py's mod commands: who this agent is. */
@@ -1357,7 +1439,11 @@ export const register: Register = on => {
             // no root: its memory is refused too, never a foreign one allowed
           }
         }
-        const denied = orchestratorDenied(e.tool, e, { home, wiki, claude: claudeDir, root })
+        const dirs = { home, wiki, claude: claudeDir, root }
+        const denied = orchestratorDenied(e.tool, e, dirs)
+          ?? (e.tool === 'Bash' ? rmDenied(String(e.command ?? '')) : null)
+          ?? (e.tool === 'Bash' ? bashWrites(String(e.command ?? ''))
+            .map(f => orchestratorDenied('Write', { file_path: f }, dirs)).find(Boolean) ?? null : null)
         if (denied) return { deny: denied }
         if (e.tool === 'AskUserQuestion' && Array.isArray((e as any).questions)) {
           const out = await oke($, ['job', 'brief', '--json'])
@@ -1367,6 +1453,11 @@ export const register: Register = on => {
         }
       }
       const ran: any = await next(e)
+      // a popup the user answered: OKe takes a user-only decision (approval, their files, a failing
+      // check) only after one (seen live: an orchestrator approved and included files unasked)
+      if (role === 'orchestrator' && pane && e.tool === 'AskUserQuestion' && !e.agent_id && answered(ran)) {
+        await oke($, ['answered', ...here()])
+      }
       // /oke:start in a session older than a minute: an unknown pane ticks only every 60 s,
       // so look right after its oke call instead of leaving the band dark for up to a minute
       if (role === null && e.tool === 'Bash' && String(e.command ?? '').includes('oke.py')) void tick($)
