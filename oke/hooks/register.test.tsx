@@ -740,6 +740,9 @@ test('workers, reviewers and subagents may not stash or throw away the whole tre
   // the PM itself cleans up its own worktrees
   expect(gitDenied('git checkout -- .', 'pm')).toBeNull()
   expect(gitDenied('git stash', 'pm')).toBeNull()
+  // the PM commits nothing itself (`oke job deliver` does) but may rebase a worktree
+  expect(gitDenied('git add calc.py && git commit -m x', 'pm')).toMatch(/^OKe blocks `git commit`/)
+  expect(gitDenied('git rebase main', 'pm')).toBeNull()
 })
 
 test('no way round the whole-tree rule: a revision, a pathspec of everything, a forced switch', () => {
@@ -763,7 +766,7 @@ test('a worker in the user\'s checkout and a PM\'s subagents never commit; the P
     expect(gitDenied(bad, 'pm', true, true)).toMatch(/^OKe blocks `git /)
   }
   expect(gitDenied('git commit -m x', 'worker')).toBeNull()  // a worktree of the job's own
-  expect(gitDenied('git commit -m x', 'pm')).toBeNull()
+  expect(gitDenied('git commit -m x', 'pm')).toMatch(/^OKe blocks `git commit`/)  // `oke job deliver` commits
   // the orchestrator never commits (the tool.call hook passes noCommit for it)
   expect(gitDenied('cd r && git add a.py && git commit -m x', 'orchestrator', false, true)).toMatch(/Its PM delivers it/)
   expect(gitDenied('grep -n "git commit" notes.md', 'worker', false, true)).toBeNull()
@@ -830,6 +833,9 @@ test('the orchestrator writes only the OKe home and starts no subagent', async (
     { tool: 'Write', file_path: 'C:/Users/u/.claude/projects/other/memory/MEMORY.md' }]) {
     expect((await call(bad)).deny).toMatch(/^OKe orchestrators/)
   }
+  // a wakeup watches nothing: the PM's wait does
+  expect((await call({ tool: 'ScheduleWakeup', delaySeconds: 120, prompt: 'oke:start', reason: 'r' })).deny)
+    .toMatch(/^OKe orchestrators wait with/)
   expect((await call({ tool: 'Bash', command: 'git -C C:/repo reset --hard' })).deny).toMatch(/^OKe blocks `git reset/)
   expect((await call({ tool: 'Bash', command: 'git push' })).deny).toMatch(/Tell the user to run it themselves if they want it\.$/)
   for (const ok of [{ tool: 'Write', file_path: 'C:\\oke\\jobs\\j\\pm\\assignment.md' },

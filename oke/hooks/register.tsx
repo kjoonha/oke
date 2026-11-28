@@ -581,15 +581,21 @@ const AGENT_GIT_DENIED = new RegExp(
   + String.raw`(stash\b|checkout\s+${WORDS}${WHOLE_TREE}|restore\s+${WORDS}${WHOLE_TREE}|rm\s+${WORDS}${WHOLE_TREE})`,
 )
 // git commands that make commits: in a job's checkout in place only `oke job deliver` commits
+export const WAKEUP_DENIED = 'OKe orchestrators wait with `$OKE wait <pm> --jobs` (Bash, run_in_background), one per PM '
+  + 'with open jobs, then end the turn: the wait types the PM\'s mail in and returns its reports. A wakeup watches nothing.'
+const PM_COMMIT_DENIED =new RegExp(GIT_START + String.raw`(commit)(?![\w-])`)
 const COMMIT_DENIED = new RegExp(GIT_START + String.raw`(commit|revert|cherry-pick|merge|am|rebase)(?![\w-])`)
 
 /** The refusal for a Bash command a child must not run, else null. `noCommit`: a worker of a
- * job in place, or a PM's subagent: they leave the work uncommitted for `oke job deliver`. */
+ * job in place, a PM's subagent or the orchestrator: they leave the work uncommitted for `oke job
+ * deliver`. A PM may rebase but never commit. */
 export function gitDenied(command: string, role?: string, subagent?: boolean, noCommit?: boolean): string | null {
   const text = unquoted(command)
   const m = GIT_DENIED.exec(text)
     ?? (role === 'worker' || role === 'reviewer' || subagent ? AGENT_GIT_DENIED.exec(text) : null)
-  const c = !m && noCommit ? COMMIT_DENIED.exec(text) : null
+  // a PM never commits a job's work itself (seen live: one committed a job the orchestrator had
+  // cancelled straight onto the user's main); it may still rebase a worktree
+  const c = m ? null : noCommit ? COMMIT_DENIED.exec(text) : role === 'pm' ? PM_COMMIT_DENIED.exec(text) : null
   if (c) {
     return `OKe blocks \`git ${c[1]}\` here: only \`oke job deliver\` commits the job's changes, after the review. `
       + (role === 'orchestrator' ? 'Its PM delivers it; the user merges and commits their own work themselves.'
@@ -1440,6 +1446,10 @@ export const register: Register = on => {
       if (role === 'pm' || role === 'worker' || role === 'reviewer') {
         const denied = await pathDenied($, e.tool, e)
         if (denied) return { deny: denied }
+      }
+      if (role === 'orchestrator' && e.tool === 'ScheduleWakeup' && !e.agent_id) {
+        // seen live: an orchestrator only set wakeups, so nothing typed a PM's mail in or saw it idle
+        return { deny: WAKEUP_DENIED }
       }
       if (role === 'orchestrator') {
         let root: string | null = null  // asked on each write: /cd or a worktree move changes it
